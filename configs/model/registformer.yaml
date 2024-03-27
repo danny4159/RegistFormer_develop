@@ -1,0 +1,33 @@
+_target_: registformer.models.registformer_module.RegistFormerModule
+
+name: RegistFormer_A_to_B
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.0001
+  betas: [0.5, 0.999]
+  weight_decay: 0.0001
+
+netG_A:
+  _target_: registformer.models.components.networks_registformer.define_G
+  # input_nc: 1
+  # output_nc: 1
+  # ngf: 64
+  # norm: 'instance'
+  # use_dropout: False
+  # init_type: 'normal'
+
+netD_A:
+  _target_: registformer.models.components.networks_registformer.define_D
+  input_nc: 1
+  ndf: 64
+  norm: 'instance'
+  n_layers_D: 3
+  init_type: 'normal'
+
+params: # Other params
+  lambda_ctx: 1 # L1 loss
+  lambda_gan: 0.1 # Style loss
+  lambda_mind: 1 # L1-Smooth loss
+  reverse: ${data.reverse} # A->B if False, B->A if True
