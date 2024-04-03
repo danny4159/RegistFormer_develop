@@ -7,9 +7,10 @@ defaults:
 
 model_checkpoint:
   dirpath: ${paths.output_dir}/checkpoints
-  filename: "epoch_{epoch:03d}"
-  monitor: "val/ssim_B" # modified to look for best ssim
-  mode: "max" # maximum
+  filename: "epoch_{epoch:03d}-{val/fid_B.2f}-{val/nmi_B.2f}-{val/sharpness_B.2f}"
+  monitor: "val/fid_B" # modified to look for best ssim
+  save_top_k: 5
+  mode: "min" # max, min
   save_last: True
   auto_insert_metric_name: True
 

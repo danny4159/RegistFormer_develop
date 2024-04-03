@@ -829,7 +829,7 @@ class RegistFormer(nn.Module):
         dam_path = os.path.join(project_root, dam_path)
 
         if self.flow_type == "voxelmorph" or self.flow_type == "zero":
-            from registformer.models.components.voxelmorph import VxmDense
+            from src.models.components.voxelmorph import VxmDense
 
             device = "cuda"
             self.flow_estimator = VxmDense.load(path=flow_model_path, device=device)
@@ -846,7 +846,7 @@ class RegistFormer(nn.Module):
             assert dam_path != None
 
         if self.dam_type == "synthesis_meta":
-            from registformer.models.components.meta_synthesis import (
+            from src.models.components.meta_synthesis import (
                 SynthesisMetaModule,
             )
 

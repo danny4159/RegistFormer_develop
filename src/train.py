@@ -29,7 +29,7 @@ pyrootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 # more info: https://github.com/ashleve/pyrootutils
 # ------------------------------------------------------------------------------------ #
 
-from registformer import utils
+from src import utils
 from datetime import datetime
 
 log = utils.get_pylogger(__name__)

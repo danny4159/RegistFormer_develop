@@ -15,10 +15,10 @@ from tqdm import tqdm
 
 from matplotlib import pyplot as plt
 
-from registformer.models.components.autoencoder_kl import Encoder, AutoencoderKL
-from registformer.models.components.perceptual import PerceptualLoss
+from src.models.components.autoencoder_kl import Encoder, AutoencoderKL
+from src.models.components.perceptual import PerceptualLoss
 
-from registformer.data.components.transforms import dataset_IXI
+from src.data.components.transforms import dataset_IXI
 from torch.utils.data import DataLoader
 
 import matplotlib.pyplot as plt

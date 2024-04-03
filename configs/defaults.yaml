@@ -5,7 +5,7 @@
 defaults:
   - _self_
   - data: synthRAD_MR_CT_Pelvis.yaml # TODO: 수정 ixi.yaml / synthRAD_MR_CT_Pelvis.yaml
-  - model: cgan.yaml
+  - model: registformer.yaml
   - callbacks: default.yaml
   - logger: tensorboard.yaml
   - trainer: default.yaml

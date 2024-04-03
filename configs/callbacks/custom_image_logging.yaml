@@ -1,7 +1,5 @@
-# https://lightning.ai/docs/pytorch/latest/api/lightning.pytorch.callbacks.RichProgressBar.html
-
 ImageLoggingCallback:
-  _target_: registformer.callbacks.image_callback.ImageLoggingCallback
+  _target_: src.callbacks.image_callback.ImageLoggingCallback
   val_batch_idx: [20,30,35,40,44,65]
   tst_batch_idx: [15,20,30,40,48,70]
   center_crop: 192
@@ -9,9 +7,9 @@ ImageLoggingCallback:
   log_test: True # log test images
 
 ImageSavingCallback:
-  _target_: registformer.callbacks.image_callback.ImageSavingCallback
+  _target_: src.callbacks.image_callback.ImageSavingCallback
   center_crop: 256
   subject_number_length: 5
 
 WeightSavingCallback:
- _target_: registformer.callbacks.image_callback.WeightSavingCallback
+ _target_: src.callbacks.image_callback.WeightSavingCallback

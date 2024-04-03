@@ -1,22 +1,16 @@
 from typing import Any
 
 import torch
-from registformer.losses.gan_loss import GANLoss
-from registformer.losses.scgan_loss import MINDLoss
-from registformer.models.base_module_A_to_B import BaseModule_A_to_B
-from registformer import utils
-import numpy as np
+from src.losses.gan_loss import GANLoss
+from src.losses.scgan_loss import MINDLoss
+from src.models.base_module_A_to_B import BaseModule_A_to_B
+from src import utils
 
-from registformer.losses.contextual_loss import (
+from src.losses.contextual_loss import (
     Contextual_Loss,
 )  # this is the CX loss
 
 log = utils.get_pylogger(__name__)
-
-gray2rgb = lambda x: torch.cat((x, x, x), dim=1)
-
-import higher
-
 
 class RegistFormerModule(BaseModule_A_to_B):
     # 1. Regist: for real_B or fake_A
@@ -37,12 +31,6 @@ class RegistFormerModule(BaseModule_A_to_B):
         self.save_hyperparameters(logger=False, ignore=["netG_A", "netD_A"])
         self.automatic_optimization = False  # perform manual
         self.params = params
-
-        # if self.params.flag_register:
-        #     self.netR = Reg(1, 1)  # use registration inside the network (RegGAN)
-        #     self.spatial_transform = Transformer_2D()
-
-        self.params = params
         self.optimizer = optimizer
 
         # loss function
@@ -51,11 +39,9 @@ class RegistFormerModule(BaseModule_A_to_B):
 
         self.criterionGAN = GANLoss(gan_mode="lsgan", reduce=False)
 
-        self.criterionL1 = torch.nn.L1Loss(reduction="none")
-
         self.criterionMIND = MINDLoss()
 
-    def backward_G(self, real_a, real_b, fake_b, weight=None, reduce=False, gan=True):
+    def backward_G(self, real_a, real_b, fake_b):
 
         loss_CTX = self.criterionCTX(fake_b, real_b) * self.params.lambda_ctx
 

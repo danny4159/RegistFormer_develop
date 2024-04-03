@@ -1,6 +1,6 @@
-_target_: registformer.models.registformer_module.RegistFormerModule
+_target_: src.models.registformer_module.RegistFormerModule
 
-name: RegistFormer_A_to_B
+name: RegistFormer
 
 optimizer:
   _target_: torch.optim.Adam
@@ -10,7 +10,7 @@ optimizer:
   weight_decay: 0.0001
 
 netG_A:
-  _target_: registformer.models.components.networks_registformer.define_G
+  _target_: src.models.components.networks_registformer.define_G
   # input_nc: 1
   # output_nc: 1
   # ngf: 64
@@ -19,7 +19,7 @@ netG_A:
   # init_type: 'normal'
 
 netD_A:
-  _target_: registformer.models.components.networks_registformer.define_D
+  _target_: src.models.components.networks_registformer.define_D
   input_nc: 1
   ndf: 64
   norm: 'instance'

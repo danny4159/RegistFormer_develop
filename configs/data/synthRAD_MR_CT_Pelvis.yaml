@@ -1,4 +1,4 @@
-_target_: registformer.data.SynthRAD_MR_CT_Pelvis_datamodule.SynthRAD_MR_CT_Pelvis_DataModule
+_target_: src.data.SynthRAD_MR_CT_Pelvis_datamodule.SynthRAD_MR_CT_Pelvis_DataModule
 name: SynthRAD_MR_CT_Pelvis
 data_dir: ${paths.root_dir}/data/SynthRAD_MR_CT_Pelvis
 misalign_x: 0
