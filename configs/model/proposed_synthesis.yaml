@@ -1,0 +1,36 @@
+_target_: src.models.proposed_synthesis_module.ProposedSynthesisModule
+
+name: ProposedSynthesis
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.0001
+  betas: [0.5, 0.999]
+  weight_decay: 0.0001
+
+netG_A:
+  _target_: src.models.components.networks_define.define_G
+  netG_type: 'proposed_synthesis'
+  input_nc: 1
+  output_nc: 1
+  feat_ch: 64
+  demodulate: true
+  requires_grad: true
+
+netG_B:
+  _target_: src.models.components.networks_define.define_G
+  netG_type: 'proposed_synthesis'
+  input_nc: 1
+  output_nc: 1
+  feat_ch: 64
+  demodulate: true
+  requires_grad: true
+
+params: # Other params
+  lambda_style: 1
+  lambda_cycle_a: 1
+  lambda_cycle_b: 1
+  lambda_sc: 0.1
+  reverse: ${data.reverse} # A->B if False, B->A if True
+  half_val_test: ${data.half_val_test}
