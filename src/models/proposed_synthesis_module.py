@@ -15,17 +15,15 @@ from src.models.base_module_AtoB import BaseModule_AtoB
 log = utils.get_pylogger(__name__)
 
 gray2rgb = lambda x : torch.cat((x, x, x), dim=1)
-# class ProposedSynthesisModule(BaseModule_AtoB_BtoA):
 class ProposedSynthesisModule(BaseModule_AtoB):
 
     def __init__(
         self,
         netG_A: torch.nn.Module,
-        # netG_B: torch.nn.Module,
         netD_A: torch.nn.Module,
         optimizer,
         params,
-        schedulers,
+        scheduler,
         *args,
         **kwargs: Any
     ):
@@ -33,7 +31,6 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         
         # assign generator
         self.netG_A = netG_A
-        # self.netG_B = netG_B
         self.netD_A = netD_A
 
         self.save_hyperparameters(logger=False)
@@ -42,7 +39,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # also ensures init params will be stored in ckpt
         self.optimizer = optimizer
         self.params = params
-        self.schedulers = schedulers
+        self.scheduler = scheduler
 
         # assign contextual loss
         style_feat_layers = {
