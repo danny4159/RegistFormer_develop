@@ -39,40 +39,14 @@ class ProposedSynthesisModule(nn.Module):
             # nn.LeakyReLU(negative_slope=0.2, inplace=True),
             # nn.AdaptiveAvgPool2d(1), # style transfer에서 많이 쓰이는 개념.
         )
-
-        # 전체에 style_denorm
-        # self.conv0 = StyleConv(self.input_nc, self.feat_ch, self.feat_ch, kernel_size=3,
-        #                                     activate=True, demodulate=self.demodulate)
-        # self.conv11 = StyleConv(self.feat_ch, self.feat_ch, self.feat_ch, kernel_size=3,
-        #                         downsample=True, activate=True, demodulate=self.demodulate)
-        # self.conv12 = StyleConv(self.feat_ch, self.feat_ch, self.feat_ch, kernel_size=3,
-        #                         downsample=False, activate=True, demodulate=self.demodulate)
-        # self.conv21 = StyleConv(self.feat_ch, self.feat_ch, self.feat_ch, kernel_size=3,
-        #                         downsample=True, activate=True, demodulate=self.demodulate)
-        # self.conv22 = StyleConv(self.feat_ch, self.feat_ch, self.feat_ch, kernel_size=3,
-        #                         downsample=False, activate=True, demodulate=self.demodulate)
-        # self.conv31 = StyleConv(self.feat_ch, self.feat_ch, self.feat_ch, kernel_size=3,
-        #                         downsample=False, activate=True, demodulate=self.demodulate)
-        # self.conv32 = StyleConv(self.feat_ch, self.feat_ch, self.feat_ch, kernel_size=3,
-        #                         downsample=False, activate=True, demodulate=self.demodulate)
-        # self.conv41 = StyleConv(self.feat_ch, self.feat_ch, self.feat_ch, kernel_size=3,
-        #                         upsample=True, activate=True, demodulate=self.demodulate)
-        # self.conv42 = StyleConv(self.feat_ch, self.feat_ch, self.feat_ch, kernel_size=3,
-        #                         upsample=False, activate=True, demodulate=self.demodulate)
-        # self.conv51 = StyleConv(self.feat_ch, self.feat_ch, self.feat_ch, kernel_size=3,
-        #                         upsample=True, activate=True, demodulate=self.demodulate)
-        # self.conv52 = StyleConv(self.feat_ch, self.feat_ch, self.feat_ch, kernel_size=3,
-        #                         upsample=False, activate=True, demodulate=self.demodulate)
-        # self.conv6 = StyleConv(self.feat_ch, self.feat_ch, self.output_nc, kernel_size=3,
-        #                         activate=False, demodulate=self.demodulate)
         
         # 일부분에만 style_denorm -> 21, 22, 31, 32에만 적용
         self.conv0 = StyleConv(self.input_nc, self.feat_ch, kernel_size=3,
-                                                 activate=True, demodulate=self.demodulate, style_denorm=False)
+                                                 activate=True, demodulate=self.demodulate)
         self.conv11 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                downsample=True, activate=True, demodulate=self.demodulate)
         self.conv12 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                downsample=False, activate=True, demodulate=self.demodulate)
         self.conv21 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                 downsample=True, activate=True, demodulate=self.demodulate)
         self.conv22 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
@@ -82,15 +56,15 @@ class ProposedSynthesisModule(nn.Module):
         self.conv32 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                 downsample=False, activate=True, demodulate=self.demodulate)
         self.conv41 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3, #feat_ch *4는 변치않게
-                                upsample=True, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                upsample=True, activate=True, demodulate=self.demodulate)
         self.conv42 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                upsample=False, activate=True, demodulate=self.demodulate)
         self.conv51 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                upsample=True, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                upsample=True, activate=True, demodulate=self.demodulate)
         self.conv52 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                upsample=False, activate=True, demodulate=self.demodulate)
         self.conv6 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                activate=False, demodulate=self.demodulate, style_denorm=False)
+                                activate=False, demodulate=self.demodulate)
 
 
         self.conv_final = nn.Conv2d(self.feat_ch, self.output_nc, kernel_size=3, padding=1)

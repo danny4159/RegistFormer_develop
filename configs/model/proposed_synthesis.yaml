@@ -9,6 +9,12 @@ optimizer:
   betas: [0.5, 0.999]
   weight_decay: 0.0001
 
+scheduler:
+  _target_: torch.optim.lr_scheduler.MultiStepLR
+  _partial_: true
+  milestones: [250000, 300000]
+  gamma: 0.5
+
 netG_A:
   _target_: src.models.components.networks_define.define_G
   netG_type: 'proposed_synthesis'

@@ -25,6 +25,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         netD_A: torch.nn.Module,
         optimizer,
         params,
+        schedulers,
         *args,
         **kwargs: Any
     ):
@@ -41,13 +42,14 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # also ensures init params will be stored in ckpt
         self.optimizer = optimizer
         self.params = params
+        self.schedulers = schedulers
 
         # assign contextual loss
         style_feat_layers = {
-            # "conv_2_2": 1.0,
-            # "conv_3_2": 1.0,
-            # "conv_4_2": 1.0,
-            "conv_4_4": 1.0
+            "conv_2_2": 1.0,
+            "conv_3_2": 1.0,
+            "conv_4_2": 1.0,
+            # "conv_4_4": 1.0
         }
 
         # loss function
@@ -79,7 +81,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # loss_G = loss_style + loss_cycle_A + loss_cycle_B + loss_sc # + loss_cycle_style
         # loss_G = loss_style # + loss_sc # + loss_cycle_style
         # loss_G = loss_gan + loss_style + loss_sc
-        loss_G = loss_gan + loss_style + loss_l1 # loss_sc +
+        loss_G = loss_gan + loss_style # + loss_l1 # loss_sc +
 
         return loss_G
 
@@ -94,6 +96,9 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             # loss_G = self.backward_G(real_a, real_b, fake_a, fake_b, self.params.lambda_style, self.params.lambda_cycle_a, self.params.lambda_cycle_b, self.params.lambda_sc)
             loss_G = self.backward_G(real_a, real_b, fake_b, self.params.lambda_style, self.params.lambda_cycle_a, self.params.lambda_cycle_b, self.params.lambda_sc)
             self.manual_backward(loss_G)
+            self.clip_gradients(
+                optimizer_G, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+            )
             optimizer_G.step()
             optimizer_G.zero_grad()
             
@@ -103,9 +108,9 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         with optimizer_D_A.toggle_model(): 
             loss_D_A = self.backward_D_A(real_b, fake_b)
             self.manual_backward(loss_D_A)
-            # self.clip_gradients(
-            #     optimizer_D_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-            # )
+            self.clip_gradients(
+                optimizer_D_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+            )
             optimizer_D_A.step()
             optimizer_D_A.zero_grad()
         self.log("Disc_A_Loss", loss_D_A.detach(), prog_bar=True)
@@ -117,8 +122,22 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         Examples:
             https://lightning.ai/docs/pytorch/latest/common/lightning_module.html#configure-optimizers
         """
+        optimizers = []
+        schedulers = []
+        
         # optimizer_G = self.hparams.optimizer(params=itertools.chain(self.netG_A.parameters(), self.netG_B.parameters()))
         optimizer_G = self.hparams.optimizer(params=self.netG_A.parameters())
+        optimizers.append(optimizer_G)
         optimizer_D_A = self.hparams.optimizer(params=self.netD_A.parameters())
+        optimizers.append(optimizer_D_A)
 
-        return optimizer_G, optimizer_D_A
+        if self.hparams.scheduler is not None:
+            scheduler_G = self.hparams.scheduler(optimizer=optimizer_G)
+            schedulers.append(scheduler_G)
+
+            scheduler_D = self.hparams.scheduler(optimizer=optimizer_D_A)
+            schedulers.append(scheduler_D)
+            
+        return optimizers, schedulers
+
+        # return optimizer_G, optimizer_D_A
