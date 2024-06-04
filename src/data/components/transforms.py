@@ -209,7 +209,7 @@ class dataset_SynthRAD_MR_CT_Pelvis(Dataset):
             _, h, w = A.shape
             # A, B = even_crop(A, B, (256,256)) # under nearest multiple of 14 # TODO: resvit돌리기위한 코드
             A, B = even_crop(
-                A, B, (h // 16 * 16, w // 16 * 16)
+                A, B, (h // 16 * 16, w // 16 * 16) # 16의 배수로
             )  # under nearest multiple of 16 # adaconv랑 다른것들도 다 이거
             # A, B = even_crop(A, B, (h//4*4,w//4*4)) # under nearest multiple of 16
             # A, B = random_crop(A, B, (h//4*4,w//4*4)) # under nearest multiple of four

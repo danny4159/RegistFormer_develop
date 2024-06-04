@@ -203,7 +203,6 @@ def init_net(
     net,
     init_type="normal",
     init_gain=0.02,
-    gpu_ids=[],
     debug=False,
     initialize_weights=True,
 ):
@@ -212,51 +211,38 @@ def init_net(
         net (network)      -- the network to be initialized
         init_type (str)    -- the name of an initialization method: normal | xavier | kaiming | orthogonal
         gain (float)       -- scaling factor for normal, xavier and orthogonal.
-        gpu_ids (int list) -- which GPUs the network runs on: e.g., 0,1,2
 
     Return an initialized network.
     """
-    if len(gpu_ids) > 0:
-        assert torch.cuda.is_available()
-        net.to(gpu_ids[0])
-        # if not amp:
-        # net = torch.nn.DataParallel(net, gpu_ids)  # multi-GPUs for non-AMP training
     if initialize_weights:
         init_weights(net, init_type, init_gain=init_gain, debug=debug)
     return net
 
 
 def define_G(
-    feat_dim=14,
-    ref_ch=1,
-    src_ch=1,
-    out_ch=1,
-    nhead=2,
-    mlp_ratio=2,
-    pos_en_flag=False,
-    k_size=28,
-    attn_type="softmax",
-    daca_loc=None,
-    flow_type="voxelmorph",
-    dam_type="synthesis_meta",
-    fuse_type=None,
-    init_type="normal",
-    init_gain=0.02,
-    gpu_ids=[],
+    feat_dim,
+    ref_ch,
+    src_ch,
+    out_ch,
+    nhead,
+    mlp_ratio,
+    pos_en_flag,
+    k_size,
+    attn_type,
+    daca_loc,
+    flow_type,
+    dam_type,
+    fuse_type,
+    flow_model_path,
+    flow_ft,
+    dam_ft,
+    dam_path,
+    dam_feat,
+    main_ft,
+    init_type,
+    init_gain,
     **kwargs,
-    # input_nc,
-    # output_nc,
-    # ngf,
-    # netG="resnet_4blocks",
-    # norm="batch",
-    # use_dropout=False,
-    # no_antialias=False,
-    # no_antialias_up=False,
-    # opt=None,
-    # fuse=True,
-    # shared_decoder=False,
-    # vit_name='Res-ViT-B_14',
-    # fine_size=192,
+
 ):
     net = None
     net = RegistFormer(
@@ -273,10 +259,16 @@ def define_G(
         flow_type=flow_type,
         dam_type=dam_type,
         fuse_type=fuse_type,
+        flow_model_path=flow_model_path,
+        flow_ft=flow_ft,
+        dam_ft=dam_ft,
+        dam_path=dam_path,
+        dam_feat=dam_feat,
+        main_ft=main_ft,
         **kwargs,
     )
 
-    return init_net(net, init_type, init_gain, gpu_ids, initialize_weights=True)
+    return init_net(net, init_type, init_gain, initialize_weights=True)
 
 
 def define_D(
@@ -288,7 +280,6 @@ def define_D(
     init_type="normal",
     init_gain=0.02,
     no_antialias=False,
-    gpu_ids=[],
     opt=None,
 ):
     """Create a discriminator
@@ -301,7 +292,6 @@ def define_D(
         norm (str)         -- the type of normalization layers used in the network.
         init_type (str)    -- the name of the initialization method.
         init_gain (float)  -- scaling factor for normal, xavier and orthogonal.
-        gpu_ids (int list) -- which GPUs the network runs on: e.g., 0,1,2
 
     Returns a discriminator
 
@@ -346,7 +336,7 @@ def define_D(
             "Discriminator model name [%s] is not recognized" % netD
         )
     return init_net(
-        net, init_type, init_gain, gpu_ids, initialize_weights=("stylegan2" not in netD)
+        net, init_type, init_gain, initialize_weights=("stylegan2" not in netD)
     )
 
 
@@ -796,18 +786,18 @@ def flow_guide_sampler(
 class RegistFormer(nn.Module):
     def __init__(
         self,
-        feat_dim=128,
+        feat_dim=14,
         ref_ch=1,
         src_ch=1,
         out_ch=1,
-        nhead=8,
+        nhead=2,
         mlp_ratio=2,
-        pos_en_flag=True,
-        k_size=5,
+        pos_en_flag=False,
+        k_size=28,
         attn_type="softmax",
         daca_loc=None,
         flow_type="voxelmorph",
-        dam_type="dam",
+        dam_type="synthesis_meta",
         fuse_type=None,
         flow_model_path="pretrained/registration/Voxelmorph_Loss_MSE_MaskMSE1_0075.pt",
         flow_ft=False,
@@ -917,6 +907,22 @@ class RegistFormer(nn.Module):
                 if "flow_estimator" not in key and "DAM" not in key:
                     param.requires_grad = True
 
+    def pad_tensor_to_multiple(self, tensor, height_multiple, width_multiple):
+            _, _, h, w = tensor.shape
+            h_pad = (height_multiple - h % height_multiple) % height_multiple
+            w_pad = (width_multiple - w % width_multiple) % width_multiple
+
+            # Pad the tensor
+            padded_tensor = F.pad(
+                tensor, (0, w_pad, 0, h_pad), mode="constant", value=-1
+            )
+
+            return padded_tensor, (h_pad, w_pad)
+
+    def crop_tensor_to_original(self, tensor, padding):
+        h_pad, w_pad = padding
+        return tensor[:, :, : tensor.shape[2] - h_pad, : tensor.shape[3] - w_pad]
+
     def forward(self, src, ref, mask=None):
         assert (
             src.shape == ref.shape
@@ -924,13 +930,13 @@ class RegistFormer(nn.Module):
                                         mismatch."
         moved = None
 
-        if not self.training:
-            N, C, H, W = src.shape
-            mod_size = 4
-            H_pad = mod_size - H % mod_size if not H % mod_size == 0 else 0
-            W_pad = mod_size - W % mod_size if not W % mod_size == 0 else 0
-            src = F.pad(src, (0, W_pad, 0, H_pad), "replicate")
-            ref = F.pad(ref, (0, W_pad, 0, H_pad), "replicate")
+        # if not self.training:
+        #     N, C, H, W = src.shape
+        #     mod_size = 4
+        #     H_pad = mod_size - H % mod_size if not H % mod_size == 0 else 0
+        #     W_pad = mod_size - W % mod_size if not W % mod_size == 0 else 0
+        #     src = F.pad(src, (0, W_pad, 0, H_pad), "replicate")
+        #     ref = F.pad(ref, (0, W_pad, 0, H_pad), "replicate")
 
         if self.dam_type == "dam":
             src = self.DAM(src, ref)  # [4, 3, 256, 256]
@@ -948,36 +954,13 @@ class RegistFormer(nn.Module):
                 "Invalid dam_type provided. Expected 'dam' or 'synthesis_meta'."
             )
 
-        #####################################################################
-        def pad_tensor_to_multiple(tensor, height_multiple, width_multiple):
-            _, _, h, w = tensor.shape
-            h_pad = (height_multiple - h % height_multiple) % height_multiple
-            w_pad = (width_multiple - w % width_multiple) % width_multiple
-
-            # Pad the tensor
-            padded_tensor = F.pad(
-                tensor, (0, w_pad, 0, h_pad), mode="constant", value=-1
-            )
-
-            return padded_tensor, (h_pad, w_pad)
-
-        def crop_tensor_to_original(tensor, padding):
-            h_pad, w_pad = padding
-            return tensor[:, :, : tensor.shape[2] - h_pad, : tensor.shape[3] - w_pad]
-
-        #####################################################################
-
         # with torch.no_grad():
         #     flow = self.flow_estimator(src, ref).detach()
-        if self.flow_type != "raft":  # voxelmorph, zero
+        if self.flow_type in ["voxelmorph", "zero"]:
             if self.dam_type == "synthesis_meta" or self.dam_type == "dam":
-                src, moving_padding = pad_tensor_to_multiple(
-                    src, height_multiple=768, width_multiple=576
-                )
-                ref, fixed_padding = pad_tensor_to_multiple(
-                    ref, height_multiple=768, width_multiple=576
-                )
-
+                src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=768, width_multiple=576)
+                ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=768, width_multiple=576)
+                
                 if self.flow_type == "zero":
                     moved, flow = self.flow_estimator(
                         ref, src, registration=True
@@ -987,24 +970,21 @@ class RegistFormer(nn.Module):
                         src, ref, registration=True
                     )  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
 
-                moved, _ = self.flow_estimator(
-                    ref, src, registration=True
-                )  # ref -> src moved image 그냥 시각화하기 위해(save위해)
-                moved = crop_tensor_to_original(moved, fixed_padding)
-                src = crop_tensor_to_original(src, fixed_padding)
-                ref = crop_tensor_to_original(ref, fixed_padding)
-                flow = crop_tensor_to_original(flow, fixed_padding)
+                moved, _ = self.flow_estimator(ref, src, registration=True)  # ref -> src moved image 그냥 시각화하기 위해(save위해)
+                moved = self.crop_tensor_to_original(moved, fixed_padding)
+                src = self.crop_tensor_to_original(src, fixed_padding)
+                ref = self.crop_tensor_to_original(ref, fixed_padding)
+                flow = self.crop_tensor_to_original(flow, fixed_padding)
                 if self.flow_type == "zero":
                     flow = torch.zeros_like(flow)  # Zeroflow version
 
             elif self.dam_type == "dam_misalign":
-                src_origin, moving_padding = pad_tensor_to_multiple(
-                    src_origin, height_multiple=768, width_multiple=576
+                src_origin, moving_padding = self.pad_tensor_to_multiple(src_origin, height_multiple=768, width_multiple=576
                 )
-                ref_to_src, fixed_padding = pad_tensor_to_multiple(
+                ref_to_src, fixed_padding = self.pad_tensor_to_multiple(
                     ref_to_src, height_multiple=768, width_multiple=576
                 )
-                ref, fixed_padding = pad_tensor_to_multiple(
+                ref, fixed_padding = self.pad_tensor_to_multiple(
                     ref, height_multiple=768, width_multiple=576
                 )
 
@@ -1014,10 +994,9 @@ class RegistFormer(nn.Module):
                 )
                 moved = self.flow_estimator.transformer(ref, flow_mr)
 
-                ref = crop_tensor_to_original(ref, fixed_padding)
-                moved = crop_tensor_to_original(moved, fixed_padding)
-                flow = crop_tensor_to_original(flow, fixed_padding)
-
+                ref = self.crop_tensor_to_original(ref, fixed_padding)
+                moved = self.crop_tensor_to_original(moved, fixed_padding)
+                flow = self.crop_tensor_to_original(flow, fixed_padding)
             else:
                 raise ValueError("Invalid dam_type")
         else:
@@ -1079,8 +1058,8 @@ class RegistFormer(nn.Module):
         out = self.conv6(f5)
         out = torch.tanh(out)  # 내가 추가한 코드
 
-        if not self.training:
-            out = out[:, :, :H, :W]
+        # if not self.training:
+        #     out = out[:, :, :H, :W]
 
         # if moved is None:
         #     return out, src, out

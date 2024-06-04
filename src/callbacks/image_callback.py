@@ -1,6 +1,7 @@
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 from torchvision.utils import make_grid
 from torchvision.transforms import CenterCrop
+from torchvision.transforms.functional import resize
 import torch
 from typing import Any, List, Optional
 from lightning.pytorch import Callback
@@ -8,8 +9,6 @@ from src import utils
 import numpy as np
 import nibabel as nib
 import h5py
-
-
 import os
 
 log = utils.get_pylogger(__name__)
@@ -23,6 +22,7 @@ class ImageLoggingCallback(Callback):
         center_crop: int = 256,
         every_epoch=5,
         log_test: bool = False,
+        half_val_test: bool = False,
     ):
         """_summary_
 
@@ -37,6 +37,35 @@ class ImageLoggingCallback(Callback):
         self.every_epoch = every_epoch
         self.log_test = log_test  # log images on the testing stage as well
         self.center_crop = center_crop  # center crop the images to this size
+        self.half_val_test = half_val_test
+        print("half_val_test: ", half_val_test)
+
+    def saving_to_grid(self, res):
+        if len(res) == 4:
+            self.ngrid = 4
+            a, b, preds_a, preds_b = res
+            err_a = torch.abs(a - preds_a)
+            err_b = torch.abs(b - preds_b)
+
+            self.img_grid.extend([
+                (a[0] + 1) / 2,
+                (preds_a[0] + 1) / 2,
+                (b[0] + 1) / 2,
+                (preds_b[0] + 1) / 2,
+            ])
+            self.err_grid.extend([err_a[0], err_b[0]])
+
+        elif len(res) == 3:
+            self.ngrid = 3
+            a, b, preds_b = res
+            err_b = torch.abs(b - preds_b)
+
+            self.img_grid.extend([
+                (a[0] + 1) / 2,
+                (preds_b[0] + 1) / 2,
+                (b[0] + 1) / 2,
+            ])
+            self.err_grid.extend([err_b[0]])
 
     def on_validation_start(self, trainer, pl_module):
         self.img_grid = []
@@ -47,55 +76,45 @@ class ImageLoggingCallback(Callback):
             batch_idx in self.val_batch_idx
             and trainer.current_epoch % self.every_epoch == 0
         ):
-            res = pl_module.model_step(batch)
+            if self.half_val_test:
+                half_size = batch[0].shape[2] // 2
+                first_half = [x[:, :, :half_size, :] for x in batch]
+                second_half = [x[:, :, half_size:, :] for x in batch]
 
-            if len(res) >= 4:
-                a, b, preds_a, preds_b = res[:4]
-                self.ngrid = 4
-                # if size of a is bigger than centercrop, then center crop
-                # if a.shape[-1] > self.center_crop:
-                #     a = CenterCrop(self.center_crop)(a)
-                #     b = CenterCrop(self.center_crop)(b)
-                #     preds_a = CenterCrop(self.center_crop)(preds_a)
-                #     preds_b = CenterCrop(self.center_crop)(preds_b)
+                res_first_half = pl_module.model_step(first_half)
+                res_second_half = pl_module.model_step(second_half)
 
-                err_a = torch.abs(a - preds_a)
-                err_b = torch.abs(b - preds_b)
+                if len(res_first_half) == 4 and len(res_second_half) == 4:
+                    a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
+                    b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
+                    preds_a = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
+                    preds_b = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
+                    self.saving_to_grid([a, b, preds_a, preds_b])
+                elif len(res_first_half) == 3 and len(res_second_half) == 3:
+                    a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
+                    b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
+                    preds_b = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
+                    self.saving_to_grid([a, b, preds_b])
+            else:
+                res = pl_module.model_step(batch)
+                self.saving_to_grid(res)
 
-                # log.info(f'a shape: <{a.shape}>, b shape: <{b.shape}>, preds_a shape: <{preds_a.shape}>, preds_b shape: <{preds_b.shape}>')
+            # # 이미지 크기 다를 때
+            #  # 초기 이미지 크기를 설정합니다.
+            # if len(self.img_grid) == 0:
+            #     self.first_image_size = a[0].shape[1:3]  # 첫 번째 이미지의 크기를 저장합니다.
 
-                # log outputs to the tensorboard
+            # # 이미지 크기 조정과 함께 그리드에 이미지를 추가합니다.
+            # for img in [a[0], preds_b[0], b[0]]:
+            #     img = (img + 1) / 2
+            #     resized_img = resize(img, self.first_image_size)  # 첫 번째 이미지 크기로 조정
+            #     self.img_grid.append(resized_img)
 
-                self.img_grid = self.img_grid + [
-                    (a[0] + 1) / 2,
-                    (preds_a[0] + 1) / 2,
-                    (b[0] + 1) / 2,
-                    (preds_b[0] + 1) / 2,
-                ]
-                self.err_grid = self.err_grid + [err_a[0], err_b[0]]
-
-            elif len(res) == 3:
-                a, b, preds_b = res
-                self.ngrid = 3
-                # a, b, preds_a, preds_b = pl_module.model_step(batch)
-
-                # if a.shape[-1] > self.center_crop:
-                #     a = CenterCrop(self.center_crop)(a)
-                #     b = CenterCrop(self.center_crop)(b)
-                #     preds_b = CenterCrop(self.center_crop)(preds_b)
-
-                err_b = torch.abs(b - preds_b)
-
-                # log.info(f'a shape: <{a.shape}>, b shape: <{b.shape}>, preds_a shape: <{preds_a.shape}>, preds_b shape: <{preds_b.shape}>')
-
-                # log outputs to the tensorboard
-
-                self.img_grid = self.img_grid + [
-                    (a[0] + 1) / 2,
-                    (preds_b[0] + 1) / 2,
-                    (b[0] + 1) / 2,
-                ]
-                self.err_grid = self.err_grid + [err_b[0]]
+            # # 오차 이미지를 처리합니다.
+            # err_b = torch.abs(b - preds_b)[0]
+            # resized_err = resize(err_b, self.first_image_size)
+            # self.err_grid.append(resized_err)
+            
 
     def on_validation_epoch_end(self, trainer, pl_module) -> None:
         if len(self.img_grid) > 0 and trainer.current_epoch % self.every_epoch == 0:
@@ -125,41 +144,39 @@ class ImageLoggingCallback(Callback):
         if (
             self.log_test and batch_idx in self.tst_batch_idx
         ):  # log every indexes for slice number in test set
-            res = pl_module.model_step(batch)
-            if len(res) >= 4:
-                self.ngrid = 4
-                a, b, preds_a, preds_b = res[:4]
+            if self.half_val_test:
+                half_size = batch[0].shape[2] // 2
+                first_half = [x[:, :, :half_size, :] for x in batch]
+                second_half = [x[:, :, half_size:, :] for x in batch]
 
-                # if size of a is bigger than centercrop, then center crop
-                # if a.shape[-1] > self.center_crop:
-                #     a = CenterCrop(self.center_crop)(a)
-                #     b = CenterCrop(self.center_crop)(b)
-                #     preds_a = CenterCrop(self.center_crop)(preds_a)
-                #     preds_b = CenterCrop(self.center_crop)(preds_b)
+                res_first_half = pl_module.model_step(first_half)
+                res_second_half = pl_module.model_step(second_half)
 
-                # log.info(f'a shape: <{a.shape}>, b shape: <{b.shape}>, preds_a shape: <{preds_a.shape}>, preds_b shape: <{preds_b.shape}>')
+                if len(res_first_half) == 4 and len(res_second_half) == 4:
+                    a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
+                    b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
+                    preds_a = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
+                    preds_b = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
+                    self.saving_to_grid([a, b, preds_a, preds_b])
+                elif len(res_first_half) == 3 and len(res_second_half) == 3:
+                    a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
+                    b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
+                    preds_b = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
+                    self.saving_to_grid([a, b, preds_b])
+                else:
+                    res = None
+            else:
+                res = pl_module.model_step(batch)
+                self.saving_to_grid(res)
+            
+            # if len(self.img_grid) == 0:
+            #     self.first_image_size = a[0].shape[1:3] 
 
-                # log outputs to the tensorboard
-                self.img_grid = self.img_grid + [
-                    (a[0] + 1) / 2,
-                    (preds_a[0] + 1) / 2,
-                    (b[0] + 1) / 2,
-                    (preds_b[0] + 1) / 2,
-                ]
-            elif len(res) == 3:
-                self.ngrid = 3
-                a, b, preds_b = res
+            # for img in [a[0], preds_b[0], b[0]]:
+            #     img = (img + 1) / 2  # normalize to [0, 1] for visualization
+            #     img = resize(img, self.first_image_size)
+            #     self.img_grid.append(img)
 
-                # if a.shape[-1] > self.center_crop:
-                #     a = CenterCrop(self.center_crop)(a)
-                #     b = CenterCrop(self.center_crop)(b)
-                #     preds_b = CenterCrop(self.center_crop)(preds_b)
-
-                self.img_grid = self.img_grid + [
-                    (a[0] + 1) / 2,
-                    (preds_b[0] + 1) / 2,
-                    (b[0] + 1) / 2,
-                ]
 
     def on_test_end(self, trainer, pl_module):
         log.info(f"Saving test img_grid shape: <{len(self.img_grid)}>")
@@ -174,7 +191,12 @@ class ImageLoggingCallback(Callback):
 
 
 class ImageSavingCallback(Callback):
-    def __init__(self, center_crop: int = 256, subject_number_length: int = 3):
+    def __init__(self, 
+                 center_crop: int = 256, 
+                 subject_number_length: int = 3, 
+                 test_file: str = None,
+                 half_val_test: bool = False,
+                 ):
         """_summary_
         Image saving callback : Save images in nii format for each subject
 
@@ -182,6 +204,9 @@ class ImageSavingCallback(Callback):
         super().__init__()
         self.center_crop = center_crop  # center crop the images to this size
         self.subject_number_length = subject_number_length
+        self.test_file = test_file
+        self.half_val_test = half_val_test
+        print("test_file: ", test_file)
 
     @staticmethod
     def change_torch_numpy(a, b, c, d):
@@ -248,6 +273,55 @@ class ImageSavingCallback(Callback):
             )
         return
 
+    def saving_to_nii(self, a, b, preds_a, preds_b=None):
+        if preds_a is None:
+            preds_a = torch.zeros_like(a)
+        if preds_b is None:
+            preds_b = torch.zeros_like(b)
+            
+        a, b, preds_a, preds_b = self.change_torch_numpy(a, b, preds_a, preds_b)
+        self.img_a.append(a)
+        self.img_b.append(b)
+        self.img_preds_a.append(preds_a)
+        if preds_b is not None:
+            self.img_preds_b.append(preds_b)
+
+        if len(self.img_a) == self.subject_slice_num[0]:
+            a_nii = np.stack(self.img_a, -1)
+            b_nii = np.stack(self.img_b, -1)
+            preds_a_nii = np.stack(self.img_preds_a, -1)
+            if preds_b is not None:
+                preds_b_nii = np.stack(self.img_preds_b, -1)
+            else:
+                preds_b_nii = a_nii * 0  # Placeholder if preds_b is None
+
+            # convert numpy to nii
+            a_nii, b_nii, preds_a_nii, preds_b_nii = self.change_numpy_nii(
+                a_nii, b_nii, preds_a_nii, preds_b_nii
+            )
+            # save nii image to (.nii) file
+            self.save_nii(
+                a_nii,
+                b_nii,
+                preds_a_nii,
+                preds_b_nii if preds_b is not None else None,
+                subject_number=self.dataset_list[0], # 환자이름으로저장
+                folder_path=self.save_folder_name,
+            )
+
+            # empty list
+            self.img_a = []
+            self.img_b = []
+            self.img_preds_a = []
+            if preds_b is not None:
+                self.img_preds_b = []
+            self.dataset_list.pop(0)
+            self.subject_slice_num.pop(0)
+
+        if self.subject_number > self.subject_number_length:
+            log.info(f"Saving test images up to {self.subject_number_length}")
+            return
+        
     def on_test_start(self, trainer, pl_module):
         # make save folder
         folder_name = os.path.join(trainer.default_root_dir, "results")
@@ -282,8 +356,8 @@ class ImageSavingCallback(Callback):
             "data",
             "SynthRAD_MR_CT_Pelvis",
             "test",
-            "prepared_data_0_0_0_0_0_ver3_final.h5",
-        )  # TODO: 데이터셋수정. 테스트할 데이터셋에 따라.
+            self.test_file,
+        )
         # h5 파일에서 MR 그룹의 모든 데이터셋을 리스트로 불러오기
         with h5py.File(data_path, "r") as file:
             mr_group = file["MR"]
@@ -295,145 +369,73 @@ class ImageSavingCallback(Callback):
             ]  # slice number를 리스트로 저장
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if self.half_val_test:
+            half_size = batch[0].shape[2] // 2
+            first_half = [x[:, :, :half_size, :] for x in batch]
+            second_half = [x[:, :, half_size:, :] for x in batch]
 
-        res = pl_module.model_step(batch)
-        if len(res) >= 4:
-            a, b, preds_a, preds_b = res[:4]
+            res_first_half = pl_module.model_step(first_half)
+            res_second_half = pl_module.model_step(second_half)
 
-            # # if size of a is bigger than centercrop, then center crop
-            # if a.shape[-1] > self.center_crop:
-            #     a = CenterCrop(self.center_crop)(a)
-            #     b = CenterCrop(self.center_crop)(b)
-            #     preds_a = CenterCrop(self.center_crop)(preds_a)
-            #     preds_b = CenterCrop(self.center_crop)(preds_b)
-
-            # Change a,b,preds_a,preds_b to numpy array
-            a, b, preds_a, preds_b = self.change_torch_numpy(a, b, preds_a, preds_b)
-
-            self.img_a.append(a)
-            self.img_b.append(b)
-            self.img_preds_a.append(preds_a)
-            self.img_preds_b.append(preds_b)
-
-            # if len(img_a) == 91, stack file and save to nii
-            if len(self.img_a) == self.subject_slice_num[0]:
-                # if len(self.img_a) == 91:
-                a_nii = np.stack(self.img_a, -1)
-                b_nii = np.stack(self.img_b, -1)
-                preds_a_nii = np.stack(self.img_preds_a, -1)
-                preds_b_nii = np.stack(self.img_preds_b, -1)
-                # convert numpy to nii
-                a_nii, b_nii, preds_a_nii, preds_b_nii = self.change_numpy_nii(
-                    a_nii, b_nii, preds_a_nii, preds_b_nii
-                )
-                # save nii image to (.nii) file
-                self.save_nii(
-                    a_nii,
-                    b_nii,
-                    preds_a_nii,
-                    preds_b_nii,
-                    subject_number=self.dataset_list[0],  # 환자이름으로저장
-                    # subject_number=self.subject_number, # original
-                    folder_path=self.save_folder_name,
-                )
-
-                # empty list
-                self.img_a = []
-                self.img_b = []
-                self.img_preds_a = []
-                self.img_preds_b = []
-                self.dataset_list.pop(0)
-                # self.subject_number += 1 # # original
-                self.subject_slice_num.pop(0)
-
-            if self.subject_number > self.subject_number_length:
-                log.info(f"Saving test images up to {self.subject_number_length}")
-                return
-
-        elif len(res) == 3:
-            a, b, preds_a = res
-
-            # # if size of a is bigger than centercrop, then center crop
-            # if a.shape[-1] > self.center_crop:
-            #     a = CenterCrop(self.center_crop)(a)
-            #     b = CenterCrop(self.center_crop)(b)
-            #     preds_a = CenterCrop(self.center_crop)(preds_a)
-
-            # Change a,b,preds_a to numpy array
-            a, b, preds_a, _ = self.change_torch_numpy(a, b, preds_a, a * 0)
-
-            self.img_a.append(a)
-            self.img_b.append(b)
-            self.img_preds_a.append(preds_a)
-
-            if len(self.img_a) == self.subject_slice_num[0]:
-                # if len(self.img_a) == 91:
-                a_nii = np.stack(self.img_a, -1)
-                b_nii = np.stack(self.img_b, -1)
-                preds_a_nii = np.stack(self.img_preds_a, -1)
-
-                # convert numpy to nii
-                a_nii, b_nii, preds_a_nii, _ = self.change_numpy_nii(
-                    a_nii, b_nii, preds_a_nii, a_nii * 0
-                )
-                # save nii image to (.nii) file
-                self.save_nii(
-                    a_nii,
-                    b_nii,
-                    preds_a_nii,
-                    None,
-                    subject_number=self.dataset_list[0],
-                    # subject_number=self.subject_number,
-                    folder_path=self.save_folder_name,
-                )
-
-                # empty list
-                self.img_a = []
-                self.img_b = []
-                self.img_preds_a = []
-                self.dataset_list.pop(0)
-                # self.subject_number += 1
-                self.subject_slice_num.pop(0)
-
-            if self.subject_number > self.subject_number_length:
-                log.info(f"Saving test images up to {self.subject_number_length}")
-                return
+            if len(res_first_half) == 4 and len(res_second_half) == 4:
+                a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
+                b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
+                preds_a = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
+                preds_b = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
+                self.saving_to_nii(a, b, preds_a, preds_b)
+            elif len(res_first_half) == 3 and len(res_second_half) == 3:
+                a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
+                b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
+                preds_b = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
+                self.saving_to_nii(a, b, preds_b)
         else:
-            raise NotImplementedError("This function has not been implemented yet.")
-        return
-
-
-class WeightSavingCallback(Callback):
-    """training batch마다 생성되는 weight를 npy로 저장"""
-
-    def on_train_start(self, trainer, pl_module):
-        # 트레이닝이 시작할 때 폴더를 생성합니다.
-        folder_name = os.path.join(trainer.default_root_dir, "results", "weights")
-        if not os.path.exists(folder_name):
-            os.makedirs(folder_name)
-        self.save_folder_name = folder_name
-
-        self.dataset = trainer.train_dataloader.dataset
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        # 현재 epoch 번호를 가져옵니다.
-        current_epoch = trainer.current_epoch
-
-        # `w` 가중치가 outputs에 있는지 확인합니다.
-        if "w" in outputs:
-            w = outputs["w"]
-
             res = pl_module.model_step(batch)
-            a, b, preds_b = res
+            if len(res) == 4:
+                a, b, preds_a, preds_b = res
+                self.saving_to_nii(a, b, preds_a, preds_b)
 
-            w_numpy = w.detach().cpu().numpy()
-            a_numpy = a.detach().cpu().numpy()
-            b_numpy = b.detach().cpu().numpy()
+            elif len(res) == 3:
+                a, b, preds_b = res
+                self.saving_to_nii(a, b, preds_b)
+                
+                # a, b, preds_a, _ = self.change_torch_numpy(a, b, preds_a, a*0)
 
-            w_a_b_numpy = np.concatenate((w_numpy, a_numpy, b_numpy), axis=0)
-            # 환자 ID와 슬라이스 인덱스를 추출합니다.
-            patient_idx, slice_idx = self.dataset.get_patient_slice_idx(batch_idx)
+                # self.img_a.append(a)
+                # self.img_b.append(b)
+                # self.img_preds_a.append(preds_a)
 
-            # 파일 이름에 환자 ID, 슬라이스 인덱스, epoch 번호를 포함하여 `w`를 저장합니다.
-            filename = f"weights_epoch{current_epoch}_patient{patient_idx}_slice{slice_idx}.npy"
-            np.save(os.path.join(self.save_folder_name, filename), w_a_b_numpy)
+                # if len(self.img_a) == self.subject_slice_num[0]:
+                # # if len(self.img_a) == 91:
+                #     a_nii = np.stack(self.img_a, -1)
+                #     b_nii = np.stack(self.img_b, -1)
+                #     preds_a_nii = np.stack(self.img_preds_a, -1)
+
+                #     # convert numpy to nii
+                #     a_nii, b_nii, preds_a_nii, _ = self.change_numpy_nii(
+                #         a_nii, b_nii, preds_a_nii, a_nii*0
+                #     )
+                #     # save nii image to (.nii) file
+                #     self.save_nii(
+                #         a_nii,
+                #         b_nii,
+                #         preds_a_nii,
+                #         None,
+                #         subject_number=self.dataset_list[0],
+                #         # subject_number=self.subject_number,
+                #         folder_path=self.save_folder_name,
+                #     )
+
+                #     # empty list
+                #     self.img_a = []
+                #     self.img_b = []
+                #     self.img_preds_a = []
+                #     self.dataset_list.pop(0)
+                #     # self.subject_number += 1
+                #     self.subject_slice_num.pop(0)
+                    
+                # if self.subject_number > self.subject_number_length:
+                #     log.info(f"Saving test images up to {self.subject_number_length}")
+                #     return
+            else:
+                raise NotImplementedError("This function has not been implemented yet.")
+            return

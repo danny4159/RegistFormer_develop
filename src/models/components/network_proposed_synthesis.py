@@ -15,31 +15,30 @@ class ProposedSynthesisModule(nn.Module):
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
-
-        # self.guide_net = nn.Sequential( # 이 conv들은 image의 style정보를 잘 대표하는 통계값이 나오도록 학습
+        
+        self.guide_net = nn.Sequential( # 이 conv들은 image의 style정보를 잘 대표하는 통계값이 나오도록 학습
             
-            
-            # nn.Conv2d(self.input_nc, self.feat_ch, kernel_size=3, stride=1, padding=1),
-            # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=2, padding=1),
-            # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=1, padding=1),
-            # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=2, padding=1),
-            # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=1, padding=1), # 원래 여기까지
-            # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=2, padding=1),
-            # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=1, padding=1),
-            # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=2, padding=1),
-            # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(self.input_nc, self.feat_ch, kernel_size=3, stride=1, padding=1),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=1, padding=1),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=1, padding=1), # 원래 여기까지
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=1, padding=1),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=1, padding=1),
             
             # nn.LeakyReLU(negative_slope=0.2, inplace=True),
             # nn.AdaptiveAvgPool2d(1), # style transfer에서 많이 쓰이는 개념.
-        # )
+        )
 
         # 전체에 style_denorm
         # self.conv0 = StyleConv(self.input_nc, self.feat_ch, self.feat_ch, kernel_size=3,
@@ -106,8 +105,8 @@ class ProposedSynthesisModule(nn.Module):
                 param.requires_grad = True
 
     def forward(self, x, ref):
-        # style_guidance = self.guide_net(ref) # [1, 128, 24, 20]
-        style_guidance = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True)
+        style_guidance = self.guide_net(ref) # [1, 128, 24, 20]
+        # style_guidance = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True)
 
         feat0 = self.conv0(x, style_guidance) # [1, 64, 384, 320]
         feat1 = self.conv11(feat0, style_guidance) # [1, 64, 192, 160]
@@ -179,18 +178,26 @@ class StyleConv(nn.Module):
 
         self.conv = nn.Conv2d(input_nc, feat_ch, kernel_size=3, padding=1)
 
-        self.batch_norm = nn.BatchNorm2d(feat_ch, affine=False)
-        # self.batch_norm = nn.InstanceNorm2d(feat_ch, affine=False) #TODO: adain은 이거 써 나중에 시도
+        # self.batch_norm = nn.BatchNorm2d(feat_ch, affine=False)
+        self.batch_norm = nn.InstanceNorm2d(feat_ch, affine=False) #TODO: adain은 이거 써 나중에 시도
+        # self.batch_norm = nn.SyncBatchNorm(feat_ch, affine=False)
 
         nhidden = 512
         self.mlp_shared = nn.Sequential(
             nn.Conv2d(feat_ch, nhidden, kernel_size=3, padding=1),
+            # nn.Conv2d(1, nhidden, kernel_size=3, padding=1),
             nn.ReLU()
         )
         self.mlp_gamma = nn.Conv2d(nhidden, feat_ch, kernel_size=3, padding=1)
         self.mlp_beta = nn.Conv2d(nhidden, feat_ch, kernel_size=3, padding=1)
 
         self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+        nn.init.constant_(self.mlp_gamma.weight, 0)
+        nn.init.constant_(self.mlp_gamma.bias, 1)
+        nn.init.constant_(self.mlp_beta.weight, 0)
+        nn.init.constant_(self.mlp_beta.bias, 0)
+
 
     def forward(self, x, style): # style: [1, 64, 1, 1]
 
@@ -212,8 +219,9 @@ class StyleConv(nn.Module):
             gamma = self.mlp_gamma(actv)
             beta = self.mlp_beta(actv)
 
+
             # 3. 거기서 감마 베타 나눠서 denorm
-            x = x * (1 + gamma) + beta
+            x = x * gamma + beta
         
         # activation (LeakyReLU)
         if self.activate:

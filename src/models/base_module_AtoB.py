@@ -128,7 +128,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             real_B = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
             fake_B = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
         else: 
-            real_A, real_B, fake_B, _, _ = self.model_step(batch)
+            real_A, real_B, fake_B = self.model_step(batch)
 
         self.test_gc_B.update(norm_to_uint8(real_A), norm_to_uint8(fake_B))
         nmi_score = self.test_nmi_B(flatten_to_1d(norm_to_uint8(real_A)), flatten_to_1d(norm_to_uint8(fake_B)))

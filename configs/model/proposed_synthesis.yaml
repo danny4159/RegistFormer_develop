@@ -14,18 +14,26 @@ netG_A:
   netG_type: 'proposed_synthesis'
   input_nc: 1
   output_nc: 1
-  feat_ch: 64
+  feat_ch: 256
   demodulate: true
   requires_grad: true
 
-netG_B:
-  _target_: src.models.components.networks_define.define_G
-  netG_type: 'proposed_synthesis'
+# netG_B:
+#   _target_: src.models.components.networks_define.define_G
+#   netG_type: 'proposed_synthesis'
+#   input_nc: 1
+#   output_nc: 1
+#   feat_ch: 256
+#   demodulate: true
+#   requires_grad: true
+
+netD_A:
+  _target_: src.models.components.networks_define.define_D
   input_nc: 1
-  output_nc: 1
-  feat_ch: 64
-  demodulate: true
-  requires_grad: true
+  ndf: 64
+  norm: 'instance'
+  n_layers_D: 3
+  init_type: 'normal'
 
 params: # Other params
   lambda_style: 1

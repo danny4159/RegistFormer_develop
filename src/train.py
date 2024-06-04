@@ -9,6 +9,7 @@ torch.set_float32_matmul_precision("high")
 
 from lightning import Callback, LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.loggers import Logger
+from pytorch_lightning.callbacks import ModelCheckpoint
 from omegaconf import DictConfig
 
 pyrootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
@@ -100,10 +101,16 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     if cfg.get("test"):
         log.info("Starting testing!")  # TODO: Test 할때 여기 조정하기.
 
-        if cfg.get("ckpt_path") != None:
+        if cfg.get("ckpt_path") is not None:
             ckpt_path = cfg.get("ckpt_path")
         else:
-            ckpt_path = trainer.checkpoint_callback.best_model_path
+            monitor_checkpoint = next((cb for cb in callbacks if isinstance(cb, ModelCheckpoint) and cb.monitor), None)
+            if monitor_checkpoint:
+                ckpt_path = monitor_checkpoint.best_model_path
+            else:
+                ckpt_path = None
+                log.warning("Monitoring checkpoint not found!")
+            # ckpt_path = trainer.checkpoint_callback.best_model_path
 
         if ckpt_path == "":
             log.warning("Best ckpt not found! Using current weights for testing...")
@@ -114,8 +121,8 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
         # if ckpt_path == "":
         #     log.warning("Best ckpt not found! Using current weights for testing...")
         #     ckpt_path = None
+        log.info(f"Ckpt path: {ckpt_path}")
         trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
-        log.info(f"Best ckpt path: {ckpt_path}")
 
     test_metrics = trainer.callback_metrics
 

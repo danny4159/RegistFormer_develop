@@ -1,15 +1,21 @@
 ImageLoggingCallback:
   _target_: src.callbacks.image_callback.ImageLoggingCallback
-  val_batch_idx: [20,30,35,40,44,65]
-  tst_batch_idx: [15,20,30,40,48,70]
-  center_crop: 192
+  val_batch_idx: [10,20,30,40,50,60] #ddp #[31,35,114,125,250,255] #SevereMisalign #[10,15,20,30,40,50]
+  tst_batch_idx: [10,20,30,40,50,60]
+  # val_batch_idx: [15,17,57,62,125,127] #ddp #[31,35,114,125,250,255] #SevereMisalign #[10,15,20,30,40,50]
+  # tst_batch_idx: [10,20,30,40,50,60]
+  # center_crop: 192
   every_epoch: 1 # log every 5 epochs
   log_test: True # log test images
+  half_val_test: ${data.half_val_test}
 
 ImageSavingCallback:
   _target_: src.callbacks.image_callback.ImageSavingCallback
-  center_crop: 256
+  # center_crop: 256
   subject_number_length: 5
+  test_file: ${data.test_file}
+  half_val_test: ${data.half_val_test}
 
-WeightSavingCallback:
- _target_: src.callbacks.image_callback.WeightSavingCallback
+## For meta-learning weight visualization
+# WeightSavingCallback:
+#  _target_: src.callbacks.image_callback.WeightSavingCallback
