@@ -62,16 +62,6 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         ## GAN Loss 내가 추가했음
         pred_fake = self.netD_A(fake_b.detach())
         loss_gan = self.criterionGAN(pred_fake, True)
-
-        ## Cycle loss
-        # # MR > CT > MR
-        # # rec_a = self.netG_A(fake_b, fake_a)
-        # rec_a = self.netG_A(fake_b, real_a)
-        # loss_cycle_A = self.criterionL1(real_a, rec_a) * lambda_cycle_a
-        # # CT > MR > CT
-        # # rec_b = self.netG_B(fake_a, fake_b) 
-        # rec_b = self.netG_B(fake_a, real_b) 
-        # loss_cycle_B = self.criterionL1(real_b, rec_b) * lambda_cycle_b
         
         ## Contextual loss
         # loss_style_A = self.style_loss(real_a, fake_a)
@@ -79,24 +69,17 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # loss_style = (loss_style_A + loss_style_B) * lambda_style
         loss_style =  loss_style_B * lambda_style
 
-        ## Cycle Contextual loss (오히려 성능저하)
-        # loss_cycle_style_A = self.style_loss(rec_b, real_b)
-        # loss_cycle_style_B = self.style_loss(rec_a, real_a)
-        # loss_cycle_style = (loss_cycle_style_A + loss_cycle_style_B) * lambda_cycle_style
-
         ## MIND feature loss
-        loss_sc_A = self.criterionMindFeature(real_a, fake_b)
-        # loss_sc_B = self.criterionMindFeature(real_b, fake_a)
-        # loss_sc = (loss_sc_A + loss_sc_B) * lambda_sc
-        loss_sc = loss_sc_A * lambda_sc
+        # loss_sc_A = self.criterionMindFeature(real_a, fake_b)
+        # loss_sc = loss_sc_A * lambda_sc
 
         ## L1 loss
-        loss_l1 = self.criterionL1(real_b, fake_b)
+        loss_l1 = self.criterionL1(real_b, fake_b) * 20
 
         # loss_G = loss_style + loss_cycle_A + loss_cycle_B + loss_sc # + loss_cycle_style
         # loss_G = loss_style # + loss_sc # + loss_cycle_style
         # loss_G = loss_gan + loss_style + loss_sc
-        loss_G = loss_gan + loss_style + loss_sc + loss_l1
+        loss_G = loss_gan + loss_style + loss_l1 # loss_sc +
 
         return loss_G
 
