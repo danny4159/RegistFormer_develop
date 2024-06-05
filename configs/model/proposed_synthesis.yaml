@@ -23,15 +23,7 @@ netG_A:
   feat_ch: 256
   demodulate: true
   requires_grad: true
-
-# netG_B:
-#   _target_: src.models.components.networks_define.define_G
-#   netG_type: 'proposed_synthesis'
-#   input_nc: 1
-#   output_nc: 1
-#   feat_ch: 256
-#   demodulate: true
-#   requires_grad: true
+  # init_type: 'kaiming'
 
 netD_A:
   _target_: src.models.components.networks_define.define_D
@@ -39,12 +31,41 @@ netD_A:
   ndf: 64
   norm: 'instance'
   n_layers_D: 3
-  init_type: 'normal'
+  init_type: 'normal' #'kaiming'
+
+# netG_NCE: # For PatchNCELoss
+#   _target_: src.models.components.networks_define.define_G
+#   netG_type: 'resnet_generator'
+#   input_nc: 1
+#   output_nc: 1
+#   ngf: 64
+#   normG: 'instance'
+#   no_dropout: True
+#   init_type: 'xavier'
+#   init_gain: 0.02
+#   no_antialias: False
+#   no_antialias_up: False
+
+netF_A: # For PatchNCELoss
+  _target_: src.models.components.networks_define.define_F
+  netF_type: 'mlp_sample'
+  # input_nc: 1
+  # normG: 'instance'
+  # no_dropout: true
+  # no_antialias: False
+  use_mlp: True
+  init_type: 'xavier'
+  init_gain: 0.02
+  nc: 256
+
+
 
 params: # Other params
   lambda_style: 1
-  lambda_cycle_a: 1
-  lambda_cycle_b: 1
-  lambda_sc: 0.1
+  # lambda_cycle_a: 1
+  # lambda_cycle_b: 1
+  # lambda_sc: 0.1
+  lambda_nce: 1
   reverse: ${data.reverse} # A->B if False, B->A if True
   half_val_test: ${data.half_val_test}
+  flip_equivariance: False

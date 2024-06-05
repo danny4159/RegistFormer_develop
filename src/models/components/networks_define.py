@@ -12,6 +12,8 @@ from src.models.components.network_spade import SPADEGenerator, ConvEncoder
 from src.models.components.network_adainGen import AdaINGen
 from src.models.components.network_dam import DAModule
 from src.models.components.network_proposed_synthesis import ProposedSynthesisModule
+from src.models.components.network_resnet_generator import ResnetGenerator
+from src.models.components.network_patch_sample_F import PatchSampleF
 # from src.models.components.networks_spade_danny import SPADEGenerator, ConvEncoder
 
 
@@ -237,6 +239,8 @@ def define_G(**kwargs):
         net = DAModule(**kwargs)
     elif kwargs.get('netG_type') == 'proposed_synthesis':
         net = ProposedSynthesisModule(**kwargs)
+    elif kwargs.get('netG_type') == 'resnet_generator':
+        net = ResnetGenerator(**kwargs)
     else:
         raise ValueError('This netG_type is not expected')
     return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
@@ -319,7 +323,14 @@ def define_E(**kwargs):
     
     return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
 
-
+def define_F(**kwargs):
+    net = None
+    if kwargs.get('netF_type') == 'mlp_sample':
+        net = PatchSampleF(**kwargs)
+    else:
+        raise ValueError('This netF_type is not expected')
+    
+    return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
 
 class NLayerDiscriminator(nn.Module):
     """Defines a PatchGAN discriminator"""

@@ -78,10 +78,11 @@ class ProposedSynthesisModule(nn.Module):
             for param in self.parameters():
                 param.requires_grad = True
 
-    def forward(self, x, ref):
+    def forward(self, x, ref, layers=[], encode_only=False):
         style_guidance = self.guide_net(ref) # [1, 128, 24, 20]
         # style_guidance = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True)
-
+        
+        feats = []
         feat0 = self.conv0(x, style_guidance) # [1, 64, 384, 320]
         feat1 = self.conv11(feat0, style_guidance) # [1, 64, 192, 160]
         feat1 = self.conv12(feat1, style_guidance) # [1, 128, 192, 160]
@@ -96,28 +97,26 @@ class ProposedSynthesisModule(nn.Module):
         feat6 = self.conv6(feat5 + feat0, style_guidance) # [1, 64, 384, 320]
         out = self.conv_final(feat6) # [1, 1, 384, 320]
         out = torch.tanh(out) # [1, 1, 384, 320]
-
-        return out
-    
-    # def forward(self, x, ref):
-    #     style_guidance = self.guide_net(ref) # [1,64,96,80]
         
-    #     feat0 = self.conv0(x, style_guidance) # [1, 64, 384, 320]
-    #     feat1 = self.conv11(feat0, style_guidance) # [1, 64, 192, 160]
-    #     feat1 = self.conv12(feat1, style_guidance) # [1, 64, 192, 160]
-    #     feat2 = self.conv21(feat1, style_guidance) # [1, 64, 96, 80]
-    #     feat2 = self.conv22(feat2, style_guidance) # [1, 64, 96, 80]
-    #     feat3 = self.conv31(feat2, style_guidance) # [1, 64, 96, 80]
-    #     feat3 = self.conv32(feat3, style_guidance) # [1, 64, 96, 80]
-    #     feat4 = self.conv41(feat3 + feat2, style_guidance) # [1, 64, 192, 160]
-    #     feat4 = self.conv42(feat4, style_guidance) # [1, 64, 192, 160]
-    #     feat5 = self.conv51(feat4 + feat1, style_guidance) # [1, 64, 384, 320]
-    #     feat5 = self.conv52(feat5, style_guidance) # [1, 64, 384, 320]
-    #     feat6 = self.conv6(feat5 + feat0, style_guidance) # [1, 64, 384, 320]
-    #     out = self.conv_final(feat6) # [1, 1, 384, 320]
-    #     out = torch.tanh(out) # [1, 1, 384, 320]
-
-    #     return out
+        if encode_only:
+            # Collect intermediate features based on specified layers
+            layers_dict = {
+                0: feat0,
+                1: feat1,
+                2: feat2,
+                3: feat3,
+                4: feat4,
+                5: feat5,
+                6: feat6,
+            }
+            for i in layers:
+                feats.append(layers_dict[i])
+            return feats
+        
+        # if layers:
+        #     return out, [feat0, feat1, feat2, feat3, feat4, feat5, feat6]
+    
+        return out
 
 
 class StyleConv(nn.Module):
@@ -167,11 +166,6 @@ class StyleConv(nn.Module):
 
         self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
-        # nn.init.constant_(self.mlp_gamma.weight, 0)
-        # nn.init.constant_(self.mlp_gamma.bias, 1)
-        # nn.init.constant_(self.mlp_beta.weight, 0)
-        # nn.init.constant_(self.mlp_beta.bias, 0)
-
 
     def forward(self, x, style): # style: [1, 64, 1, 1]
 
@@ -192,7 +186,6 @@ class StyleConv(nn.Module):
             actv = self.mlp_shared(style)
             gamma = self.mlp_gamma(actv)
             beta = self.mlp_beta(actv)
-
 
             # 3. 거기서 감마 베타 나눠서 denorm
             x = x * gamma + beta
