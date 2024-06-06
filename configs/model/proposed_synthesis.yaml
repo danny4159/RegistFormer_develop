@@ -22,8 +22,7 @@ netG_A:
   output_nc: 1
   feat_ch: 256
   demodulate: true
-  requires_grad: true
-  init_type: 'kaiming'
+  # init_type: 'kaiming'
 
 netD_A:
   _target_: src.models.components.networks_define.define_D
@@ -31,8 +30,7 @@ netD_A:
   ndf: 64
   norm: 'instance'
   n_layers_D: 3
-  init_type: 'kaiming' #'kaiming'
-  requires_grad: True
+  init_type: 'normal' #'kaiming'
 
 # netG_NCE: # For PatchNCELoss
 #   _target_: src.models.components.networks_define.define_G
@@ -54,7 +52,6 @@ netF_A: # For PatchNCELoss
   init_type: 'xavier' #'xavier'
   init_gain: 0.02
   nc: 256
-  requires_grad: True
 
 
 
@@ -67,3 +64,4 @@ params: # Other params
   reverse: ${data.reverse} # A->B if False, B->A if True
   half_val_test: ${data.half_val_test}
   flip_equivariance: False
+  batch_size: ${data.batch_size}

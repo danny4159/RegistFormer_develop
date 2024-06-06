@@ -51,7 +51,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             "conv_2_2": 1.0,
             "conv_3_2": 1.0,
             "conv_4_2": 1.0,
-            # "conv_4_4": 1.0
+            "conv_4_4": 1.0
         }
 
         # loss function
@@ -59,7 +59,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         self.criterionL1 = torch.nn.L1Loss()
         self.criterionMind = MINDLoss()       
         self.criterionGAN = GANLoss(gan_type='lsgan')
-        self.criterionNCE = PatchNCELoss(False, nce_T=0.07)
+        self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size)
 
         # PatchNCE specific initializations
         self.nce_layers = [0,2,4,6] # range: 0~6
@@ -67,23 +67,21 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # self.flipped_for_equivariance = False
 
     def backward_G(self, real_a, real_b, fake_b, lambda_style, lambda_nce):
+
         ## GAN Loss 내가 추가했음
         pred_fake = self.netD_A(fake_b.detach())
         loss_gan = self.criterionGAN(pred_fake, True)
-        
+
         ## Contextual loss
         loss_style_B = self.criterionContextual(real_b, fake_b)
         loss_style =  loss_style_B * lambda_style
 
-        ## L1 loss
-        # loss_l1 = self.criterionL1(real_b, fake_b) * 20
-
-        ## PatchNCE loss (real_a, fake_b)
+        # PatchNCE loss (real_a, fake_b)
         n_layers = len(self.nce_layers)
         feat_b = self.netG_A(fake_b, real_a, self.nce_layers, encode_only=True)
 
         flipped_for_equivariance = np.random.random() < 0.5
-        if self.flip_equivariance and flipped_for_equivariance: # TODO: flip_equivariance, flipped_for_equivariance 선언
+        if self.flip_equivariance and flipped_for_equivariance:
             feat_b = [torch.flip(fb, [3]) for fb in feat_b]
 
         feat_a = self.netG_A(real_a, real_b, self.nce_layers, encode_only=True)
@@ -95,11 +93,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             loss = self.criterionNCE(f_a, f_b) * lambda_nce
             total_nce_loss += loss.mean()
         loss_nce = total_nce_loss / n_layers
-        
 
-        loss_G = loss_gan + loss_style + loss_nce # + loss_l1 # loss_sc +
+        loss_G = loss_gan + loss_style + loss_nce
 
-        return loss_G
+        return loss_G, loss_gan, loss_style, loss_nce
 
     def training_step(self, batch: Any, batch_idx: int):
 
@@ -107,22 +104,25 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         real_a, real_b, fake_b = self.model_step(batch)
         
         with optimizer_G_A.toggle_model():
-            with optimizer_F_A.toggle_model():
-                loss_G = self.backward_G(real_a, real_b, fake_b, self.params.lambda_style, self.params.lambda_nce)
-                self.manual_backward(loss_G)
-                self.clip_gradients(
-                    optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-                )
-                self.clip_gradients(
-                    optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-                )
-                optimizer_G_A.step()
-                optimizer_F_A.step()
-                optimizer_G_A.zero_grad()
-                optimizer_F_A.zero_grad()
+            # with optimizer_F_A.toggle_model():
+            loss_G, loss_gan, loss_style, loss_nce = self.backward_G(real_a, real_b, fake_b, self.params.lambda_style, self.params.lambda_nce)
+            self.manual_backward(loss_G)
+            self.clip_gradients(
+                optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+            )
+            self.clip_gradients(
+                optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+            )
+            optimizer_G_A.step()
+            optimizer_F_A.step()
+            optimizer_G_A.zero_grad()
+            optimizer_F_A.zero_grad()
 
         # self.loss_G = loss_G.detach() * 0.1 + self.loss_G * 0.9
         self.log("G_loss", loss_G.detach(), prog_bar=True)
+        self.log("loss_gan", loss_gan.detach(), prog_bar=True)
+        self.log("loss_style", loss_style.detach(), prog_bar=True)
+        self.log("loss_nce", loss_nce.detach(), prog_bar=True)
 
         with optimizer_D_A.toggle_model(): 
             loss_D_A = self.backward_D_A(real_b, fake_b)

@@ -11,7 +11,6 @@ class ProposedSynthesisModule(nn.Module):
             self.feat_ch = kwargs['feat_ch']
             self.output_nc = kwargs['output_nc']
             self.demodulate = kwargs['demodulate']
-            self.requires_grad = kwargs['requires_grad']
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -42,9 +41,9 @@ class ProposedSynthesisModule(nn.Module):
         
         # 일부분에만 style_denorm -> 21, 22, 31, 32에만 적용
         self.conv0 = StyleConv(self.input_nc, self.feat_ch, kernel_size=3,
-                                                 activate=True, demodulate=self.demodulate, style_denorm=False)
+                                                 activate=True, demodulate=self.demodulate)
         self.conv11 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                downsample=True, activate=True, demodulate=self.demodulate)
         self.conv12 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                 downsample=False, activate=True, demodulate=self.demodulate)
         self.conv21 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
@@ -52,31 +51,22 @@ class ProposedSynthesisModule(nn.Module):
         self.conv22 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                 downsample=False, activate=True, demodulate=self.demodulate)
         self.conv31 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                downsample=False, activate=True, demodulate=self.demodulate)
         self.conv32 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                downsample=False, activate=True, demodulate=self.demodulate)
         self.conv41 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3, #feat_ch *4는 변치않게
-                                upsample=True, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                upsample=True, activate=True, demodulate=self.demodulate)
         self.conv42 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                upsample=False, activate=True, demodulate=self.demodulate)
         self.conv51 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                upsample=True, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                upsample=True, activate=True, demodulate=self.demodulate)
         self.conv52 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, style_denorm=False)
+                                upsample=False, activate=True, demodulate=self.demodulate)
         self.conv6 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                activate=False, demodulate=self.demodulate, style_denorm=False)
+                                activate=False, demodulate=self.demodulate)
 
 
         self.conv_final = nn.Conv2d(self.feat_ch, self.output_nc, kernel_size=3, padding=1)
-
-        if not self.requires_grad:
-            self.eval()
-            for param in self.parameters():
-                param.requires_grad = False
-        else:
-            self.train()
-            for param in self.parameters():
-                param.requires_grad = True
 
     def forward(self, x, ref, layers=[], encode_only=False):
         style_guidance = self.guide_net(ref) # [1, 128, 24, 20]
@@ -113,9 +103,6 @@ class ProposedSynthesisModule(nn.Module):
                 feats.append(layers_dict[i])
             return feats
         
-        # if layers:
-        #     return out, [feat0, feat1, feat2, feat3, feat4, feat5, feat6]
-    
         return out
 
 

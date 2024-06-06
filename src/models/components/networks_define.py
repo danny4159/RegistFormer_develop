@@ -255,7 +255,6 @@ def define_D(
     init_type="normal",
     init_gain=0.02,
     no_antialias=False,
-    requires_grad=True,
     opt=None,
 ):
     """Create a discriminator
@@ -296,7 +295,6 @@ def define_D(
             n_layers=3,
             norm_layer=norm_layer,
             no_antialias=no_antialias,
-            requires_grad=requires_grad
         )
     elif netD == "n_layers":  # more options
         net = NLayerDiscriminator(
@@ -344,7 +342,6 @@ class NLayerDiscriminator(nn.Module):
         n_layers=3,
         norm_layer=nn.BatchNorm2d,
         no_antialias=False,
-        requires_grad=True
     ):
         """Construct a PatchGAN discriminator
 
@@ -428,15 +425,6 @@ class NLayerDiscriminator(nn.Module):
         ]  # output 1 channel prediction map
         self.model = nn.Sequential(*sequence)
 
-        if not requires_grad:
-            self.eval()
-            for param in self.parameters():
-                param.requires_grad = False
-        else:
-            self.train()
-            for param in self.parameters():
-                param.requires_grad = True
-
 
     def forward(self, input):
         """Standard forward."""
@@ -475,7 +463,6 @@ class NLayerDiscriminator(nn.Module):
             else:
                 assert 0, "Unsupported GAN type: {}".format(self.gan_type)
         return loss
-
 
 class PixelDiscriminator(nn.Module):
     """Defines a 1x1 PatchGAN discriminator (pixelGAN)"""

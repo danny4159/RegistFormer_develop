@@ -7,9 +7,9 @@ degree: 0
 motion_prob: 0
 deform_prob: 0
 # TODO: 데이터셋 수정
-train_file: 'Ver3_OnlyOnePatient.h5' # Ver3_AllPatientSameSize_Resize_Pad.h5 # Ver3_OnlyOnePatient.h5 # prepared_data_0_0_0_0_0_ver3_final.h5
-val_file: 'Ver3_OnlyOnePatient.h5'
-test_file: 'Ver3_OnlyOnePatient.h5' 
+train_file: 'Ver3_AllPatientSameSize_Resize_Pad.h5' # Ver3_AllPatientSameSize_Resize_Pad.h5 # Ver3_OnlyOnePatient.h5 # prepared_data_0_0_0_0_0_ver3_final.h5
+val_file: 'Ver3_AllPatientSameSize_Resize_Pad.h5'
+test_file: 'Ver3_AllPatientSameSize_Resize_Pad.h5' 
 reverse: False # New
 flip_prob: 0 #.5 #0.5
 rot_prob: 0 #.5 #0.5

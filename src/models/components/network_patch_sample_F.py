@@ -12,7 +12,6 @@ class PatchSampleF(nn.Module):
             self.init_type = kwargs['init_type']
             self.init_gain = kwargs['init_gain']
             self.nc = kwargs['nc']
-            self.requires_grad = kwargs['requires_grad']
 
 
         except KeyError as e:
@@ -30,15 +29,6 @@ class PatchSampleF(nn.Module):
             )
             # init_net(self.mlp, self.init_type, self.init_gain)
             # self.mlp_init = True
-            
-        if not self.requires_grad:
-            self.eval()
-            for param in self.parameters():
-                param.requires_grad = False
-        else:
-            self.train()
-            for param in self.parameters():
-                param.requires_grad = True
 
     def forward(self, feats, num_patches=64, patch_ids=None):
         return_ids = []
@@ -86,65 +76,4 @@ class Normalize(nn.Module):
     
 
 
-def init_weights(net, init_type="normal", init_gain=0.02, debug=False):
-    """Initialize network weights.
-
-    Parameters:
-        net (network)   -- network to be initialized
-        init_type (str) -- the name of an initialization method: normal | xavier | kaiming | orthogonal
-        init_gain (float)    -- scaling factor for normal, xavier and orthogonal.
-
-    We use 'normal' in the original pix2pix and CycleGAN paper. But xavier and kaiming might
-    work better for some applications. Feel free to try yourself.
-    """
-
-    def init_func(m):  # define the initialization function
-        classname = m.__class__.__name__
-        if hasattr(m, "weight") and (
-            classname.find("Conv") != -1 or classname.find("Linear") != -1
-        ):
-            if debug:
-                print(classname)
-            if init_type == "normal":
-                init.normal_(m.weight.data, 0.0, init_gain)
-            elif init_type == "xavier":
-                init.xavier_normal_(m.weight.data, gain=init_gain)
-            elif init_type == "kaiming":
-                init.kaiming_normal_(m.weight.data, a=0, mode="fan_in")
-            elif init_type == "orthogonal":
-                init.orthogonal_(m.weight.data, gain=init_gain)
-            else:
-                raise NotImplementedError(
-                    "initialization method [%s] is not implemented" % init_type
-                )
-            if hasattr(m, "bias") and m.bias is not None:
-                init.constant_(m.bias.data, 0.0)
-        elif (
-            # classname.find("BatchNorm2d") != -1 :
-            classname.find("BatchNorm2d") != -1 and m.weight is not None
-        ):  # BatchNorm Layer's weight is not a matrix; only normal distribution applies.
-            init.normal_(m.weight.data, 1.0, init_gain)
-            init.constant_(m.bias.data, 0.0)
-
-    net.apply(init_func)  # apply the initialization function <init_func>
-
-
-def init_net(
-    net,
-    init_type="normal",
-    init_gain=0.02,
-    debug=False,
-    initialize_weights=True,
-):
-    """Initialize a network: 1. register CPU/GPU device (with multi-GPU support); 2. initialize the network weights
-    Parameters:
-        net (network)      -- the network to be initialized
-        init_type (str)    -- the name of an initialization method: normal | xavier | kaiming | orthogonal
-        gain (float)       -- scaling factor for normal, xavier and orthogonal.
-
-    Return an initialized network.
-    """
-    if initialize_weights:
-        init_weights(net, init_type, init_gain=init_gain, debug=debug)
-    return net
 
