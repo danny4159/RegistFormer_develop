@@ -23,7 +23,7 @@ netG_A:
   feat_ch: 256
   demodulate: true
   requires_grad: true
-  # init_type: 'kaiming'
+  init_type: 'kaiming'
 
 netD_A:
   _target_: src.models.components.networks_define.define_D
@@ -31,7 +31,8 @@ netD_A:
   ndf: 64
   norm: 'instance'
   n_layers_D: 3
-  init_type: 'normal' #'kaiming'
+  init_type: 'kaiming' #'kaiming'
+  requires_grad: True
 
 # netG_NCE: # For PatchNCELoss
 #   _target_: src.models.components.networks_define.define_G
@@ -49,14 +50,11 @@ netD_A:
 netF_A: # For PatchNCELoss
   _target_: src.models.components.networks_define.define_F
   netF_type: 'mlp_sample'
-  # input_nc: 1
-  # normG: 'instance'
-  # no_dropout: true
-  # no_antialias: False
-  use_mlp: True
-  init_type: 'xavier'
+  use_mlp: True #True
+  init_type: 'xavier' #'xavier'
   init_gain: 0.02
   nc: 256
+  requires_grad: True
 
 
 

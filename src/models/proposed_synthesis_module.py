@@ -113,11 +113,14 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 self.clip_gradients(
                     optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
                 )
+                self.clip_gradients(
+                    optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+                )
                 optimizer_G_A.step()
                 optimizer_F_A.step()
                 optimizer_G_A.zero_grad()
                 optimizer_F_A.zero_grad()
-            
+
         # self.loss_G = loss_G.detach() * 0.1 + self.loss_G * 0.9
         self.log("G_loss", loss_G.detach(), prog_bar=True)
 
