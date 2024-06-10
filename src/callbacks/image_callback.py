@@ -369,7 +369,7 @@ class ImageSavingCallback(Callback):
                 mr_group[key].shape[2] for key in self.dataset_list
             ]  # slice number를 리스트로 저장
 
-    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
         if self.half_val_test:
             half_size = batch[0].shape[2] // 2
             first_half = [x[:, :, :half_size, :] for x in batch]
