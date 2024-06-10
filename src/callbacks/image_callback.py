@@ -71,7 +71,6 @@ class ImageLoggingCallback(Callback):
         self.img_grid = []
         self.err_grid = []
 
-    # def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
         if (
             batch_idx in self.val_batch_idx
@@ -142,7 +141,7 @@ class ImageLoggingCallback(Callback):
         self.img_grid = []
         self.err_grid = [] 
 
-    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
         if (
             self.log_test and batch_idx in self.tst_batch_idx
         ):  # log every indexes for slice number in test set
