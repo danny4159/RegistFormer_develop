@@ -8,13 +8,14 @@ max_epochs: 100
 accelerator: auto # automatically choose between CPU, GPU, TPU
 devices: 1
 
-strategy: ddp_find_unused_parameters_true #deepspeed_stage_1  #auto #deepspeed_stage_2 # deepspeed
+strategy: ddp # ddp_find_unused_parameters_true #deepspeed_stage_1  #auto #deepspeed_stage_2 # deepspeed
 
 benchmark: True # use torch.backends.cudnn.benchmark
 
 # mixed precision for extra speed-up
 # ref: https://lightning.ai/docs/pytorch/stable/common/precision_basic.html
 precision: 32 #bf16-mixed
+# gradient_clip_val: 0.5 # Choose or not
 
 # perform a validation loop every N training epochs
 check_val_every_n_epoch: 1
