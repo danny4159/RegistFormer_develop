@@ -6,7 +6,6 @@ import itertools
 import torch
 from src.losses.gan_loss import GANLoss
 from src.losses.contextual_loss import Contextual_Loss
-from src.losses.mind_loss import MINDLoss
 from src.losses.patch_nce_loss import PatchNCELoss
 
 from src import utils
@@ -56,8 +55,6 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
         # loss function
         self.criterionContextual = Contextual_Loss(style_feat_layers)
-        self.criterionL1 = torch.nn.L1Loss()
-        self.criterionMind = MINDLoss()       
         self.criterionGAN = GANLoss(gan_type='lsgan')
         self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size)
 
@@ -71,10 +68,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         ## GAN Loss 내가 추가했음
         pred_fake = self.netD_A(fake_b.detach())
         loss_gan = self.criterionGAN(pred_fake, True)
+        assert not torch.isnan(loss_gan).any(), "GAN Loss is NaN"
 
         ## Contextual loss
         loss_style_B = self.criterionContextual(real_b, fake_b)
         loss_style =  loss_style_B * lambda_style
+        assert not torch.isnan(loss_style).any(), "Contextual Loss is NaN"
 
         # PatchNCE loss (real_a, fake_b)
         n_layers = len(self.nce_layers)
@@ -93,13 +92,49 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             loss = self.criterionNCE(f_a, f_b) * lambda_nce
             total_nce_loss += loss.mean()
         loss_nce = total_nce_loss / n_layers
+        assert not torch.isnan(loss_nce).any(), "NCE Loss is NaN"
 
         loss_G = loss_gan + loss_style + loss_nce
+        assert not torch.isnan(loss_G).any(), "Total Loss is NaN"
 
         return loss_G, loss_gan, loss_style, loss_nce
 
     def training_step(self, batch: Any, batch_idx: int):
+#precision16 version
+        # optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
+        # real_a, real_b, fake_b = self.model_step(batch)
+        
+        # # with optimizer_F_A.toggle_model():
+        # optimizer_G_A.zero_grad()
+        # optimizer_F_A.zero_grad()
+        # loss_G, loss_gan, loss_style, loss_nce = self.backward_G(real_a, real_b, fake_b, self.params.lambda_style, self.params.lambda_nce)
+        # self.manual_backward(loss_G)
+        # self.clip_gradients(
+        #         optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+        #     )
+        # self.clip_gradients(
+        #         optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+        #     )
+        # optimizer_G_A.step()
+        # optimizer_F_A.step()
 
+        # # self.loss_G = loss_G.detach() * 0.1 + self.loss_G * 0.9
+        # self.log("G_loss", loss_G.detach(), prog_bar=True)
+        # self.log("loss_gan", loss_gan.detach(), prog_bar=True)
+        # self.log("loss_style", loss_style.detach(), prog_bar=True)
+        # self.log("loss_nce", loss_nce.detach(), prog_bar=True)
+
+        # optimizer_D_A.zero_grad()
+        # loss_D_A = self.backward_D_A(real_b, fake_b)
+        # self.manual_backward(loss_D_A)
+        # self.clip_gradients(
+        #         optimizer_D_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+        #     )
+        # optimizer_D_A.step()
+
+        # self.log("Disc_A_Loss", loss_D_A.detach(), prog_bar=True)
+
+#original version
         optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
         real_a, real_b, fake_b = self.model_step(batch)
         
