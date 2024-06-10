@@ -148,14 +148,13 @@ class StyleConv(nn.Module):
             pad1 = p // 2
             self.blur = Blur(blur_kernel, (pad0, pad1))
             self.down = nn.Sequential(
-                self.blur,
                 nn.Conv2d(input_nc, feat_ch, stride=2, kernel_size=1, padding=0)
             )
         else:
             self.conv = nn.Conv2d(input_nc, feat_ch, kernel_size=3, padding=1)
             
         # self.batch_norm = nn.BatchNorm2d(feat_ch, affine=False)
-        self.batch_norm = nn.InstanceNorm2d(feat_ch, affine=False)
+        self.normalize = nn.InstanceNorm2d(feat_ch, affine=False)
         # self.batch_norm = nn.SyncBatchNorm(feat_ch, affine=False)
 
         nhidden = 512
@@ -169,23 +168,39 @@ class StyleConv(nn.Module):
 
         self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
+        self.randomize_noise = True
+        self.noise_strength = nn.Parameter(torch.zeros(1), requires_grad=True)
 
     def forward(self, x, style): # style: [1, 64, 1, 1]
-
+        
         if self.downsample:
+            original_size = x.size()
             x = self.blur(x)
+            if x.size()[2:] != original_size[2:]:  # If the size has changed
+                x = F.interpolate(x, size=original_size[2:], mode='bilinear', align_corners=True)
             x = self.down(x)
         elif self.upsample:
             x = self.up(x)
+            original_size = x.size()
             x = self.blur(x)
+            if x.size()[2:] != original_size[2:]:  # If the size has changed
+                x = F.interpolate(x, size=original_size[2:], mode='bilinear', align_corners=True)
         else:
             x = self.conv(x)
         
-        x = self.batch_norm(x)
+        x = self.normalize(x)
+        
+        # Add noise
+        if self.randomize_noise:
+            noise = torch.randn_like(x) * self.noise_strength
+        else:
+            noise = torch.zeros_like(x) * self.noise_strength
+        
+        x = x + noise
         
         if self.style_denorm:
             # 1. style을 x의 크기와 맞게 interpolation #TODO: Interpolation을 할지 브로드캐스트를 할지
-            style = F.interpolate(style, size=x.size()[2:], mode='nearest')
+            style = F.interpolate(style, size=x.size()[2:], mode='nearest') # TODO: bilinear 도 시도
             
             # 2. style을 x의 C과 맞게 mlp
             actv = self.mlp_shared(style)
