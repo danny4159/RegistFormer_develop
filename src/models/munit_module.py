@@ -65,8 +65,8 @@ class MunitModule(BaseModule_AtoB_BtoA):
         self.fake_B_pool = ImagePool(params.pool_size)
 
         # self.scaler = torch.cuda.amp.GradScaler()
-        summary(netG_A, input_size=(1, 64, 384, 320))
-        self.print_model_details(self.netG_A)
+        # summary(netG_A, input_size=(1, 64, 384, 320))
+        # self.print_model_details(self.netG_A)
     
     def print_model_details(self, model):
         print("Model Architecture:")

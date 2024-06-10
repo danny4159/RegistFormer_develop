@@ -139,6 +139,7 @@ class ImageLoggingCallback(Callback):
 
     def on_test_start(self, trainer, pl_module):
         self.img_grid = []
+        self.err_grid = [] 
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if (

@@ -69,8 +69,8 @@ class ProposedSynthesisModule(nn.Module):
         self.conv_final = nn.Conv2d(self.feat_ch, self.output_nc, kernel_size=3, padding=1)
 
     def forward(self, x, ref, layers=[], encode_only=False):
-        style_guidance = self.guide_net(ref) # [1, 128, 24, 20]
-        # style_guidance = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True)
+        # style_guidance = self.guide_net(ref) # [1, 128, 24, 20]
+        style_guidance = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True)
         
         feats = []
         feat0 = self.conv0(x, style_guidance) # [1, 64, 384, 320]
@@ -129,23 +129,39 @@ class StyleConv(nn.Module):
         self.kernel_size = kernel_size
         self.padding = kernel_size // 2
         self.style_denorm = style_denorm
-    
-        self.up = nn.Sequential(
-            nn.Upsample(scale_factor=2),
-            nn.Conv2d(input_nc,feat_ch, kernel_size=3, padding=1)
-        )
-        self.down = nn.Conv2d(input_nc, feat_ch, stride=2, kernel_size=1, padding=0)
 
-        self.conv = nn.Conv2d(input_nc, feat_ch, kernel_size=3, padding=1)
-
+        if self.upsample:
+            factor = 2
+            p = (len(blur_kernel) - factor) - (kernel_size - 1)
+            pad0 = (p + 1) // 2 + factor - 1
+            pad1 = p // 2 + 1
+            self.blur = Blur(blur_kernel, (pad0, pad1), upsample_factor=factor)
+            self.up = nn.Sequential(
+                nn.Upsample(scale_factor=2),
+                nn.Conv2d(input_nc, feat_ch, kernel_size=3, padding=1)
+            )
+        
+        elif self.downsample:
+            factor = 2
+            p = (len(blur_kernel) - factor) + (kernel_size - 1)
+            pad0 = (p + 1) // 2
+            pad1 = p // 2
+            self.blur = Blur(blur_kernel, (pad0, pad1))
+            self.down = nn.Sequential(
+                self.blur,
+                nn.Conv2d(input_nc, feat_ch, stride=2, kernel_size=1, padding=0)
+            )
+        else:
+            self.conv = nn.Conv2d(input_nc, feat_ch, kernel_size=3, padding=1)
+            
         # self.batch_norm = nn.BatchNorm2d(feat_ch, affine=False)
-        self.batch_norm = nn.InstanceNorm2d(feat_ch, affine=False) #TODO: adain은 이거 써 나중에 시도
+        self.batch_norm = nn.InstanceNorm2d(feat_ch, affine=False)
         # self.batch_norm = nn.SyncBatchNorm(feat_ch, affine=False)
 
         nhidden = 512
         self.mlp_shared = nn.Sequential(
-            nn.Conv2d(feat_ch, nhidden, kernel_size=3, padding=1),
-            # nn.Conv2d(1, nhidden, kernel_size=3, padding=1),
+            # nn.Conv2d(feat_ch, nhidden, kernel_size=3, padding=1),
+            nn.Conv2d(1, nhidden, kernel_size=3, padding=1),
             nn.ReLU()
         )
         self.mlp_gamma = nn.Conv2d(nhidden, feat_ch, kernel_size=3, padding=1)
@@ -157,9 +173,11 @@ class StyleConv(nn.Module):
     def forward(self, x, style): # style: [1, 64, 1, 1]
 
         if self.downsample:
+            x = self.blur(x)
             x = self.down(x)
         elif self.upsample:
             x = self.up(x)
+            x = self.blur(x)
         else:
             x = self.conv(x)
         
@@ -181,3 +199,29 @@ class StyleConv(nn.Module):
         if self.activate:
             x = self.activation(x)
         return x
+    
+    
+class Blur(nn.Module):
+    def __init__(self, kernel, pad, upsample_factor=1):
+        super(Blur, self).__init__()
+        kernel = _make_kernel(kernel)
+        if upsample_factor > 1:
+            kernel = kernel * (upsample_factor**2)
+
+        self.register_buffer('kernel', kernel)
+        self.pad = pad
+
+    def forward(self, x):
+        orig_dtype = x.dtype
+        x = x.float()
+        out = upfirdn2d(x, self.kernel, pad=self.pad)
+        return out.to(orig_dtype)
+
+def _make_kernel(k):
+    k = torch.tensor(k, dtype=torch.float32)
+    if k.ndim == 1:
+        k = k[None, :] * k[:, None]
+
+    k /= k.sum()
+
+    return k
