@@ -229,7 +229,7 @@ class Blur(nn.Module):
     def forward(self, x):
         orig_dtype = x.dtype
         x = x.float()
-        out = upfirdn2d(x, self.kernel, pad=self.pad)
+        out = upfirdn2d(x, self.kernel, padding=self.pad)
         return out.to(orig_dtype)
 
 def _make_kernel(k):
