@@ -16,7 +16,8 @@ optimizer:
 #   gamma: 0.5
 
 netG_A:
-  _target_: src.models.components.networks_registformer.define_G
+  _target_: src.models.components.networks_define.define_G
+  netG_type: registformer
   feat_dim: 14
   ref_ch: 1
   src_ch: 1
@@ -41,7 +42,7 @@ netG_A:
 
 
 netD_A:
-  _target_: src.models.components.networks_registformer.define_D
+  _target_: src.models.components.networks_define.define_D
   input_nc: 1
   ndf: 64
   # norm: 'instance'

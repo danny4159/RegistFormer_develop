@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from basicsr.utils.registry import ARCH_REGISTRY
+# from basicsr.utils.registry import ARCH_REGISTRY
 
 import functools
 
