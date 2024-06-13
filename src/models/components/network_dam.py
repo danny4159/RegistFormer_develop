@@ -120,7 +120,8 @@ class ModulatedStyleConv(nn.Module):
                  upsample=False,
                  downsample=False,
                  activate=False,
-                 blur_kernel=[1, 3, 3, 1],
+                #  blur_kernel=[1, 3, 3, 1],
+                 blur_kernel=[1, 2, 2, 1],
                  demodulate=True,
                  eps=1e-8,):
         super(ModulatedStyleConv, self).__init__()
@@ -136,10 +137,12 @@ class ModulatedStyleConv(nn.Module):
 
         self.style_weight = nn.Sequential(
             nn.Conv2d(feat_ch, input_nc, kernel_size=1, stride=1, padding=0),
+            nn.InstanceNorm2d(input_nc), #TODO: 이상하면 빼기
             nn.LeakyReLU(negative_slope=0.2, inplace=True),)
 
         self.style_bias = nn.Sequential(
             nn.Conv2d(feat_ch, output_nc, kernel_size=1, stride=1, padding=0),
+            nn.InstanceNorm2d(output_nc), #TODO: 이상하면 빼기
             nn.LeakyReLU(negative_slope=0.2, inplace=True),)
 
         self.weight = nn.Parameter(
