@@ -133,7 +133,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 )
                 optimizer_D_A.step()
                 optimizer_D_A.zero_grad()
-            self.log("Disc_A_Loss", loss_D_A.detach(), prog_bar=True)
+            self.log("D_Loss", loss_D_A.detach(), prog_bar=True)
 
     def configure_optimizers(self):
         """Choose what optimizers and learning-rate schedulers to use in your optimization.
@@ -159,8 +159,11 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             schedulers.append(scheduler_D_B)
             scheduler_F_A = self.hparams.scheduler(optimizer=optimizer_F_A)
             schedulers.append(scheduler_F_A)
+            return optimizers, schedulers
+        
+        return optimizers    
             
-        return optimizers, schedulers
+        
 
 
 import torch

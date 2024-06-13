@@ -16,7 +16,7 @@ netG_A:
   output_nc: 1
   feat_ch: 64
   demodulate: true
-  requires_grad: true
+  # requires_grad: true
 
 netG_B:
   _target_: src.models.components.networks_define.define_G
@@ -25,7 +25,7 @@ netG_B:
   output_nc: 1
   feat_ch: 64
   demodulate: true
-  requires_grad: true
+  # requires_grad: true
 
 params: # Other params
   lambda_style: 1

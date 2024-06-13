@@ -12,7 +12,7 @@ class DAModule(nn.Module):
             self.feat_ch = kwargs['feat_ch']
             self.output_nc = kwargs['output_nc']
             self.demodulate = kwargs['demodulate']
-            self.requires_grad = kwargs['requires_grad']
+            # self.requires_grad = kwargs['requires_grad']
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -71,14 +71,14 @@ class DAModule(nn.Module):
         #     self.load_state_dict(torch.load(
         #         load_path, map_location=lambda storage, loc: storage)['params_ema'])
 
-        if not self.requires_grad:
-            self.eval()
-            for param in self.parameters():
-                param.requires_grad = False
-        else:
-            self.train()
-            for param in self.parameters():
-                param.requires_grad = True
+        # if not self.requires_grad:
+        #     self.eval()
+        #     for param in self.parameters():
+        #         param.requires_grad = False
+        # else:
+        #     self.train()
+        #     for param in self.parameters():
+        #         param.requires_grad = True
 
     def forward(self, x, ref):
         if not self.training:
@@ -223,7 +223,7 @@ class Blur(nn.Module):
     def forward(self, x):
         orig_dtype = x.dtype
         x = x.float()
-        out = upfirdn2d(x, self.kernel, pad=self.pad)
+        out = upfirdn2d(x, self.kernel, padding=self.pad)
         return out.to(orig_dtype)
         # return upfirdn2d(x, self.kernel, pad=self.pad)
 
