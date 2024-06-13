@@ -70,7 +70,8 @@ class ProposedSynthesisModule(nn.Module):
 
     def forward(self, x, ref, layers=[], encode_only=False):
         # style_guidance = self.guide_net(ref) # [1, 128, 24, 20]
-        style_guidance = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True)
+        # style_guidance = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True) # Original
+        style_guidance = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True)
         
         feats = []
         feat0 = self.conv0(x, style_guidance) # [1, 64, 384, 320]
@@ -168,8 +169,8 @@ class StyleConv(nn.Module):
 
         self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
-        self.randomize_noise = True
-        self.noise_strength = nn.Parameter(torch.zeros(1), requires_grad=True)
+        # self.randomize_noise = True
+        # self.noise_strength = nn.Parameter(torch.zeros(1), requires_grad=True)
 
     def forward(self, x, style): # style: [1, 64, 1, 1]
         
@@ -190,13 +191,13 @@ class StyleConv(nn.Module):
         
         x = self.normalize(x)
         
-        # Add noise
-        if self.randomize_noise:
-            noise = torch.randn_like(x) * self.noise_strength
-        else:
-            noise = torch.zeros_like(x) * self.noise_strength
+        # # Add noise
+        # if self.randomize_noise:
+        #     noise = torch.randn_like(x) * self.noise_strength
+        # else:
+        #     noise = torch.zeros_like(x) * self.noise_strength
         
-        x = x + noise
+        # x = x + noise
         
         if self.style_denorm:
             # 1. style을 x의 크기와 맞게 interpolation #TODO: Interpolation을 할지 브로드캐스트를 할지
