@@ -8,7 +8,7 @@ max_epochs: 100
 accelerator: auto # automatically choose between CPU, GPU, TPU
 devices: 1
 
-strategy: ddp # ddp_find_unused_parameters_true #deepspeed_stage_1  #auto #deepspeed_stage_2 # deepspeed
+strategy: ddp_find_unused_parameters_true # ddp_find_unused_parameters_true #deepspeed_stage_1  #auto #deepspeed_stage_2 # deepspeed
 
 benchmark: True # use torch.backends.cudnn.benchmark
 
