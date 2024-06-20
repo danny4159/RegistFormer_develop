@@ -47,31 +47,42 @@ class ImageLoggingCallback(Callback):
             err_a = torch.abs(a - preds_a)
             err_b = torch.abs(b - preds_b)
 
-            self.img_grid.extend([
-                (a[0] + 1) / 2,
-                (preds_a[0] + 1) / 2,
-                (b[0] + 1) / 2,
-                (preds_b[0] + 1) / 2,
-            ])
-            self.err_grid.extend([err_a[0], err_b[0]])
+            if len(self.img_grid) == 0:
+                self.first_image_size = a[0].shape[1:3]
 
+            self.img_grid.extend([
+                resize((a[0] + 1) / 2, self.first_image_size),
+                resize((preds_a[0] + 1) / 2, self.first_image_size),
+                resize((b[0] + 1) / 2, self.first_image_size),
+                resize((preds_b[0] + 1) / 2, self.first_image_size),
+            ])
+            self.err_grid.extend([
+                resize(err_a[0], self.first_image_size),
+                resize(err_b[0], self.first_image_size),
+            ])
+            
         elif len(res) == 3:
             self.ngrid = 3
             a, b, preds_b = res
             err_b = torch.abs(b - preds_b)
 
-            self.img_grid.extend([
-                (a[0] + 1) / 2,
-                (preds_b[0] + 1) / 2,
-                (b[0] + 1) / 2,
-            ])
-            self.err_grid.extend([err_b[0]])
+            if len(self.img_grid) == 0:
+                self.first_image_size = a[0].shape[1:3]
 
+            self.img_grid.extend([
+                resize((a[0] + 1) / 2, self.first_image_size),
+                resize((preds_b[0] + 1) / 2, self.first_image_size),
+                resize((b[0] + 1) / 2, self.first_image_size),
+            ])
+            self.err_grid.extend([
+                resize(err_b[0], self.first_image_size),
+            ])
+        
     def on_validation_start(self, trainer, pl_module):
         self.img_grid = []
         self.err_grid = []
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if (
             batch_idx in self.val_batch_idx
             and trainer.current_epoch % self.every_epoch == 0
@@ -141,7 +152,7 @@ class ImageLoggingCallback(Callback):
         self.img_grid = []
         self.err_grid = [] 
 
-    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if (
             self.log_test and batch_idx in self.tst_batch_idx
         ):  # log every indexes for slice number in test set
@@ -369,7 +380,7 @@ class ImageSavingCallback(Callback):
                 mr_group[key].shape[2] for key in self.dataset_list
             ]  # slice number를 리스트로 저장
 
-    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if self.half_val_test:
             half_size = batch[0].shape[2] // 2
             first_half = [x[:, :, :half_size, :] for x in batch]

@@ -12,6 +12,7 @@ class PatchSampleF(nn.Module):
             self.init_type = kwargs['init_type']
             self.init_gain = kwargs['init_gain']
             self.nc = kwargs['nc']
+            self.input_nc = kwargs['input_nc']
 
 
         except KeyError as e:
@@ -19,11 +20,10 @@ class PatchSampleF(nn.Module):
         
         self.l2norm = Normalize(2)
         self.mlp_init = False
-        input_nc = 256
 
         if self.use_mlp:
             self.mlp = nn.Sequential(
-                nn.Linear(input_nc, self.nc),
+                nn.Linear(self.input_nc, self.nc),
                 nn.ReLU(),
                 nn.Linear(self.nc, self.nc)
             )
