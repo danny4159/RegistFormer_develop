@@ -59,9 +59,9 @@ class GradICON(nn.Module):
 
       
     def forward(self, moving_img, fixed_img):
-        loss, a, b, c, flips = self.fullres_net(moving_img, fixed_img)
+        loss, a, b, c, flips, transform_vector, warped_image = self.fullres_net(moving_img, fixed_img)
         
-        return out
+        return loss, a, b, c, flips, transform_vector, warped_image
 
 
 
@@ -401,13 +401,16 @@ class GradientICON(RegistrationModule):
         transform_magnitude = torch.mean(
             (self.identity_map - self.phi_AB_vectorfield) ** 2
         )
+
+        warped_image = self.as_function(image_A)(self.phi_AB_vectorfield) # daniel add
+        
         return ICONLoss(
             all_loss,
             inverse_consistency_loss,
             similarity_loss,
             transform_magnitude,
             flips(self.phi_BA_vectorfield),
-        )
+        ), self.phi_AB_vectorfield, warped_image # daniel add
     
 
 
