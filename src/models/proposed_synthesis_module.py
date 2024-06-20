@@ -102,37 +102,37 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
         real_a, real_b, fake_b = self.model_step(batch)
         
-        with NaNErrorMode(enabled=True, raise_error=False, print_stats=True, print_nan_index=True):
-            with optimizer_G_A.toggle_model():
-                # with optimizer_F_A.toggle_model():
-                loss_G, loss_gan, loss_style, loss_nce = self.backward_G(real_a, real_b, fake_b, self.params.lambda_style, self.params.lambda_nce)
-                self.manual_backward(loss_G)
-                self.clip_gradients(
-                    optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-                )
-                self.clip_gradients(
-                    optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-                )
-                optimizer_G_A.step()
-                optimizer_F_A.step()
-                optimizer_G_A.zero_grad()
-                optimizer_F_A.zero_grad()
+        # with NaNErrorMode(enabled=True, raise_error=False, print_stats=True, print_nan_index=True):
+        with optimizer_G_A.toggle_model():
+            # with optimizer_F_A.toggle_model():
+            loss_G, loss_gan, loss_style, loss_nce = self.backward_G(real_a, real_b, fake_b, self.params.lambda_style, self.params.lambda_nce)
+            self.manual_backward(loss_G)
+            self.clip_gradients(
+                optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+            )
+            self.clip_gradients(
+                optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+            )
+            optimizer_G_A.step()
+            optimizer_F_A.step()
+            optimizer_G_A.zero_grad()
+            optimizer_F_A.zero_grad()
 
-            # self.loss_G = loss_G.detach() * 0.1 + self.loss_G * 0.9
-            self.log("G_loss", loss_G.detach(), prog_bar=True)
-            self.log("loss_gan", loss_gan.detach(), prog_bar=True)
-            self.log("loss_style", loss_style.detach(), prog_bar=True)
-            self.log("loss_nce", loss_nce.detach(), prog_bar=True)
+        # self.loss_G = loss_G.detach() * 0.1 + self.loss_G * 0.9
+        self.log("G_loss", loss_G.detach(), prog_bar=True)
+        self.log("loss_gan", loss_gan.detach(), prog_bar=True)
+        self.log("loss_style", loss_style.detach(), prog_bar=True)
+        self.log("loss_nce", loss_nce.detach(), prog_bar=True)
 
-            with optimizer_D_A.toggle_model(): 
-                loss_D_A = self.backward_D_A(real_b, fake_b)
-                self.manual_backward(loss_D_A)
-                self.clip_gradients(
-                    optimizer_D_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-                )
-                optimizer_D_A.step()
-                optimizer_D_A.zero_grad()
-            self.log("D_Loss", loss_D_A.detach(), prog_bar=True)
+        with optimizer_D_A.toggle_model(): 
+            loss_D_A = self.backward_D_A(real_b, fake_b)
+            self.manual_backward(loss_D_A)
+            self.clip_gradients(
+                optimizer_D_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+            )
+            optimizer_D_A.step()
+            optimizer_D_A.zero_grad()
+        self.log("D_Loss", loss_D_A.detach(), prog_bar=True)
 
     def configure_optimizers(self):
         """Choose what optimizers and learning-rate schedulers to use in your optimization.
