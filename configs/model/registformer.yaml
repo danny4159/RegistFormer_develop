@@ -9,11 +9,11 @@ optimizer:
   betas: [0.9, 0.99]
   weight_decay: 0
 
-# scheduler:
-#   _target_: torch.optim.lr_scheduler.MultiStepLR
-#   _partial_: true
-#   milestones: [250000, 300000]
-#   gamma: 0.5
+scheduler:
+  _target_: torch.optim.lr_scheduler.MultiStepLR
+  _partial_: true
+  milestones: [250000, 300000]
+  gamma: 0.5
 
 netG_A:
   _target_: src.models.components.networks_define.define_G
@@ -40,7 +40,6 @@ netG_A:
   init_type: 'normal'
   init_gain: 0.02
 
-
 netD_A:
   _target_: src.models.components.networks_define.define_D
   input_nc: 1
@@ -49,12 +48,24 @@ netD_A:
   # n_layers_D: 3
   init_type: 'normal'
 
+netF_A: # For PatchNCELoss
+  _target_: src.models.components.networks_define.define_F
+  netF_type: 'mlp_sample'
+  use_mlp: True #True
+  init_type: 'xavier' #'xavier'
+  init_gain: 0.02
+  nc: 256
+  input_nc: ${model.netG_A.feat_dim}
+
 params: # Other params
   lambda_ctx: 1 
   lambda_gan: 0.1 #0 # 0.1 
   lambda_mind: 1 
+  lambda_nce: 1
   reverse: ${data.reverse} # A->B if False, B->A if True
   half_val_test: ${data.half_val_test}
+  flip_equivariance: False
+  batch_size: ${data.batch_size}
 
   #Ablation
   ran_shift: 10 #null # "Put null or Interger" / random shift to ground truth when calculating Contextual Loss
