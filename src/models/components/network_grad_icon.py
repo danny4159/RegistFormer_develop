@@ -21,10 +21,12 @@ class GradICON(nn.Module):
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
         
-        BATCH_SIZE = 8 #8
+        BATCH_SIZE = 1 #8
         SCALE = 2 
 
-        input_shape = [BATCH_SIZE, 1, 32 * SCALE, 32 * SCALE, 32 * SCALE]
+        # input_shape = [BATCH_SIZE, 1, 32 * SCALE, 32 * SCALE, 32 * SCALE]
+        input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE] # original
+
 
         phi = FunctionFromVectorField(
             tallUNet(unet=UNet2ChunkyMiddle, dimension=3)
@@ -53,8 +55,8 @@ class GradICON(nn.Module):
         
         BATCH_SIZE = 1
         SCALE = 4  # 1 IS QUARTER RES, 2 IS HALF RES, 4 IS FULL RES
-        input_shape = [BATCH_SIZE, 1, 32 * SCALE, 32 * SCALE, 32 * SCALE]
-        # input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE]#TODO: original
+        # input_shape = [BATCH_SIZE, 1, 32 * SCALE, 32 * SCALE, 32 * SCALE]
+        input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE]# original
         self.fullres_net.assign_identity_map(input_shape)
 
       
