@@ -298,7 +298,7 @@ class Unet(nn.Module):
         self.conv5 = double_conv_up(feat_ch, feat_ch)
         self.conv6 = double_conv(feat_ch, out_ch)
 
-    def forward(self, x):
+    def forward(self, x, for_nce=False):
         feat0 = self.conv_in(x)  # H, W
         feat1 = self.conv1(feat0)  # H/2, W/2
         feat2 = self.conv2(feat1)  # H/4, W/4
@@ -309,7 +309,8 @@ class Unet(nn.Module):
         feat5 = self.conv5(feat4)  # H
         feat5 = feat5 + feat0  # H
         feat6 = self.conv6(feat5)
-
+        if for_nce:
+            return [feat0, feat1, feat2, feat3, feat4, feat5, feat6]
         return feat0, feat1, feat2, feat3, feat4, feat6
 
 
@@ -591,7 +592,7 @@ class RegistFormer(nn.Module):
         h_pad, w_pad = padding
         return tensor[:, :, : tensor.shape[2] - h_pad, : tensor.shape[3] - w_pad]
 
-    def forward(self, src, ref, mask=None):
+    def forward(self, src, ref, mask=None, for_nce=False, for_src=False):
         assert (
             src.shape == ref.shape
         ), "Shapes of source and reference images \
@@ -621,6 +622,17 @@ class RegistFormer(nn.Module):
             raise ValueError(
                 "Invalid dam_type provided. Expected 'dam' or 'synthesis_meta'."
             )
+        #TODO: 개발중
+        if for_nce:
+            if for_src:
+                src_lq_concat = torch.cat((src_origin, src), dim=1)
+                q_feat = self.unet_q(src_lq_concat, for_nce=True)
+                return q_feat
+            else:
+                q_feat = self.unet_k(ref, for_nce=True)
+                return q_feat
+
+
 
         # with torch.no_grad():
         #     flow = self.flow_estimator(src, ref).detach()

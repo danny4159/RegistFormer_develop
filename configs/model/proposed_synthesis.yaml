@@ -1,4 +1,4 @@
-_target_: src.models.proposed_synthesis_module.ProposedSynthesisModule
+_target_: src.models.proposed_synthesis_module.ProposedSynthesis
 
 name: ProposedSynthesis
 

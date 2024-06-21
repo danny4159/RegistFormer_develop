@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from mmcv.ops.upfirdn2d import upfirdn2d
 
-class ProposedSynthesisModule(nn.Module):
+class ProposedSynthesis(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
         try:

@@ -8,32 +8,12 @@ from lightning import LightningDataModule
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, random_split
 
 from src.data.components.transforms import (
-    dataset_SynthRAD_MR_CT_Pelvis,
+    dataset_SynthRAD_MR_CT_Pelvis, 
+    dataset_SynthRAD_MR_CT_Pelvis_3D,
 )
 
 
 class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
-    """LightningDataModule for SynthRAD_MR_CT_Pelvis dataset.
-
-    This class prepares and sets up the IXI dataset for usage during model training, validation and testing.
-    It also handles the misalignment of training data.
-
-    Args:
-        data_dir (str, optional): Directory where the data is located. Defaults to "data/".
-        misalign_x (float, optional): Maximum allowable misalignment along the x dimension. Defaults to 0.0.
-        misalign_y (float, optional): Maximum allowable misalignment along the y dimension. Defaults to 0.0.
-        degree (float, optional) : Defining the rotation range in degrees of the simulated movements in z-axis.
-        motion_prob (float, optional): Defining the probability of occurrence of motion.
-        deform_prob (float, optional): Deformation probability.
-        batch_size (int, optional): Batch size for data loading. Defaults to 64.
-        num_workers (int, optional): Number of workers for data loading. Defaults to 5.
-        pin_memory (bool, optional): Whether to pin memory for data loading. Defaults to False.
-
-    Attributes:
-        data_train (Optional[Dataset]): Dataset for training. Defaults to None.
-        data_val (Optional[Dataset]): Dataset for validation. Defaults to None.
-        data_test (Optional[Dataset]): Dataset for testing. Defaults to None.
-    """
 
     def __init__(
         self,
@@ -86,36 +66,6 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             self.deform_prob,
         )
 
-    # def prepare_data(self):
-    #     """Prepares the data for usage.
-
-    #     This function is responsible for the misalignment of training data and saving the data to hdf5 format.
-    #     It doesn't assign any state variables.
-    #     """
-    #     for phase in ["train", "val", "test"]:
-    #         # target_file = os.path.join(
-    #         #     self.data_dir, phase
-    #         # )  # TODO: nifti가 있는지 확인. 나중에 구현
-
-    #         if phase == "train":  # misalign only for training data # TODO: 데이터셋수정
-    #             write_dir = os.path.join(self.data_dir, phase, self.train_file)
-    #             self.train_dir = write_dir
-    #             # mis_x, mis_y, Rot_z, M_prob, D_prob = (
-    #             #     self.misalign_x,
-    #             #     self.misalign_y,
-    #             #     self.degree,
-    #             #     self.motion_prob,
-    #             #     self.deform_prob,
-    #             # )
-
-    #         elif phase == "val":  # no misalignment for validation and test data
-    #             write_dir = os.path.join(self.data_dir, phase, self.val_file)
-    #             self.val_dir = write_dir
-
-    #         elif phase == "test":
-    #             write_dir = os.path.join(self.data_dir, phase, self.test_file)
-    #             self.test_dir = write_dir
-
 
     def setup(self, stage: Optional[str] = None):
         """Sets up the datasets.
@@ -130,29 +80,36 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         self.val_dir = os.path.join(self.data_dir, 'val', self.val_file)
         self.test_dir = os.path.join(self.data_dir, 'test', self.test_file)
 
+        dataset_class = dataset_SynthRAD_MR_CT_Pelvis_3D if self.hparams.flag_3d else dataset_SynthRAD_MR_CT_Pelvis
         # TODO: Adaconv 쓸 시 수정
         # adaconv 말고 나머지 다 이거
-        self.data_train = dataset_SynthRAD_MR_CT_Pelvis(
-            # data_dir='/SSD5_8TB/Daniel/RegistFormer/data/SynthRAD_MR_CT_Pelvis/train/prepared_data_0_0_0_0_0_ver3_final.h5',
+        self.data_train = dataset_class(
             self.train_dir,
+            data_group_1=self.hparams.data_group_1,
+            data_group_2=self.hparams.data_group_2,
+            data_group_3=self.hparams.data_group_3,
             reverse=self.hparams.reverse,
             flip_prob=self.hparams.flip_prob,
             rot_prob=self.hparams.rot_prob,
             padding=self.hparams.padding,
             rand_crop=self.hparams.rand_crop,
         )  # Use flip and crop augmentation for training data
-        self.data_val = dataset_SynthRAD_MR_CT_Pelvis(
-            # data_dir='/SSD5_8TB/Daniel/RegistFormer/data/SynthRAD_MR_CT_Pelvis/val/prepared_data_0_0_0_0_0_ver3_final.h5',
+        self.data_val = dataset_class(
             self.val_dir,
+            data_group_1=self.hparams.data_group_1,
+            data_group_2=self.hparams.data_group_2,
+            data_group_3=self.hparams.data_group_3,
             reverse=self.hparams.reverse,
             flip_prob=0.0,
             rot_prob=0.0,
             padding=self.hparams.padding,
             # rand_crop=self.hparams.rand_crop,
         )
-        self.data_test = dataset_SynthRAD_MR_CT_Pelvis(
-            # data_dir='/SSD5_8TB/Daniel/RegistFormer/data/SynthRAD_MR_CT_Pelvis/test/prepared_data_0_0_0_0_0_ver3_final.h5',
+        self.data_test = dataset_class(
             self.test_dir,
+            data_group_1=self.hparams.data_group_1,
+            data_group_2=self.hparams.data_group_2,
+            data_group_3=self.hparams.data_group_3,
             reverse=self.hparams.reverse,
             flip_prob=0.0,
             rot_prob=0.0,

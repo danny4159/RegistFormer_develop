@@ -1,14 +1,17 @@
 from typing import Any
+import numpy as np
 
 import torch
 from src.losses.gan_loss import GANLoss
 from src.losses.mind_loss import MINDLoss
 from src.losses.contextual_loss import Contextual_Loss
 from src.losses.occlusion_contextual_loss import OcclusionContextualLoss
+from src.losses.patch_nce_loss import PatchNCELoss
+
 from src.models.base_module_AtoB import BaseModule_AtoB
 from src import utils
 
-
+# from torch_ema import ExponentialMovingAverage
 
 log = utils.get_pylogger(__name__)
 
@@ -18,6 +21,7 @@ class RegistFormerModule(BaseModule_AtoB):
         self,
         netG_A: torch.nn.Module,
         netD_A: torch.nn.Module,
+        netF_A: torch.nn.Module,
         optimizer,
         params,
         *args,
@@ -26,6 +30,7 @@ class RegistFormerModule(BaseModule_AtoB):
         super().__init__(params, *args, **kwargs)
         self.netG_A = netG_A
         self.netD_A = netD_A
+        self.netF_A = netF_A
         self.save_hyperparameters(logger=False, ignore=["netG_A", "netD_A"])
         self.automatic_optimization = False  # perform manual
         self.optimizer = optimizer
@@ -43,6 +48,11 @@ class RegistFormerModule(BaseModule_AtoB):
         self.criterionGAN = GANLoss(gan_type="lsgan") if params.lambda_gan != 0 else None  # gan_type = wgan, lsgan, wgangp ..
 
         self.criterionMIND = MINDLoss() if params.lambda_mind != 0 else None
+
+        self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size) if params.lambda_nce != 0 else None 
+
+        # PatchNCE specific initializations
+        self.flip_equivariance = params.flip_equivariance
 
     def backward_G(self, real_a, real_b, fake_b):
         loss_G = 0.0
@@ -73,24 +83,52 @@ class RegistFormerModule(BaseModule_AtoB):
             self.log("MIND_Loss", loss_MIND.detach(), prog_bar=True)
             loss_G += loss_MIND
 
+        if self.criterionNCE:
+            feat_b = self.netG_A(real_a, fake_b, for_nce=True, for_src=False)
+
+            flipped_for_equivariance = np.random.random() < 0.5
+            if self.flip_equivariance and flipped_for_equivariance:
+                feat_b = [torch.flip(fb, [3]) for fb in feat_b]
+
+            feat_a = self.netG_A(real_a, real_b, for_nce=True, for_src=True)
+            feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+            feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+
+            total_nce_loss = 0.0
+            for f_a, f_b in zip(feat_b_pool, feat_a_pool):
+                loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce
+                total_nce_loss += loss.mean()
+            loss_NCE = total_nce_loss / len(feat_b)
+            self.log("NCE_Loss", loss_NCE.detach(), prog_bar=True)
+            loss_G += loss_NCE
+
         return loss_G
 
     def training_step(self, batch: Any, batch_idx: int):
         if self.params.lambda_gan != 0:
-            optimizer_G, optimizer_D_A = self.optimizers()
+            if self.params.lambda_nce ==0:
+                optimizer_G_A, optimizer_D_A = self.optimizers()
+            else:
+                optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
         else:
-            optimizer_G = self.optimizers()
+            optimizer_G_A = self.optimizers()
         real_a, real_b, fake_b = self.model_step(batch)
 
         # Renew
-        with optimizer_G.toggle_model():
-            optimizer_G.zero_grad() # 이것만 위로 올림
+        with optimizer_G_A.toggle_model():
+            optimizer_G_A.zero_grad() # 이것만 위로 올림
+            optimizer_F_A.zero_grad()
             loss_G = self.backward_G(real_a, real_b, fake_b)
             self.manual_backward(loss_G)
             self.clip_gradients(
-                optimizer_G, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+                optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
             )
-            optimizer_G.step()
+            self.clip_gradients(
+                    optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+            )
+            optimizer_G_A.step()
+            optimizer_F_A.step()
+
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         
         if self.params.lambda_gan != 0:
@@ -102,26 +140,32 @@ class RegistFormerModule(BaseModule_AtoB):
                     optimizer_D_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
                 )
                 optimizer_D_A.step()
+
             self.log("Disc_Loss", loss_D_A.detach(), prog_bar=True)
 
 
     def configure_optimizers(self):
-        optimizer_G = self.hparams.optimizer(params=self.netG_A.parameters())
-        optimizers = [optimizer_G]
-        # schedulers = []
+        optimizers = []
+        schedulers = []
+        
+        optimizer_G_A = self.hparams.optimizer(params=self.netG_A.parameters())
+        optimizers.append(optimizer_G_A)
 
         if self.params.lambda_gan != 0:
-            optimizer_D = self.hparams.optimizer(params=self.netD_A.parameters())
-            optimizers.append(optimizer_D)
+            optimizer_D_A = self.hparams.optimizer(params=self.netD_A.parameters())
+            optimizers.append(optimizer_D_A)
+        
+        if self.params.lambda_nce != 0:
+            optimizer_F_A = self.hparams.optimizer(params=self.netF_A.parameters())
+            optimizers.append(optimizer_F_A)
 
-        # if self.hparams.scheduler is not None:
-        #     scheduler_G = self.hparams.scheduler(optimizer=optimizer_G)
-        #     schedulers.append(scheduler_G)
-
-        #     if self.params.lambda_gan != 0:
-        #         scheduler_D = self.hparams.scheduler(optimizer=optimizer_D)
-        #         schedulers.append(scheduler_D)
-            
-            # return optimizers, schedulers
-
+        if self.hparams.scheduler is not None:
+                scheduler_G_A = self.hparams.scheduler(optimizer=optimizer_G_A)
+                schedulers.append(scheduler_G_A)
+                scheduler_D_B = self.hparams.scheduler(optimizer=optimizer_D_A)
+                schedulers.append(scheduler_D_B)
+                scheduler_F_A = self.hparams.scheduler(optimizer=optimizer_F_A)
+                schedulers.append(scheduler_F_A)
+                return optimizers, schedulers
+        
         return optimizers
