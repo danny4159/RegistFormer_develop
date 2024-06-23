@@ -320,7 +320,8 @@ class dataset_SynthRAD_MR_CT_Pelvis(Dataset):
             if self.data_group_3:
                 A, B, C = random_crop(A, B, C, (96, 96))  # resvit 용
             else:
-                A, B = random_crop(A, B, (96, 96))  # resvit 용
+                A, B = random_crop(A, B, (96, 96)) 
+                # A, B = random_crop(A, B, (320,192))  # regpgan 용
         else:
             _, h, w = A.shape
             if self.data_group_3:

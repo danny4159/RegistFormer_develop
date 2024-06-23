@@ -12,7 +12,21 @@ class ResnetGenerator(nn.Module):
     We adapt Torch code and idea from Justin Johnson's neural style transfer project(https://github.com/jcjohnson/fast-neural-style)
     """
 
-    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6, padding_type='reflect', no_antialias=False, no_antialias_up=False, opt=None):
+    def __init__(self, **kwargs):
+        try:
+            input_nc = kwargs['input_nc'] 
+            output_nc = kwargs['output_nc'] 
+            ngf = kwargs['ngf'] 
+            norm_layer = kwargs['norm_layer'] 
+            use_dropout = kwargs['use_dropout'] 
+            n_blocks = 6
+            padding_type = 'reflect'
+            no_antialias = False
+            no_antialias_up = False, 
+            opt = None
+        except KeyError as e:
+            raise ValueError(f"Missing required parameter: {str(e)}")
+
         """Construct a Resnet-based generator
 
         Parameters:
@@ -27,6 +41,9 @@ class ResnetGenerator(nn.Module):
         assert(n_blocks >= 0)
         super(ResnetGenerator, self).__init__()
         self.opt = opt
+
+        norm_layer = get_norm_layer(norm_type=norm_layer)
+        
         if type(norm_layer) == functools.partial:
             use_bias = norm_layer.func == nn.InstanceNorm2d
         else:
@@ -104,6 +121,16 @@ class ResnetGenerator(nn.Module):
             return fake
 
 
+def get_norm_layer(norm_type="instance"):
+    if norm_type == "batch":
+        norm_layer = functools.partial(nn.BatchNorm2d, affine=True)
+    elif norm_type == "instance":
+        norm_layer = functools.partial(nn.InstanceNorm2d, affine=False)
+    elif norm_type == "none":
+        norm_layer = None
+    else:
+        raise NotImplementedError("normalization layer [%s] is not found" % norm_type)
+    return norm_layer
 
 
 class Downsample(nn.Module):

@@ -10,7 +10,7 @@ from src.losses.contextual_loss import Contextual_Loss
 
 from src.models.base_module_AtoB_BtoA import BaseModule_AtoB_BtoA
 from src import utils
-from torchsummary import summary
+# from torchsummary import summary
 
 
 log = utils.get_pylogger(__name__)
