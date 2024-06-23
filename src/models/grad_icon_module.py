@@ -41,18 +41,20 @@ class GradICONModule(BaseModule_Registration):
         self.params = params
         self.scheduler = scheduler
 
-    def model_step(self, batch: Any):
-        moving_img, fixed_img, evaluation_img = batch
-        loss, a, b, c, flips, transform_vector, warped_image = self.net_R_A(moving_img, fixed_img)
-        return loss, a, b, c, flips, transform_vector, warped_image, moving_img, fixed_img, evaluation_img
-
+    def model_step(self, batch: Any, return_loss=False):
+        evaluation_img, moving_img, fixed_img = batch # MR, CT, syn_CT
+        loss, a, b, c, flips, transform_vector, warped_img = self.netR_A(moving_img, fixed_img)
+        if return_loss:
+            return loss
+        else:
+            return evaluation_img, moving_img, fixed_img, warped_img
 
     def training_step(self, batch: Any, batch_idx: int):
         optimizer_R_A, optimizer_D_A, optimizer_F_A = self.optimizers()
         # loss, a, b, c, flips, transform_vector, warped_image, moving_img, fixed_img, evaluation_img = self.model_step(batch)
         
         with optimizer_R_A.toggle_model():
-            loss, a, b, c, flips, transform_vector, warped_image, moving_img, fixed_img, evaluation_img = self.model_step(batch)
+            loss = self.model_step(batch, return_loss=True)
             self.manual_backward(loss)
             self.clip_gradients(
                 optimizer_R_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"

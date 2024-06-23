@@ -11,11 +11,11 @@ from src.models.components.network_registformer import RegistFormer
 from src.models.components.network_spade import SPADEGenerator, ConvEncoder
 from src.models.components.network_adainGen import AdaINGen
 from src.models.components.network_dam import DAModule
-from src.models.components.network_proposed_synthesis import ProposedSynthesis
+from src.models.components.network_proposed_synthesis import ProposedSynthesisModule
 from src.models.components.network_resnet_generator import ResnetGenerator
 from src.models.components.network_patch_sample_F import PatchSampleF
 
-# from src.models.components.network_grad_icon import GradICON
+from src.models.components.network_grad_icon import GradICON
 # from src.models.components.networks_spade_danny import SPADEGenerator, ConvEncoder
 
 

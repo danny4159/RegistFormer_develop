@@ -3,14 +3,18 @@ name: SynthRAD_MR_CT_Pelvis
 data_dir: ${paths.root_dir}/data/SynthRAD_MR_CT_Pelvis
 data_group_1: "MR"
 data_group_2: "CT"
-data_group_3: null # If exist put it, or null
+data_group_3: null # If exist put it, or null # Regist:synCT
 misalign_x: 0
 misalign_y: 0
 degree: 0
 motion_prob: 0
 deform_prob: 0
 # TODO: 데이터셋 수정
-train_file: 'prepared_data_0_0_0_0_0_ver3_final.h5' # Ver3_AllPatientSameSize_final.h5 # Ver3_AllPatientSameSize_Resize_Pad.h5 # Ver3_OnlyOnePatient.h5 # prepared_data_0_0_0_0_0_ver3_final.h5
+# prepared_data_0_0_0_0_0_ver3_final.h5
+# Ver3_AllPatientSameSize_final_2.h5
+# Ver3_OnlyOnePatient.h5
+# Registration_MR_CT_synCT.h5
+train_file: 'prepared_data_0_0_0_0_0_ver3_final.h5'
 val_file: 'prepared_data_0_0_0_0_0_ver3_final.h5'
 test_file: 'prepared_data_0_0_0_0_0_ver3_final.h5' 
 reverse: False # New

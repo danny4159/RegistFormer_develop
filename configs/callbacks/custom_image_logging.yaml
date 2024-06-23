@@ -15,6 +15,7 @@ ImageSavingCallback:
   subject_number_length: 5
   test_file: ${data.test_file}
   half_val_test: ${data.half_val_test}
+  flag_normalize: ${callbacks.custom_image_logging.flag_normalize}
 
 ## For meta-learning weight visualization
 # WeightSavingCallback:

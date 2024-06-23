@@ -13,47 +13,47 @@ class GradICON(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
         try:
-            self.input_nc = kwargs['input_nc']
-            self.feat_ch = kwargs['feat_ch']
-            self.output_nc = kwargs['output_nc']
-            self.demodulate = kwargs['demodulate']
+            self.batch_size = kwargs['batch_size']
+            self.dimension = kwargs['dimension']
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
         
-        BATCH_SIZE = 1 #8
+        BATCH_SIZE = self.batch_size
         SCALE = 2 
+        assert BATCH_SIZE == 1, f"BATCH_SIZE must be 1 on GradICON Network, but got {BATCH_SIZE}"
+
 
         # input_shape = [BATCH_SIZE, 1, 32 * SCALE, 32 * SCALE, 32 * SCALE]
         input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE] # original
 
 
         phi = FunctionFromVectorField(
-            tallUNet(unet=UNet2ChunkyMiddle, dimension=3)
+            tallUNet(unet=UNet2ChunkyMiddle, dimension=self.dimension)
         )
-        psi = FunctionFromVectorField(tallUNet2(dimension=3))
+        psi = FunctionFromVectorField(tallUNet2(dimension=self.dimension))
 
 
         pretrained_lowres_net = DoubleNet(phi, psi)
 
         hires_net = DoubleNet(
-            DownsampleNet(pretrained_lowres_net, dimension=3),
-            FunctionFromVectorField(tallUNet2(dimension=3)),
+            DownsampleNet(pretrained_lowres_net, dimension=self.dimension),
+            FunctionFromVectorField(tallUNet2(dimension=self.dimension)),
         )
         hires_net.assign_identity_map(input_shape)
 
 
         self.fullres_net = GradientICON(
                                     DoubleNet(
-                                    DownsampleNet(hires_net, dimension=3),
-                                    FunctionFromVectorField(tallUNet2(dimension=3)),
+                                    DownsampleNet(hires_net, dimension=self.dimension),
+                                    FunctionFromVectorField(tallUNet2(dimension=self.dimension)),
                                     ),
                                     # inverseConsistentNet.ssd_only_interpolated,
                                     SSDOnlyInterpolated(),
                                     0.2,
                                     )
         
-        BATCH_SIZE = 1
+        BATCH_SIZE = self.batch_size
         SCALE = 4  # 1 IS QUARTER RES, 2 IS HALF RES, 4 IS FULL RES
         # input_shape = [BATCH_SIZE, 1, 32 * SCALE, 32 * SCALE, 32 * SCALE]
         input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE]# original
@@ -61,9 +61,9 @@ class GradICON(nn.Module):
 
       
     def forward(self, moving_img, fixed_img):
-        loss, a, b, c, flips, transform_vector, warped_image = self.fullres_net(moving_img, fixed_img)
+        loss, a, b, c, flips, transform_vector, warped_img = self.fullres_net(moving_img, fixed_img)
         
-        return loss, a, b, c, flips, transform_vector, warped_image
+        return loss, a, b, c, flips, transform_vector, warped_img
 
 
 

@@ -208,6 +208,7 @@ class ImageSavingCallback(Callback):
                  subject_number_length: int = 3, 
                  test_file: str = None,
                  half_val_test: bool = False,
+                 flag_normalize: bool = True,
                  ):
         """_summary_
         Image saving callback : Save images in nii format for each subject
@@ -218,7 +219,9 @@ class ImageSavingCallback(Callback):
         self.subject_number_length = subject_number_length
         self.test_file = test_file
         self.half_val_test = half_val_test
+        self.flag_normalize = flag_normalize
         print("test_file: ", test_file)
+        print("flag_normalize: ", self.flag_normalize)
 
     @staticmethod
     def change_torch_numpy(a, b, c, d):
@@ -235,33 +238,42 @@ class ImageSavingCallback(Callback):
         return a_np, b_np, c_np, d_np
 
     @staticmethod
-    def change_numpy_nii(a, b, c, d):
+    def change_numpy_nii(a, b, c, d, flag_normalize=True):
         assert (
             a.ndim == b.ndim == c.ndim == d.ndim == 3
         ), "All input arrays must have the same number of dimensions (3)"
 
-        # scale to [0, 1] and [0, 255]
-        a, b, c, d = (
-            ((a + 1) / 2) * 255,
-            ((b + 1) / 2) * 255,
-            ((c + 1) / 2) * 255,
-            ((d + 1) / 2) * 255,
-        )
+        if flag_normalize:
+            # scale to [0, 1] and [0, 255]
+            a, b, c, d = (
+                ((a + 1) / 2) * 255,
+                ((b + 1) / 2) * 255,
+                ((c + 1) / 2) * 255,
+                ((d + 1) / 2) * 255,
+            )
 
-        # type to np.int16
-        a, b, c, d = (
-            a.astype(np.int16),
-            b.astype(np.int16),
-            c.astype(np.int16),
-            d.astype(np.int16),
-        )
+            # type to np.int16
+            a, b, c, d = (
+                a.astype(np.int16),
+                b.astype(np.int16),
+                c.astype(np.int16),
+                d.astype(np.int16),
+            )
 
         # transpose 1, 2 dim (for viewing on ITK-SNAP)
+        # a, b, c, d = (
+        #     np.transpose(a, axes=(1, 0, 2))[:, ::-1],
+        #     np.transpose(b, axes=(1, 0, 2))[:, ::-1],
+        #     np.transpose(c, axes=(1, 0, 2))[:, ::-1],
+        #     np.transpose(d, axes=(1, 0, 2))[:, ::-1],
+        # )
+
+        # flip rows and columns (행과 열 반전) -> Align with original image
         a, b, c, d = (
-            np.transpose(a, axes=(1, 0, 2))[:, ::-1],
-            np.transpose(b, axes=(1, 0, 2))[:, ::-1],
-            np.transpose(c, axes=(1, 0, 2))[:, ::-1],
-            np.transpose(d, axes=(1, 0, 2))[:, ::-1],
+            a[::-1, ::-1, :],
+            b[::-1, ::-1, :],
+            c[::-1, ::-1, :],
+            d[::-1, ::-1, :] if d is not None else None,
         )
 
         # Create Nifti1Image for each
@@ -309,7 +321,7 @@ class ImageSavingCallback(Callback):
 
             # convert numpy to nii
             a_nii, b_nii, preds_a_nii, preds_b_nii = self.change_numpy_nii(
-                a_nii, b_nii, preds_a_nii, preds_b_nii
+                a_nii, b_nii, preds_a_nii, preds_b_nii, flag_normalize=self.flag_normalize
             )
             # save nii image to (.nii) file
             self.save_nii(

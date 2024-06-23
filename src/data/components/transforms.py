@@ -510,7 +510,7 @@ class dataset_SynthRAD_MR_CT_Pelvis_3D(Dataset):
             data_dict["C"] = C
 
         # Apply the random flipping
-        data_dict = self.aug_func(data_dict)
+        # data_dict = self.aug_func(data_dict)
 
         A = data_dict["A"]
         A = convert_to_tensor(A)

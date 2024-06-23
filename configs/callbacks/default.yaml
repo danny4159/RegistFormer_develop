@@ -16,3 +16,6 @@ model_checkpoint:
 
 model_summary:
   max_depth: 1
+
+custom_image_logging:
+  flag_normalize: True # For the dataset of registration Network 
