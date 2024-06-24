@@ -107,12 +107,12 @@ class MunitModule(BaseModule_AtoB_BtoA):
         loss_perceptual = (loss_G_vgg_a + loss_G_vgg_b) * lambda_perceptual
         
         # contextual loss (extra)
-        loss_contextual_a = torch.mean(self.contextual_loss(x_ba, real_a))
-        loss_contextual_b = torch.mean(self.contextual_loss(x_ab, real_b))
-        loss_contextual = (loss_contextual_a + loss_contextual_b) * lambda_contextual
+        # loss_contextual_a = torch.mean(self.contextual_loss(x_ba, real_a))
+        # loss_contextual_b = torch.mean(self.contextual_loss(x_ab, real_b))
+        # loss_contextual = (loss_contextual_a + loss_contextual_b) * lambda_contextual
 
         # total loss 
-        loss_G = loss_GAN + loss_image + loss_style + loss_content + loss_cycle + loss_perceptual + loss_contextual
+        loss_G = loss_GAN + loss_image + loss_style + loss_content + loss_cycle + loss_perceptual #+ loss_contextual
         return loss_G
 
     def model_step_munit(self, batch: Any):
