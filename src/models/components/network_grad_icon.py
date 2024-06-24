@@ -25,7 +25,8 @@ class GradICON(nn.Module):
 
 
         # input_shape = [BATCH_SIZE, 1, 32 * SCALE, 32 * SCALE, 32 * SCALE]
-        input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE] # original
+        # input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE] # original
+        input_shape = [BATCH_SIZE, 1, 96 * SCALE, 96 * SCALE, 32 * SCALE] # original
 
 
         phi = FunctionFromVectorField(
@@ -56,7 +57,8 @@ class GradICON(nn.Module):
         BATCH_SIZE = self.batch_size
         SCALE = 4  # 1 IS QUARTER RES, 2 IS HALF RES, 4 IS FULL RES
         # input_shape = [BATCH_SIZE, 1, 32 * SCALE, 32 * SCALE, 32 * SCALE]
-        input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE]# original
+        # input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE]# original
+        input_shape = [BATCH_SIZE, 1, 96 * SCALE, 96 * SCALE, 32 * SCALE]# original
         self.fullres_net.assign_identity_map(input_shape)
 
       
@@ -377,8 +379,8 @@ class GradientICON(RegistrationModule):
         return similarity_loss
 
     def forward(self, image_A, image_B) -> ICONLoss:
-        # print("Identity map shape:", self.identity_map.shape)
-        # print("Image A shape:", image_A.shape)
+        print("Identity map shape:", self.identity_map.shape)
+        print("Image A shape:", image_A.shape)
         
         assert self.identity_map.shape[2:] == image_A.shape[2:]
         assert self.identity_map.shape[2:] == image_B.shape[2:]
@@ -948,6 +950,97 @@ class UNet(nn.Module):
         return x / 10
 
 
+# class UNet2(nn.Module):
+#     def __init__(self, num_layers, channels, dimension):
+#         super().__init__()
+#         self.dimension = dimension
+#         if dimension == 2:
+#             self.BatchNorm = nn.BatchNorm2d
+#             self.Conv = nn.Conv2d
+#             self.ConvTranspose = nn.ConvTranspose2d
+#             self.avg_pool = F.avg_pool2d
+#             self.interpolate_mode = "bilinear"
+#         else:
+#             self.BatchNorm = nn.BatchNorm3d
+#             self.Conv = nn.Conv3d
+#             self.ConvTranspose = nn.ConvTranspose3d
+#             self.avg_pool = F.avg_pool3d
+#             self.interpolate_mode = "trilinear"
+#         self.num_layers = num_layers
+#         down_channels = np.array(channels[0])
+#         up_channels_out = np.array(channels[1])
+#         up_channels_in = down_channels[1:] + np.concatenate([up_channels_out[1:], [0]])
+#         self.downConvs = nn.ModuleList([])
+#         self.upConvs = nn.ModuleList([])
+#         #        self.residues = nn.ModuleList([])
+#         self.batchNorms = nn.ModuleList(
+#             [
+#                 self.BatchNorm(num_features=up_channels_out[_])
+#                 for _ in range(self.num_layers)
+#             ]
+#         )
+#         for depth in range(self.num_layers):
+#             self.downConvs.append(
+#                 self.Conv(
+#                     down_channels[depth],
+#                     down_channels[depth + 1],
+#                     kernel_size=3,
+#                     padding=1,
+#                     stride=2,
+#                 )
+#             )
+#             self.upConvs.append(
+#                 self.ConvTranspose(
+#                     up_channels_in[depth],
+#                     up_channels_out[depth],
+#                     kernel_size=4,
+#                     padding=1,
+#                     stride=2,
+#                 )
+#             )
+#         #            self.residues.append(
+#         #                Residual(up_channels_out[depth])
+#         #            )
+#         self.lastConv = self.Conv(
+#             down_channels[0] + up_channels_out[0], dimension, kernel_size=3, padding=1
+#         )
+#         torch.nn.init.zeros_(self.lastConv.weight)
+#         torch.nn.init.zeros_(self.lastConv.bias)
+
+#     def forward(self, x, y):
+#         x = torch.cat([x, y], 1)
+#         skips = []
+#         for depth in range(self.num_layers):
+#             skips.append(x)
+#             y = self.downConvs[depth](F.leaky_relu(x))
+#             x = y + pad_or_crop(
+#                 self.avg_pool(x, 2, ceil_mode=True), y.size(), self.dimension
+#             )
+
+#         for depth in reversed(range(self.num_layers)):
+#             y = self.upConvs[depth](F.leaky_relu(x))
+#             x = y + F.interpolate(
+#                 pad_or_crop(x, y.size(), self.dimension),
+#                 scale_factor=2,
+#                 mode=self.interpolate_mode,
+#                 align_corners=False,
+#             )
+#             # x = self.residues[depth](x)
+#             x = self.batchNorms[depth](x)
+#             if self.dimension == 2:
+#                 x = x[:, :, : skips[depth].size()[2], : skips[depth].size()[3]]
+#             else:
+#                 x = x[
+#                     :,
+#                     :,
+#                     : skips[depth].size()[2],
+#                     : skips[depth].size()[3],
+#                     : skips[depth].size()[4],
+#                 ]
+#             x = torch.cat([x, skips[depth]], 1)
+#         x = self.lastConv(x)
+#         return x / 10
+
 class UNet2(nn.Module):
     def __init__(self, num_layers, channels, dimension):
         super().__init__()
@@ -970,7 +1063,6 @@ class UNet2(nn.Module):
         up_channels_in = down_channels[1:] + np.concatenate([up_channels_out[1:], [0]])
         self.downConvs = nn.ModuleList([])
         self.upConvs = nn.ModuleList([])
-        #        self.residues = nn.ModuleList([])
         self.batchNorms = nn.ModuleList(
             [
                 self.BatchNorm(num_features=up_channels_out[_])
@@ -996,9 +1088,6 @@ class UNet2(nn.Module):
                     stride=2,
                 )
             )
-        #            self.residues.append(
-        #                Residual(up_channels_out[depth])
-        #            )
         self.lastConv = self.Conv(
             down_channels[0] + up_channels_out[0], dimension, kernel_size=3, padding=1
         )
@@ -1023,7 +1112,6 @@ class UNet2(nn.Module):
                 mode=self.interpolate_mode,
                 align_corners=False,
             )
-            # x = self.residues[depth](x)
             x = self.batchNorms[depth](x)
             if self.dimension == 2:
                 x = x[:, :, : skips[depth].size()[2], : skips[depth].size()[3]]
@@ -1038,8 +1126,7 @@ class UNet2(nn.Module):
             x = torch.cat([x, skips[depth]], 1)
         x = self.lastConv(x)
         return x / 10
-
-
+    
 
 def pad_or_crop(x, shape, dimension):
     y = x[:, : shape[1]]
@@ -1051,6 +1138,24 @@ def pad_or_crop(x, shape, dimension):
     assert y.size()[1] == shape[1]
 
     return y
+
+
+# def pad_or_crop(x, shape, dimension):
+#     """
+#     Pads or crops the input tensor x to the given shape.
+#     """
+#     y = x[:, :shape[1]]
+#     padding = [0, 0] * (dimension - 2)  # Initialize padding
+
+#     for i in range(2, dimension):
+#         if x.size()[i] < shape[i]:
+#             padding += [0, shape[i] - x.size()[i]]
+#         elif x.size()[i] > shape[i]:
+#             y = y.narrow(i, 0, shape[i])
+
+#     if any(padding):
+#         y = F.pad(y, padding)
+#     return y
 
 
 def tallUNet(unet=UNet, dimension=2):
