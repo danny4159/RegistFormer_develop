@@ -96,6 +96,54 @@ def random_crop(tensorA, tensorB, output_size=(128, 128)):
     return tensorA, tensorB
 
 
+def random_crop_3d(tensorA, tensorB, tensorC=None, output_size=(128, 128)):
+    """
+    Crop randomly the 3D image in a sample along the height and width dimensions only.
+
+    Args:
+        tensorA (Tensor): First image to be cropped.
+        tensorB (Tensor): Second image to be cropped.
+        tensorC (Tensor, optional): Third image to be cropped.
+        output_size (tuple or int): Desired output size for height and width. If int, square crop is made.
+
+    Returns:
+        tuple: Cropped images.
+    """
+    # Handle the case where the output size is an integer
+    if isinstance(output_size, int):
+        output_size = (output_size, output_size)
+
+    # Ensure the tensors have the correct dimensions
+    assert len(tensorA.shape) == 4, "Input tensor A must have 4 dimensions (C, H, W, D)"
+    assert len(tensorB.shape) == 4, "Input tensor B must have 4 dimensions (C, H, W, D)"
+    if tensorC is not None:
+        assert len(tensorC.shape) == 4, "Input tensor C must have 4 dimensions (C, H, W, D)"
+
+    _, h, w, d = tensorA.shape
+
+    # Calculate the top left corner of the random crop
+    top = (
+        torch.randint(0, h - output_size[0] + 1, size=(1,)).item()
+        if h > output_size[0]
+        else 0
+    )
+    left = (
+        torch.randint(0, w - output_size[1] + 1, size=(1,)).item()
+        if w > output_size[1]
+        else 0
+    )
+
+    # Perform the crop on height and width dimensions
+    tensorA = tensorA[:, top:top + output_size[0], left:left + output_size[1], :]
+    tensorB = tensorB[:, top:top + output_size[0], left:left + output_size[1], :]
+    if tensorC is not None:
+        tensorC = tensorC[:, top:top + output_size[0], left:left + output_size[1], :]
+
+    if tensorC is not None:
+        return tensorA, tensorB, tensorC
+    else:
+        return tensorA, tensorB
+
 def even_crop(tensorA, tensorB, target_size):
     """
     Crop the image to the target size evenly from all sides.
@@ -525,6 +573,12 @@ class dataset_SynthRAD_MR_CT_Pelvis_3D(Dataset):
         #         A, B, C = padding_target_size(A, B, C, min_size=(256, 256, 256)) # TODO: 이거 쓰려면 코드 수정이 필요함 
         #     else:
         #         A, B = padding_target_size(A, B, min_size=(256, 256, 256)) # TODO: 이거 쓰려면 코드 수정이 필요함 
+
+        if self.rand_crop:
+            if self.data_group_3:
+                A, B, C = random_crop_3d(A, B, C, (192, 160))  # 3D cropping
+            else:
+                A, B = random_crop_3d(A, B, output_size=(192, 160))  # 3D cropping
 
         # if self.rand_crop: # TODO: 이거 쓰려면 코드 수정이 필요함 
         #     if self.data_group_3:

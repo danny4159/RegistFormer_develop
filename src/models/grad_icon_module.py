@@ -14,7 +14,9 @@ from src import utils
 from src.models.base_module_AtoB_BtoA import BaseModule_AtoB_BtoA
 from src.models.base_module_AtoB import BaseModule_AtoB
 from src.models.base_module_registration import BaseModule_Registration
+from src.models.components.component_grad_icon import register_pair
 
+import itk
 
 log = utils.get_pylogger(__name__)
 
@@ -43,7 +45,7 @@ class GradICONModule(BaseModule_Registration):
         self.params = params
         self.scheduler = scheduler
 
-    def pad_to_128(self, tensor, padding_value=-1):
+    def pad_slice_to_128(self, tensor, padding_value=-1):
         # tensor shape: [batch, channel, height, width, slice]
         slices = tensor.shape[-1]
         if slices < 128:
@@ -51,67 +53,50 @@ class GradICONModule(BaseModule_Registration):
             tensor = F.pad(tensor, padding, mode='constant', value=padding_value)
         return tensor
     
-    def pad_to_128_and_384(self, tensor, padding_value=-1):
+    def crop_slice_to_original(self, tensor, original_slices):
         # tensor shape: [batch, channel, height, width, slice]
-        slices = tensor.shape[-1]
-        height = tensor.shape[-2]
-        if slices < 128:
-            slice_padding = (0, 128 - slices)  # padding only on one side
-        else:
-            slice_padding = (0, 0)
-        
-        if height < 384:
-            height_padding = (0, 384 - height)  # padding only on one side
-        else:
-            height_padding = (0, 0)
-        
-        padding = slice_padding + height_padding
-        tensor = F.pad(tensor, padding, mode='constant', value=padding_value)
-        return tensor
-
-    # def crop_to_original(self, tensor, original_slices):
-    #     # tensor shape: [batch, channel, height, width, slice]
-    #     return tensor[..., :original_slices]
-
-    def crop_to_original(self, tensor, original_slices, original_height):
-        # tensor shape: [batch, channel, height, width, slice]
-        return tensor[..., :original_height, :original_slices]
+        return tensor[..., :original_slices]
     
-    def model_step(self, batch: Any, return_loss=False):
+    def model_step(self, batch: Any, return_loss=False, train=True):
         evaluation_img, moving_img, fixed_img = batch # MR, CT, syn_CT
 
-        original_slices = evaluation_img.shape[-1]
-        original_height = evaluation_img.shape[-2]
-        # original_slices = evaluation_img.shape[-1]
-
-        evaluation_img = self.pad_to_128_and_384(evaluation_img)
-        moving_img = self.pad_to_128_and_384(moving_img)
-        fixed_img = self.pad_to_128_and_384(fixed_img)
-        
-        # evaluation_img = self.pad_to_128(evaluation_img)
-        # moving_img = self.pad_to_128(moving_img)
-        # fixed_img = self.pad_to_128(fixed_img)
-        
-        loss, a, b, c, flips, transform_vector, warped_img = self.netR_A(moving_img, fixed_img)
-
-        evaluation_img = self.crop_to_original(evaluation_img, original_slices, original_height)
-        moving_img = self.crop_to_original(moving_img, original_slices, original_height)
-        fixed_img = self.crop_to_original(fixed_img, original_slices, original_height)
-        warped_img = self.crop_to_original(warped_img, original_slices, original_height)
-        
-        # evaluation_img = self.crop_to_original(evaluation_img, original_slices)
-        # moving_img = self.crop_to_original(moving_img, original_slices)
-        # fixed_img = self.crop_to_original(fixed_img, original_slices)
-        # warped_img = self.crop_to_original(warped_img, original_slices)
-        
-
-        if return_loss:
+        if train:
+            original_slices = evaluation_img.shape[-1]
+            evaluation_img = self.pad_slice_to_128(evaluation_img)
+            moving_img = self.pad_slice_to_128(moving_img)
+            fixed_img = self.pad_slice_to_128(fixed_img)
+            loss, transform_vector, warped_img = self.netR_A(moving_img, fixed_img)
             return loss
+            # evaluation_img = self.crop_slice_to_original(evaluation_img, original_slices)
+            # moving_img = self.crop_slice_to_original(moving_img, original_slices)
+            # fixed_img = self.crop_slice_to_original(fixed_img, original_slices)
+            # warped_img = self.crop_slice_to_original(warped_img, original_slices)
         else:
-            return evaluation_img, moving_img, fixed_img, warped_img
+            moving_img_np = moving_img.cpu().detach().squeeze().numpy()
+            fixed_img_np = fixed_img.cpu().detach().squeeze().numpy()
+            moving_img_np = moving_img_np.transpose(2, 1, 0) # itk: D, W, H
+            fixed_img_np = fixed_img_np.transpose(2, 1, 0) 
+            
+            moving_img_itk = itk.image_from_array(moving_img_np)
+            fixed_img_itk = itk.image_from_array(fixed_img_np)
+            phi_AB, phi_BA = register_pair(self.netR_A, moving_img_itk, fixed_img_itk)
+            interpolator = itk.LinearInterpolateImageFunction.New(moving_img_itk)
+            warped_img = itk.resample_image_filter(moving_img_itk, 
+                                                    transform=phi_AB, 
+                                                    interpolator=interpolator,
+                                                    size=itk.size(fixed_img_itk),
+                                                    output_spacing=itk.spacing(fixed_img_itk),
+                                                    output_direction=fixed_img_itk.GetDirection(),
+                                                    output_origin=fixed_img_itk.GetOrigin()
+                                                    )
+            warped_img_np = itk.array_from_image(warped_img) # D, W, H -> H, W, D
+            warped_img_tensor = torch.from_numpy(warped_img_np).unsqueeze(0).unsqueeze(0)
+            warped_img_tensor = warped_img_tensor.to(evaluation_img.device)
 
+            return evaluation_img, moving_img, fixed_img, warped_img_tensor
+        
     def training_step(self, batch: Any, batch_idx: int):
-        optimizer_R_A, optimizer_D_A, optimizer_F_A = self.optimizers()
+        optimizer_R_A = self.optimizers()
         # loss, a, b, c, flips, transform_vector, warped_image, moving_img, fixed_img, evaluation_img = self.model_step(batch)
         
         with optimizer_R_A.toggle_model():

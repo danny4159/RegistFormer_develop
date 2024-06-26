@@ -81,15 +81,27 @@ class BaseModule_Registration(LightningModule):  # single direction
         return super().on_train_epoch_end()
 
     def validation_step(self, batch: Any, batch_idx: int):
-        evaluation_img, moving_img, fixed_img, warped_img = self.model_step(batch) # MR, CT, syn_CT, _
+        evaluation_img, moving_img, fixed_img, warped_img = self.model_step(batch, train=False) # MR, CT, syn_CT, _
         
-        self.val_gc_B.update(norm_to_uint8(evaluation_img), norm_to_uint8(warped_img))
-        nmi_score = self.val_nmi_B(flatten_to_1d(norm_to_uint8(evaluation_img)), flatten_to_1d(norm_to_uint8(warped_img)))
-        self.nmi_scores.append(nmi_score)
-        self.val_fid_B.update(gray2rgb(norm_to_uint8(moving_img)), real=True)
-        self.val_fid_B.update(gray2rgb(norm_to_uint8(warped_img)), real=False)
-        self.val_sharpness_B.update(norm_to_uint8(warped_img))
-        self.val_l2_B.update(fixed_img, warped_img)
+        if len(evaluation_img.size()) == 5: # B x C x H x W x D (3D image)
+            for i in range(evaluation_img.size(4)):  # slice dim
+                self.val_gc_B.update(norm_to_uint8(evaluation_img[:, :, :, :, i]), norm_to_uint8(warped_img[:, :, :, :, i]))
+                nmi_score = self.val_nmi_B(flatten_to_1d(norm_to_uint8(evaluation_img[:, :, :, :, i])), flatten_to_1d(norm_to_uint8(warped_img[:, :, :, :, i])))
+                self.nmi_scores.append(nmi_score)
+                self.val_fid_B.update(gray2rgb(norm_to_uint8(moving_img[:, :, :, :, i])), real=True)
+                self.val_fid_B.update(gray2rgb(norm_to_uint8(warped_img[:, :, :, :, i])), real=False)
+                self.val_sharpness_B.update(norm_to_uint8(warped_img[:, :, :, :, i]))
+                self.val_l2_B.update(fixed_img[:, :, :, :, i], warped_img[:, :, :, :, i])
+        elif len(evaluation_img.size()) == 4: # 2D image)
+            self.val_gc_B.update(norm_to_uint8(evaluation_img), norm_to_uint8(warped_img))
+            nmi_score = self.val_nmi_B(flatten_to_1d(norm_to_uint8(evaluation_img)), flatten_to_1d(norm_to_uint8(warped_img)))
+            self.nmi_scores.append(nmi_score)
+            self.val_fid_B.update(gray2rgb(norm_to_uint8(moving_img)), real=True)
+            self.val_fid_B.update(gray2rgb(norm_to_uint8(warped_img)), real=False)
+            self.val_sharpness_B.update(norm_to_uint8(warped_img))
+            self.val_l2_B.update(fixed_img, warped_img)
+        else:
+            ValueError(f"Unexpected number of dimensions in Image: {len(evaluation_img.size())}. Expected 4 or 5.")
 
     def on_validation_epoch_end(self):
         gc = self.val_gc_B.compute()
@@ -110,15 +122,27 @@ class BaseModule_Registration(LightningModule):  # single direction
 
     def test_step(self, batch: Any, batch_idx: int):
 
-        evaluation_img, moving_img, fixed_img, warped_img = self.model_step(batch) # MR, CT, syn_CT, _
+        evaluation_img, moving_img, fixed_img, warped_img = self.model_step(batch, train=False) # MR, CT, syn_CT, _
         
-        self.test_gc_B.update(norm_to_uint8(evaluation_img), norm_to_uint8(warped_img))
-        nmi_score = self.test_nmi_B(flatten_to_1d(norm_to_uint8(evaluation_img)), flatten_to_1d(norm_to_uint8(warped_img)))
-        self.nmi_scores.append(nmi_score)
-        self.test_fid_B.update(gray2rgb(norm_to_uint8(moving_img)), real=True)
-        self.test_fid_B.update(gray2rgb(norm_to_uint8(warped_img)), real=False)
-        self.test_sharpness_B.update(norm_to_uint8(warped_img))
-        self.test_l2_B.update(fixed_img, warped_img)
+        if len(evaluation_img.size()) == 5:
+            for i in range(evaluation_img.size(4)):  # slice dim
+                self.test_gc_B.update(norm_to_uint8(evaluation_img[:, :, :, :, i]), norm_to_uint8(warped_img[:, :, :, :, i]))
+                nmi_score = self.test_nmi_B(flatten_to_1d(norm_to_uint8(evaluation_img[:, :, :, :, i])), flatten_to_1d(norm_to_uint8(warped_img[:, :, :, :, i])))
+                self.nmi_scores.append(nmi_score)
+                self.test_fid_B.update(gray2rgb(norm_to_uint8(moving_img[:, :, :, :, i])), real=True)
+                self.test_fid_B.update(gray2rgb(norm_to_uint8(warped_img[:, :, :, :, i])), real=False)
+                self.test_sharpness_B.update(norm_to_uint8(warped_img[:, :, :, :, i]))
+                self.test_l2_B.update(fixed_img[:, :, :, :, i], warped_img[:, :, :, :, i])
+        elif len(evaluation_img.size()) == 4: # 4D tensor
+            self.test_gc_B.update(norm_to_uint8(evaluation_img), norm_to_uint8(warped_img))
+            nmi_score = self.test_nmi_B(flatten_to_1d(norm_to_uint8(evaluation_img)), flatten_to_1d(norm_to_uint8(warped_img)))
+            self.nmi_scores.append(nmi_score)
+            self.test_fid_B.update(gray2rgb(norm_to_uint8(moving_img)), real=True)
+            self.test_fid_B.update(gray2rgb(norm_to_uint8(warped_img)), real=False)
+            self.test_sharpness_B.update(norm_to_uint8(warped_img))
+            self.test_l2_B.update(fixed_img, warped_img)
+        else:
+            raise ValueError(f"Unexpected number of dimensions in evaluation_img: {len(evaluation_img.size())}. Expected 4 or 5.")
 
     def on_test_epoch_end(self):
         gc = self.test_gc_B.compute()

@@ -58,10 +58,11 @@ netF_A: # For PatchNCELoss
   input_nc: ${model.netG_A.feat_dim}
 
 params: # Other params
-  lambda_ctx: 1 
+  lambda_ctx: 0
   lambda_gan: 0.1 #0 # 0.1 
   lambda_mind: 1 
-  lambda_nce: 1
+  lambda_nce: 0
+  lambda_l1: 1
   reverse: ${data.reverse} # A->B if False, B->A if True
   half_val_test: ${data.half_val_test}
   flip_equivariance: False

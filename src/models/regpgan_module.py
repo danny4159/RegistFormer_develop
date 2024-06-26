@@ -12,7 +12,7 @@ from src import utils
 import random
 from torchvision import models
 from src.models.base_module_AtoB_BtoA import BaseModule_AtoB_BtoA
-from src.models.components.regpgan_components import *
+from src.models.components.component_regpgan import *
 
 from reprlib import recursive_repr
 

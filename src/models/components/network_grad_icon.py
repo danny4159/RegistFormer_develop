@@ -26,7 +26,8 @@ class GradICON(nn.Module):
 
         # input_shape = [BATCH_SIZE, 1, 32 * SCALE, 32 * SCALE, 32 * SCALE]
         # input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE] # original
-        input_shape = [BATCH_SIZE, 1, 96 * SCALE, 96 * SCALE, 32 * SCALE] # original
+        # input_shape = [BATCH_SIZE, 1, 96 * SCALE, 80 * SCALE, 32 * SCALE] 
+        input_shape = [BATCH_SIZE, 1, 48 * SCALE, 40 * SCALE, 32 * SCALE]
 
 
         phi = FunctionFromVectorField(
@@ -58,19 +59,35 @@ class GradICON(nn.Module):
         SCALE = 4  # 1 IS QUARTER RES, 2 IS HALF RES, 4 IS FULL RES
         # input_shape = [BATCH_SIZE, 1, 32 * SCALE, 32 * SCALE, 32 * SCALE]
         # input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE]# original
-        input_shape = [BATCH_SIZE, 1, 96 * SCALE, 96 * SCALE, 32 * SCALE]# original
+        # input_shape = [BATCH_SIZE, 1, 96 * SCALE, 80 * SCALE, 32 * SCALE]
+        input_shape = [BATCH_SIZE, 1, 48 * SCALE, 40 * SCALE, 32 * SCALE]
         self.fullres_net.assign_identity_map(input_shape)
 
       
     def forward(self, moving_img, fixed_img):
-        loss, a, b, c, flips, transform_vector, warped_img = self.fullres_net(moving_img, fixed_img)
-        
-        return loss, a, b, c, flips, transform_vector, warped_img
+        # Original
+        # loss, a, b, c, flips, transform_vector, warped_img = self.fullres_net(moving_img, fixed_img)
+        # return loss, a, b, c, flips, transform_vector, warped_img
+        loss, transform_vector, warped_img = self.fullres_net(moving_img, fixed_img)
+        return loss, transform_vector, warped_img
 
 
 
 ####################################################################################################################################
 ####################################################################################################################################
+def compute_warped_image_function(image, spacing):
+    def warp_function(coordinates):
+        return compute_warped_image_multiNC(image, coordinates, spacing, 1)
+    return warp_function
+
+class WarpFunction:
+    def __init__(self, image, spacing, compute_warped_image):
+        self.image = image
+        self.spacing = spacing
+        self.compute_warped_image = compute_warped_image
+
+    def __call__(self, coordinates):
+        return self.compute_warped_image(self.image, self.spacing, coordinates)
 
 
 class RegistrationModule(nn.Module):
@@ -103,16 +120,22 @@ class RegistrationModule(nn.Module):
     def __init__(self):
         super().__init__()
         self.downscale_factor = 1
+    
+    def compute_warped_image(self, image, spacing, coordinates):
+        return compute_warped_image_multiNC(image, coordinates, spacing, 1)
 
     def as_function(self, image):
         """image is a tensor with shape self.input_shape.
         Returns a python function that maps a tensor of coordinates [batch x N_dimensions x ...]
         into a tensor of intensities.
         """
-
-        return lambda coordinates: compute_warped_image_multiNC(
-            image, coordinates, self.spacing, 1
-        )
+        # Original
+        # return lambda coordinates: compute_warped_image_multiNC(
+        #     image, coordinates, self.spacing, 1
+        # )
+        # return compute_warped_image_function(image, self.spacing)
+        # return lambda coordinates: self.compute_warped_image(image, self.spacing, coordinates)
+        return WarpFunction(image, self.spacing, self.compute_warped_image)
 
     def assign_identity_map(self, input_shape, parents_identity_map=None):
         self.input_shape = np.array(input_shape)
@@ -379,8 +402,8 @@ class GradientICON(RegistrationModule):
         return similarity_loss
 
     def forward(self, image_A, image_B) -> ICONLoss:
-        print("Identity map shape:", self.identity_map.shape)
-        print("Image A shape:", image_A.shape)
+        # print("Identity map shape:", self.identity_map.shape)
+        # print("Image A shape:", image_A.shape)
         
         assert self.identity_map.shape[2:] == image_A.shape[2:]
         assert self.identity_map.shape[2:] == image_B.shape[2:]
@@ -408,13 +431,16 @@ class GradientICON(RegistrationModule):
 
         warped_image = self.as_function(image_A)(self.phi_AB_vectorfield) # daniel add
         
-        return ICONLoss(
-            all_loss,
-            inverse_consistency_loss,
-            similarity_loss,
-            transform_magnitude,
-            flips(self.phi_BA_vectorfield),
-        ), self.phi_AB_vectorfield, warped_image # daniel add
+        # Original
+        # return ICONLoss(
+        #     all_loss,
+        #     inverse_consistency_loss,
+        #     similarity_loss,
+        #     transform_magnitude,
+        #     flips(self.phi_BA_vectorfield),
+        # ), self.phi_AB_vectorfield, warped_image # daniel add
+    
+        return all_loss, self.phi_AB_vectorfield, warped_image  # daniel modify
     
 
 
@@ -475,8 +501,8 @@ class UNet2ChunkyMiddle(nn.Module):
 
         self.middle_dense = nn.ModuleList(
             [
-                torch.nn.Linear(512 * 1 * 1 * 1, 128 * 1 * 1 * 1),
-                torch.nn.Linear(128 * 1 * 1 * 1, 512 * 1 * 1 * 1),
+                torch.nn.Linear(512 * 2 * 2 * 1, 128 * 2 * 2 * 1),
+                torch.nn.Linear(128 * 2 * 2 * 1, 512 * 2 * 2 * 1),
                 # torch.nn.Linear(512 * 2 * 3 * 3, 128 * 2 * 3 * 3), #TODO: original
                 # torch.nn.Linear(128 * 2 * 3 * 3, 512 * 2 * 3 * 3), #TODO: original
             ]
@@ -493,10 +519,11 @@ class UNet2ChunkyMiddle(nn.Module):
             )
             y = F.layer_norm
         # print(x.shape)
-        x = torch.reshape(x, (-1, 512 * 1 * 1 * 1))
+
+        x = torch.reshape(x, (-1, 512 * 2 * 2 * 1))
         # x = torch.reshape(x, (-1, 512 * 2 * 3 * 3))#TODO: original
         x = self.middle_dense[1](F.leaky_relu(self.middle_dense[0](x)))
-        x = torch.reshape(x, (-1, 512, 1, 1, 1))
+        x = torch.reshape(x, (-1, 512, 2, 2, 1))
         # x = torch.reshape(x, (-1, 512, 2, 3, 3))#TODO: original
         for depth in reversed(range(self.num_layers)):
             y = self.upConvs[depth](F.leaky_relu(x))
@@ -795,7 +822,20 @@ def scale_map(map, sz, spacing):
 
     return map_scaled
 
+def apply_transform(tensor_of_coordinates, phi, psi):
+    return phi(psi(tensor_of_coordinates))
 
+def compose_transforms(phi, psi, tensor_of_coordinates):
+    return phi(psi(tensor_of_coordinates))
+
+class ComposedTransform:
+    def __init__(self, phi, psi):
+        self.phi = phi
+        self.psi = psi
+
+    def __call__(self, tensor_of_coordinates):
+        return compose_transforms(self.phi, self.psi, tensor_of_coordinates)
+    
 class TwoStepRegistration(RegistrationModule):
     """Combine two RegistrationModules.
 
@@ -821,8 +861,9 @@ class TwoStepRegistration(RegistrationModule):
             self.as_function(image_A)(phi(self.identity_map)), 
             image_B
         )
-        return lambda tensor_of_coordinates: phi(psi(tensor_of_coordinates))
-        
+        # return lambda tensor_of_coordinates: phi(psi(tensor_of_coordinates)) #Original
+        # return lambda tensor_of_coordinates: apply_transform(tensor_of_coordinates, phi, psi)
+        return ComposedTransform(phi, psi)
 
 DoubleNet = TwoStepRegistration
 
@@ -860,7 +901,16 @@ class DownsampleRegistration(RegistrationModule):
 
 DownsampleNet = DownsampleRegistration
 
+class TransformFunction:
+    def __init__(self, tensor_of_displacements, displacement_field):
+        self.tensor_of_displacements = tensor_of_displacements
+        self.displacement_field = displacement_field
 
+    def __call__(self, coordinates):
+        if hasattr(coordinates, "isIdentity") and coordinates.shape == self.tensor_of_displacements.shape:
+            return coordinates + self.tensor_of_displacements
+        return coordinates + self.displacement_field(coordinates)
+    
 class FunctionFromVectorField(RegistrationModule):
     """
     Wrap an inner neural network 'net' that returns a tensor of displacements
@@ -875,13 +925,14 @@ class FunctionFromVectorField(RegistrationModule):
     def forward(self, image_A, image_B):
         tensor_of_displacements = self.net(image_A, image_B)
         displacement_field = self.as_function(tensor_of_displacements)
-
-        def transform(coordinates):
-            if hasattr(coordinates, "isIdentity") and coordinates.shape == tensor_of_displacements.shape:
-                return coordinates + tensor_of_displacements
-            return coordinates + displacement_field(coordinates)
-
-        return transform
+        
+        # Original
+        # def transform(coordinates):
+        #     if hasattr(coordinates, "isIdentity") and coordinates.shape == tensor_of_displacements.shape:
+        #         return coordinates + tensor_of_displacements
+        #     return coordinates + displacement_field(coordinates)
+        # return transform
+        return TransformFunction(tensor_of_displacements, displacement_field)
     
 
 class UNet(nn.Module):
@@ -1128,8 +1179,8 @@ class UNet2(nn.Module):
         return x / 10
     
 
-def pad_or_crop(x, shape, dimension):
-    y = x[:, : shape[1]]
+def pad_or_crop(x, shape, dimension): # x = torch.Size([1, 2, 48, 48, 16]) shape = torch.Size([1, 16, 48, 48, 16])
+    y = x[:, : shape[1]] # torch.Size([1, 2, 48, 48, 16])
     if x.size()[1] < shape[1]:
         if dimension == 3:
             y = F.pad(y, (0, 0, 0, 0, 0, 0, shape[1] - x.size()[1], 0))
@@ -1137,7 +1188,7 @@ def pad_or_crop(x, shape, dimension):
             y = F.pad(y, (0, 0, 0, 0, shape[1] - x.size()[1], 0))
     assert y.size()[1] == shape[1]
 
-    return y
+    return y # torch.Size([1, 16, 48, 48, 16])
 
 
 # def pad_or_crop(x, shape, dimension):
