@@ -113,7 +113,7 @@ class RegistFormerModule(BaseModule_AtoB):
 
     def training_step(self, batch: Any, batch_idx: int):
         if self.params.lambda_gan != 0:
-            if self.params.lambda_nce ==0:
+            if self.params.lambda_nce == 0:
                 optimizer_G_A, optimizer_D_A = self.optimizers()
             else:
                 optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
@@ -124,17 +124,20 @@ class RegistFormerModule(BaseModule_AtoB):
         # Renew
         with optimizer_G_A.toggle_model():
             optimizer_G_A.zero_grad() # 이것만 위로 올림
-            # optimizer_F_A.zero_grad()
+            if self.params.lambda_nce != 0:
+                optimizer_F_A.zero_grad()
             loss_G = self.backward_G(real_a, real_b, fake_b)
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
             )
-            # self.clip_gradients(
-            #         optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-            # )
+            if self.params.lambda_nce != 0:
+                self.clip_gradients(
+                        optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+                )
             optimizer_G_A.step()
-            # optimizer_F_A.step()
+            if self.params.lambda_nce != 0:
+                optimizer_F_A.step()
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         
@@ -171,8 +174,9 @@ class RegistFormerModule(BaseModule_AtoB):
                 schedulers.append(scheduler_G_A)
                 scheduler_D_B = self.hparams.scheduler(optimizer=optimizer_D_A)
                 schedulers.append(scheduler_D_B)
-                # scheduler_F_A = self.hparams.scheduler(optimizer=optimizer_F_A)
-                # schedulers.append(scheduler_F_A)
+                if self.params.lambda_nce != 0:
+                    scheduler_F_A = self.hparams.scheduler(optimizer=optimizer_F_A)
+                    schedulers.append(scheduler_F_A)
                 return optimizers, schedulers
         
         return optimizers
