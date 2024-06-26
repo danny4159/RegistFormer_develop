@@ -62,16 +62,12 @@ class GradICONModule(BaseModule_Registration):
 
         if train:
             original_slices = evaluation_img.shape[-1]
-            evaluation_img = self.pad_slice_to_128(evaluation_img)
             moving_img = self.pad_slice_to_128(moving_img)
             fixed_img = self.pad_slice_to_128(fixed_img)
             loss, transform_vector, warped_img = self.netR_A(moving_img, fixed_img)
             return loss
-            # evaluation_img = self.crop_slice_to_original(evaluation_img, original_slices)
-            # moving_img = self.crop_slice_to_original(moving_img, original_slices)
-            # fixed_img = self.crop_slice_to_original(fixed_img, original_slices)
-            # warped_img = self.crop_slice_to_original(warped_img, original_slices)
-        else:
+        
+        elif self.params.is_3d:
             moving_img_np = moving_img.cpu().detach().squeeze().numpy()
             fixed_img_np = fixed_img.cpu().detach().squeeze().numpy()
             moving_img_np = moving_img_np.transpose(2, 1, 0) # itk: D, W, H
@@ -94,6 +90,16 @@ class GradICONModule(BaseModule_Registration):
             warped_img_tensor = warped_img_tensor.to(evaluation_img.device)
 
             return evaluation_img, moving_img, fixed_img, warped_img_tensor
+        
+        elif not self.params.is_3d:
+            original_slices = evaluation_img.shape[-1]
+            moving_img_pad = self.pad_slice_to_128(moving_img)
+            fixed_img_pad = self.pad_slice_to_128(fixed_img)
+            loss, transform_vector, warped_img_pad = self.netR_A(moving_img_pad, fixed_img_pad)
+            warped_img = self.crop_slice_to_original(warped_img_pad, original_slices)
+            return evaluation_img, moving_img, fixed_img, warped_img
+
+
         
     def training_step(self, batch: Any, batch_idx: int):
         optimizer_R_A = self.optimizers()

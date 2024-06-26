@@ -19,7 +19,8 @@ netR_A:
   _target_: src.models.components.networks_define.define_R
   netR_type: gradicon
   batch_size: ${data.batch_size}
-  dimension: 3
+  input_size: [384, 320, 128] # [192, 160, 128] -> for 3D
+  dimension: 2 # 3 -> for 3D
   init_type: 'normal'
   init_gain: 0.02
 
@@ -27,3 +28,4 @@ params: # Other params
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   batch_size: ${data.batch_size}
+  is_3d: ${data.is_3d}

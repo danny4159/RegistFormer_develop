@@ -246,8 +246,8 @@ class ImageSavingCallback(Callback):
         self.test_file = test_file
         self.use_split_inference = use_split_inference
         self.flag_normalize = flag_normalize
-        print("test_file: ", test_file)
-        print("flag_normalize: ", self.flag_normalize)
+        # print("test_file: ", test_file)
+        # print("flag_normalize: ", self.flag_normalize)
 
     @staticmethod
     def change_torch_numpy(a, b, c, d):

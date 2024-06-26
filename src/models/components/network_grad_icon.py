@@ -15,6 +15,7 @@ class GradICON(nn.Module):
         try:
             self.batch_size = kwargs['batch_size']
             self.dimension = kwargs['dimension']
+            self.input_size = kwargs['input_size']
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -22,12 +23,12 @@ class GradICON(nn.Module):
         BATCH_SIZE = self.batch_size
         SCALE = 2 
         assert BATCH_SIZE == 1, f"BATCH_SIZE must be 1 on GradICON Network, but got {BATCH_SIZE}"
+        
+        if self.dimension == 3:
+            input_shape = [BATCH_SIZE, 1, self.input_size[0] // SCALE, self.input_size[1] // SCALE, self.input_size[2] // SCALE]
+        else:
+            input_shape = [BATCH_SIZE, 1, self.input_size[0] // SCALE, self.input_size[1] // SCALE]
 
-
-        # input_shape = [BATCH_SIZE, 1, 32 * SCALE, 32 * SCALE, 32 * SCALE]
-        # input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE] # original
-        # input_shape = [BATCH_SIZE, 1, 96 * SCALE, 80 * SCALE, 32 * SCALE] 
-        input_shape = [BATCH_SIZE, 1, 48 * SCALE, 40 * SCALE, 32 * SCALE]
 
 
         phi = FunctionFromVectorField(
@@ -55,12 +56,11 @@ class GradICON(nn.Module):
                                     0.2,
                                     )
         
-        BATCH_SIZE = self.batch_size
-        SCALE = 4  # 1 IS QUARTER RES, 2 IS HALF RES, 4 IS FULL RES
-        # input_shape = [BATCH_SIZE, 1, 32 * SCALE, 32 * SCALE, 32 * SCALE]
-        # input_shape = [BATCH_SIZE, 1, 40 * SCALE, 96 * SCALE, 96 * SCALE]# original
-        # input_shape = [BATCH_SIZE, 1, 96 * SCALE, 80 * SCALE, 32 * SCALE]
-        input_shape = [BATCH_SIZE, 1, 48 * SCALE, 40 * SCALE, 32 * SCALE]
+        SCALE = 1
+        if self.dimension == 3:
+            input_shape = [BATCH_SIZE, 1, self.input_size[0] // SCALE, self.input_size[1] // SCALE, self.input_size[2] // SCALE]
+        else:
+            input_shape = [BATCH_SIZE, 1, self.input_size[0] // SCALE, self.input_size[1] // SCALE]
         self.fullres_net.assign_identity_map(input_shape)
 
       
@@ -498,15 +498,16 @@ class UNet2ChunkyMiddle(nn.Module):
         #            )
         self.lastConv = self.Conv(18, dimension, kernel_size=3, padding=1)
         torch.nn.init.zeros_(self.lastConv.weight)
-
-        self.middle_dense = nn.ModuleList(
-            [
-                torch.nn.Linear(512 * 2 * 2 * 1, 128 * 2 * 2 * 1),
+        if self.dimension == 3:
+            self.middle_dense = nn.ModuleList(
+                [torch.nn.Linear(512 * 2 * 2 * 1, 128 * 2 * 2 * 1),
                 torch.nn.Linear(128 * 2 * 2 * 1, 512 * 2 * 2 * 1),
-                # torch.nn.Linear(512 * 2 * 3 * 3, 128 * 2 * 3 * 3), #TODO: original
-                # torch.nn.Linear(128 * 2 * 3 * 3, 512 * 2 * 3 * 3), #TODO: original
-            ]
-        )
+                ])
+        else:
+            self.middle_dense = nn.ModuleList(
+                [torch.nn.Linear(512 * 3 * 3, 128 * 3 * 3),
+                torch.nn.Linear(128 * 3 * 3, 512 * 3 * 3),
+                ])
 
     def forward(self, x, y):
         x = torch.cat([x, y], 1)
@@ -519,12 +520,16 @@ class UNet2ChunkyMiddle(nn.Module):
             )
             y = F.layer_norm
         # print(x.shape)
+        if self.dimension == 3:
+            x = torch.reshape(x, (-1, 512 * 2 * 2 * 1))
+        else:
+            x = torch.reshape(x, (-1, 512 * 3 * 3))
 
-        x = torch.reshape(x, (-1, 512 * 2 * 2 * 1))
-        # x = torch.reshape(x, (-1, 512 * 2 * 3 * 3))#TODO: original
         x = self.middle_dense[1](F.leaky_relu(self.middle_dense[0](x)))
-        x = torch.reshape(x, (-1, 512, 2, 2, 1))
-        # x = torch.reshape(x, (-1, 512, 2, 3, 3))#TODO: original
+        if self.dimension == 3:
+            x = torch.reshape(x, (-1, 512, 2, 2, 1))
+        else:
+            x = torch.reshape(x, (-1, 512, 3, 3)) 
         for depth in reversed(range(self.num_layers)):
             y = self.upConvs[depth](F.leaky_relu(x))
             x = y + F.interpolate(
