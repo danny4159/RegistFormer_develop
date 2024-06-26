@@ -97,6 +97,12 @@ class GradICONModule(BaseModule_Registration):
             fixed_img_pad = self.pad_slice_to_128(fixed_img)
             loss, transform_vector, warped_img_pad = self.netR_A(moving_img_pad, fixed_img_pad)
             warped_img = self.crop_slice_to_original(warped_img_pad, original_slices)
+
+            print(f"evaluation_img shape: {evaluation_img.shape}, type: {type(evaluation_img)}")
+            print(f"moving_img shape: {moving_img.shape}, type: {type(moving_img)}")
+            print(f"fixed_img shape: {fixed_img.shape}, type: {type(fixed_img)}")
+            print(f"warped_img shape: {warped_img.shape}, type: {type(warped_img)}")
+
             return evaluation_img, moving_img, fixed_img, warped_img
 
 
