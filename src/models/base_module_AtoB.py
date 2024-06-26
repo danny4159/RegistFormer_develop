@@ -79,7 +79,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
         return super().on_train_epoch_end()
 
     def validation_step(self, batch: Any, batch_idx: int):
-        if self.params.half_val_test:
+        if self.params.use_split_inference:
             half_size = batch[0].shape[2] // 2
             first_half = [x[:, :, :half_size, :] for x in batch]
             second_half = [x[:, :, half_size:, :] for x in batch]
@@ -116,7 +116,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
         self.nmi_scores = []
 
     def test_step(self, batch: Any, batch_idx: int):
-        if self.params.half_val_test:
+        if self.params.use_split_inference:
             half_size = batch[0].shape[2] // 2
             first_half = [x[:, :, :half_size, :] for x in batch]
             second_half = [x[:, :, half_size:, :] for x in batch]

@@ -50,7 +50,7 @@ params: # Other params
   # lambda_sc: 0.1
   lambda_nce: 5
   reverse: ${data.reverse} # A->B if False, B->A if True
-  half_val_test: ${data.half_val_test}
+  use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
   batch_size: ${data.batch_size}
   nce_layers: [0,1,2,3] # [0,2,4,6] # 3까지가 encoder

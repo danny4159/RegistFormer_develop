@@ -24,7 +24,7 @@ class ImageLoggingCallback(Callback):
         center_crop: int = 256,
         every_epoch=5,
         log_test: bool = False,
-        half_val_test: bool = False,
+        use_split_inference: bool = False,
     ):
         """_summary_
 
@@ -39,8 +39,8 @@ class ImageLoggingCallback(Callback):
         self.every_epoch = every_epoch
         self.log_test = log_test  # log images on the testing stage as well
         self.center_crop = center_crop  # center crop the images to this size
-        self.half_val_test = half_val_test
-        print("half_val_test: ", half_val_test)
+        self.use_split_inference = use_split_inference
+        # print("use_split_inference: ", use_split_inference)
 
     def saving_to_grid(self, res):
         if len(res) == 4:
@@ -103,7 +103,7 @@ class ImageLoggingCallback(Callback):
                 warped_img = warped_img[:, :, :, :, d_index].squeeze(-1)
                 self.saving_to_grid([evaluation_img, moving_img, fixed_img, warped_img])
             elif len(batch[0].size()) == 4:
-                if self.half_val_test:
+                if self.use_split_inference:
                     half_size = batch[0].shape[2] // 2
                     first_half = [x[:, :, :half_size, :] for x in batch]
                     second_half = [x[:, :, half_size:, :] for x in batch]
@@ -182,7 +182,7 @@ class ImageLoggingCallback(Callback):
                 warped_img = warped_img[:, :, :, :, d_index].squeeze(-1)
                 self.saving_to_grid([evaluation_img, moving_img, fixed_img, warped_img])
             elif len(batch[0].size()) == 4:
-                if self.half_val_test:
+                if self.use_split_inference:
                     half_size = batch[0].shape[2] // 2
                     first_half = [x[:, :, :half_size, :] for x in batch]
                     second_half = [x[:, :, half_size:, :] for x in batch]
@@ -233,7 +233,7 @@ class ImageSavingCallback(Callback):
                  center_crop: int = 256, 
                  subject_number_length: int = 3, 
                  test_file: str = None,
-                 half_val_test: bool = False,
+                 use_split_inference: bool = False,
                  flag_normalize: bool = True,
                  ):
         """_summary_
@@ -244,7 +244,7 @@ class ImageSavingCallback(Callback):
         self.center_crop = center_crop  # center crop the images to this size
         self.subject_number_length = subject_number_length
         self.test_file = test_file
-        self.half_val_test = half_val_test
+        self.use_split_inference = use_split_inference
         self.flag_normalize = flag_normalize
         print("test_file: ", test_file)
         print("flag_normalize: ", self.flag_normalize)
@@ -450,7 +450,7 @@ class ImageSavingCallback(Callback):
             ]  # slice number를 리스트로 저장
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if self.half_val_test:
+        if self.use_split_inference:
             half_size = batch[0].shape[2] // 2
             first_half = [x[:, :, :half_size, :] for x in batch]
             second_half = [x[:, :, half_size:, :] for x in batch]
@@ -532,7 +532,7 @@ class ImageSavingCallback(Callback):
 #                  center_crop: int = 256, 
 #                  subject_number_length: int = 3, 
 #                  test_file: str = None,
-#                  half_val_test: bool = False,
+#                  use_split_inference: bool = False,
 #                  flag_normalize: bool = True,
 #                  ):
 #         """_summary_

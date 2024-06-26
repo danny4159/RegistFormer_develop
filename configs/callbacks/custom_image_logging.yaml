@@ -7,14 +7,14 @@ ImageLoggingCallback:
   # center_crop: 192
   every_epoch: 1 # log every 5 epochs
   log_test: True # log test images
-  half_val_test: ${data.half_val_test}
+  use_split_inference: ${data.use_split_inference}
 
 ImageSavingCallback:
   _target_: src.callbacks.image_callback.ImageSavingCallback
   # center_crop: 256
   subject_number_length: 5
   test_file: ${data.test_file}
-  half_val_test: ${data.half_val_test}
+  use_split_inference: ${data.use_split_inference}
   flag_normalize: ${callbacks.custom_image_logging.flag_normalize}
 
 ## For meta-learning weight visualization

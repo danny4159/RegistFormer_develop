@@ -49,7 +49,7 @@ params: # Other params
   lambda_l1: 1
   lambda_mind: 10
   reverse: ${data.reverse} # A->B if False, B->A if True
-  half_val_test: ${data.half_val_test} # Inference for valid and test is divided into half from the original image (for memory issue)
+  use_split_inference: ${data.use_split_inference} # Inference for valid and test is divided into half from the original image (for memory issue)
 
   #Ablation
   ran_shift: null #null # "Put null or Interger" / random shift to ground truth when calculating Contextual Loss

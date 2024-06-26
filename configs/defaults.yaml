@@ -33,7 +33,8 @@ paths:
   data_dir: ${paths.root_dir}/data/SynthRAD_MR_CT_Pelvis #TODO: 수정  IXI / SynthRAD_MR_CT_Pelvis
 
 # task name, determines output directory path
-task_name: "Model_${model.name}_Data_${data.name}_Misalign_X${data.misalign_x}_Y${data.misalign_y}_R${data.degree}_M${data.motion_prob}_D${data.deform_prob}"
+# task_name: "Model_${model.name}_Data_${data.name}_Misalign_X${data.misalign_x}_Y${data.misalign_y}_R${data.degree}_M${data.motion_prob}_D${data.deform_prob}"
+task_name: "Model_${model.name}_Data_${data.name}"
 
 # tags to help you identify your experiments
 # you can overwrite this in experiment configs

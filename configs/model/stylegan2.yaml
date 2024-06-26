@@ -35,4 +35,4 @@ netD_A:
 params: # Other params
   lambda_style: 5
   reverse: ${data.reverse} # A->B if False, B->A if True
-  half_val_test: ${data.half_val_test}
+  use_split_inference: ${data.use_split_inference}
