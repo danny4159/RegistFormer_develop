@@ -129,8 +129,7 @@ class UnitModule(BaseModule_AtoB_BtoA):
         real_a, real_b, hidden_a, hidden_b, recon_a, recon_b, recon_b_a, recon_a_b, hidden_b_a, hidden_a_b, recon_a_b_a, recon_b_a_b = self.model_step_unit(batch)
         
         with optimizer_G.toggle_model():
-            loss_G = self.backward_G(real_a, real_b, hidden_a, hidden_b, recon_a, recon_b, recon_b_a, recon_a_b, hidden_b_a, hidden_a_b, recon_a_b_a, recon_b_a_b, 
-                                     self.params.lambda_content, self.params.lambda_kl, self.params.lambda_cycle, self.params.lambda_kl_cross, self.params.lambda_perceptual, self.params.lambda_contextual)
+            loss_G = self.backward_G(real_a, real_b, hidden_a, hidden_b, recon_a, recon_b, recon_b_a, recon_a_b, hidden_b_a, hidden_a_b, recon_a_b_a, recon_b_a_b)
             self.manual_backward(loss_G)
             optimizer_G.step()
             optimizer_G.zero_grad()
