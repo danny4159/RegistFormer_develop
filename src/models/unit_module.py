@@ -64,8 +64,14 @@ class UnitModule(BaseModule_AtoB_BtoA):
         self.fake_A_pool = ImagePool(params.pool_size)
         self.fake_B_pool = ImagePool(params.pool_size)
     
-    def backward_G(self, real_a, real_b, hidden_a, hidden_b, recon_a, recon_b, recon_b_a, recon_a_b, hidden_b_a, hidden_a_b, recon_a_b_a, recon_b_a_b):
+    def __compute_kl(self, mu):
+        mu_2 = torch.pow(mu, 2)
+        encoding_loss = torch.mean(mu_2)
+        return encoding_loss
         
+    def backward_G(self, real_a, real_b, hidden_a, hidden_b, recon_a, recon_b, recon_b_a, recon_a_b, hidden_b_a, hidden_a_b, recon_a_b_a, recon_b_a_b):
+        loss_G = 0.0
+
         # loss GAN
         pred_fake = self.netD_A(recon_b_a)
         loss_G_adv_a = self.criterionGAN(pred_fake, True)
