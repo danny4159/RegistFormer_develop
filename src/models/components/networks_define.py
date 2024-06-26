@@ -14,6 +14,7 @@ from src.models.components.network_dam import DAModule
 from src.models.components.network_proposed_synthesis import ProposedSynthesisModule
 from src.models.components.network_resnet_generator import ResnetGenerator
 from src.models.components.network_patch_sample_F import PatchSampleF
+from src.models.components.network_G_resnet import G_Resnet
 
 from src.models.components.network_grad_icon import GradICON
 # from src.models.components.networks_spade_danny import SPADEGenerator, ConvEncoder
@@ -243,6 +244,8 @@ def define_G(**kwargs):
         net = ProposedSynthesisModule(**kwargs)
     elif kwargs.get('netG_type') == 'resnet_generator':
         net = ResnetGenerator(**kwargs)
+    elif kwargs.get('netG_type') == 'resnet_cat':
+        net = G_Resnet(**kwargs)
     else:
         raise ValueError('This netG_type is not expected')
     return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
