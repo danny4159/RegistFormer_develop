@@ -317,11 +317,11 @@ class UNet3d(nn.Module):
         super(UNet3d, self).__init__()
         #Encode
         self.conv_encode1 = self.contracting_block(in_channels=in_channel, out_channels=32)
-        self.conv_maxpool1 = torch.nn.MaxPool2d(kernel_size=2)
+        self.conv_maxpool1 = torch.nn.MaxPool3d(kernel_size=2)
         self.conv_encode2 = self.contracting_block(32, 64)
-        self.conv_maxpool2 = torch.nn.MaxPool2d(kernel_size=2)
+        self.conv_maxpool2 = torch.nn.MaxPool3d(kernel_size=2)
         self.conv_encode3 = self.contracting_block(64, 128)
-        self.conv_maxpool3 = torch.nn.MaxPool2d(kernel_size=2)
+        self.conv_maxpool3 = torch.nn.MaxPool3d(kernel_size=2)
         # Bottleneck
         mid_channel = 128
         self.bottleneck = torch.nn.Sequential(

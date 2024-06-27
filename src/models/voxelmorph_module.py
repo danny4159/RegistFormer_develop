@@ -38,6 +38,15 @@ class VoxelmorphModule(BaseModule_Registration):
 
         self.criterionL2 = nn.MSELoss()
 
+    def smooothing_loss(self, y_pred):
+        dy = torch.abs(y_pred[:, 1:, :, :] - y_pred[:, :-1, :, :])
+        dx = torch.abs(y_pred[:, :, 1:, :] - y_pred[:, :, :-1, :])
+
+        dx = torch.mul(dx, dx)
+        dy = torch.mul(dy, dy)
+        d = torch.mean(dx) + torch.mean(dy)
+        return d/2.0
+
     def pad_slice_to_128(self, tensor, padding_value=-1):
         # tensor shape: [batch, channel, height, width, slice]
         slices = tensor.shape[-1]
@@ -53,8 +62,11 @@ class VoxelmorphModule(BaseModule_Registration):
     def backward_G(self, fixed_img, warped_img):
         loss_G = 0
 
-        loss_l2 = self.criterionL2(warped_img, fixed_img)
+        loss_l2 = self.criterionL2(warped_img, fixed_img) * self.params.lambda_l2
         loss_G += loss_l2
+        
+        loss_smooth = self.smooothing_loss(warped_img) * self.params.lambda_smooth
+        loss_G += loss_smooth 
         
         return loss_G
 

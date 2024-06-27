@@ -29,3 +29,5 @@ params: # Other params
   use_split_inference: ${data.use_split_inference}
   batch_size: ${data.batch_size}
   is_3d: ${data.is_3d}
+  lambda_l2: 1
+  lambda_smooth: 0.01
