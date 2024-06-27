@@ -17,7 +17,7 @@ from src.models.components.network_patch_sample_F import PatchSampleF
 from src.models.components.network_G_resnet import G_Resnet
 
 from src.models.components.network_grad_icon import GradICON
-from src.models.components.network_voxelmorph import VoxelMorph2d
+from src.models.components.network_voxelmorph import VoxelMorph2d, VoxelMorph3d
 # from src.models.components.networks_spade_danny import SPADEGenerator, ConvEncoder
 
 
@@ -343,8 +343,10 @@ def define_R(**kwargs):
     net = None
     if kwargs.get('netR_type') == 'gradicon':
         net = GradICON(**kwargs)
-    elif kwargs.get('netR_type') == 'voxelmorph':
+    elif kwargs.get('netR_type') == 'voxelmorph' and kwargs.get('is_3d') == False:
         net = VoxelMorph2d(**kwargs)
+    elif kwargs.get('netR_type') == 'voxelmorph' and kwargs.get('is_3d') == True:
+        net = VoxelMorph3d(**kwargs)
     else:
         raise ValueError('This netR_type is not expected')
     return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)

@@ -247,11 +247,17 @@ class SpatialTransformation(nn.Module):
 #TODO: 3D Here
 
 class VoxelMorph3d(nn.Module):
-    def __init__(self, in_channels=1, use_gpu=False):
-        super(VoxelMorph3d, self).__init__()
-        self.unet = UNet3d(in_channels*2, 3)
-        self.spatial_transform = SpatialTransformation3d(use_gpu)
-        if use_gpu:
+    def __init__(self, **kwargs):
+        super().__init__()
+        try:
+            self.input_nc = kwargs['input_nc']
+            self.use_gpu = kwargs['use_gpu']
+        except KeyError as e:
+            raise ValueError(f"Missing required parameter: {str(e)}")
+        
+        self.unet = UNet3d(self.input_nc*2, 3)
+        self.spatial_transform = SpatialTransformation3d(self.use_gpu)
+        if self.use_gpu:
             self.unet = self.unet.cuda()
             self.spatial_transform = self.spatial_transform.cuda()
 

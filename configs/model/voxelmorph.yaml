@@ -18,9 +18,9 @@ scheduler:
 netR_A:
   _target_: src.models.components.networks_define.define_R
   netR_type: voxelmorph
+  is_3d: ${data.is_3d}
   input_nc: 1
   use_gpu: true
-  # dimension: 2 # 3 -> for 3D
   init_type: 'normal'
   init_gain: 0.02
 
