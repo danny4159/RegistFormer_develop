@@ -1,0 +1,31 @@
+_target_: src.models.voxelmorph_module.VoxelmorphModule
+
+name: Voxelmorph_Registration
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.0002
+  betas: [0.9, 0.99]
+  weight_decay: 0
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.MultiStepLR
+  _partial_: true
+  milestones: [250000, 300000]
+  gamma: 0.5
+
+netR_A:
+  _target_: src.models.components.networks_define.define_R
+  netR_type: voxelmorph
+  input_nc: 1
+  use_gpu: true
+  # dimension: 2 # 3 -> for 3D
+  init_type: 'normal'
+  init_gain: 0.02
+
+params: # Other params
+  reverse: ${data.reverse} # A->B if False, B->A if True
+  use_split_inference: ${data.use_split_inference}
+  batch_size: ${data.batch_size}
+  is_3d: ${data.is_3d}
