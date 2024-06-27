@@ -11,7 +11,7 @@ name: SynthRAD_MR_CT_Pelvis
 data_dir: ${paths.root_dir}/data/SynthRAD_MR_CT_Pelvis
 data_group_1: "MR"
 data_group_2: "CT"
-data_group_3: null # If exist put it, or null # Regist:synCT
+data_group_3: null # If exist put it, or null # Regist:syn_CT
 is_3d: False # True: 3D processing, False: 2D processing
 batch_size: 4 #5 #10 #4 #30 #16 #12 #2 #1
 num_workers: 6 # 3

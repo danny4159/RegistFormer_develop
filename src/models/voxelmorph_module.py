@@ -71,11 +71,9 @@ class VoxelmorphModule(BaseModule_Registration):
     def training_step(self, batch: Any, batch_idx: int):
         optimizer_R_A = self.optimizers()
         evaluation_img, moving_img, fixed_img, warped_img = self.model_step(batch)
-
-        loss_G, = self.backward_G(fixed_img, warped_img)
         
         with optimizer_R_A.toggle_model():
-            loss_G = self.model_step_for_train(batch)
+            loss_G = self.backward_G(fixed_img, warped_img)
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_R_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
