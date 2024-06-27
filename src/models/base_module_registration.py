@@ -81,7 +81,7 @@ class BaseModule_Registration(LightningModule):  # single direction
         return super().on_train_epoch_end()
 
     def validation_step(self, batch: Any, batch_idx: int):
-        evaluation_img, moving_img, fixed_img, warped_img = self.model_step(batch, train=False) # MR, CT, syn_CT, _
+        evaluation_img, moving_img, fixed_img, warped_img = self.model_step(batch, is_3d=self.params.is_3d) # MR, CT, syn_CT, _
         
         if len(evaluation_img.size()) == 5: # B x C x H x W x D (3D image)
             for i in range(evaluation_img.size(4)):  # slice dim
@@ -122,7 +122,7 @@ class BaseModule_Registration(LightningModule):  # single direction
 
     def test_step(self, batch: Any, batch_idx: int):
 
-        evaluation_img, moving_img, fixed_img, warped_img = self.model_step(batch, train=False) # MR, CT, syn_CT, _
+        evaluation_img, moving_img, fixed_img, warped_img = self.model_step(batch, is_3d=self.params.is_3d) # MR, CT, syn_CT, _
         
         if len(evaluation_img.size()) == 5:
             for i in range(evaluation_img.size(4)):  # slice dim

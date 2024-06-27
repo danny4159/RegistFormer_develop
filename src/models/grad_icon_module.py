@@ -57,17 +57,17 @@ class GradICONModule(BaseModule_Registration):
         # tensor shape: [batch, channel, height, width, slice]
         return tensor[..., :original_slices]
     
-    def model_step(self, batch: Any, return_loss=False, train=True):
+    def model_step_for_train(self, batch: Any):
         evaluation_img, moving_img, fixed_img = batch # MR, CT, syn_CT
+        original_slices = evaluation_img.shape[-1]
+        moving_img = self.pad_slice_to_128(moving_img)
+        fixed_img = self.pad_slice_to_128(fixed_img)
+        loss, transform_vector, warped_img = self.netR_A(moving_img, fixed_img)
+        return loss
 
-        if train:
-            original_slices = evaluation_img.shape[-1]
-            moving_img = self.pad_slice_to_128(moving_img)
-            fixed_img = self.pad_slice_to_128(fixed_img)
-            loss, transform_vector, warped_img = self.netR_A(moving_img, fixed_img)
-            return loss
-        
-        elif self.params.is_3d:
+    def model_step(self, batch: Any, is_3d=False):
+        evaluation_img, moving_img, fixed_img = batch
+        if is_3d:
             moving_img_np = moving_img.cpu().detach().squeeze().numpy()
             fixed_img_np = fixed_img.cpu().detach().squeeze().numpy()
             moving_img_np = moving_img_np.transpose(2, 1, 0) # itk: D, W, H
@@ -88,31 +88,23 @@ class GradICONModule(BaseModule_Registration):
             warped_img_np = itk.array_from_image(warped_img) # D, W, H -> H, W, D
             warped_img_tensor = torch.from_numpy(warped_img_np).unsqueeze(0).unsqueeze(0)
             warped_img_tensor = warped_img_tensor.to(evaluation_img.device)
-
             return evaluation_img, moving_img, fixed_img, warped_img_tensor
-        
-        elif not self.params.is_3d:
+    
+        else:
             original_slices = evaluation_img.shape[-1]
             moving_img_pad = self.pad_slice_to_128(moving_img)
             fixed_img_pad = self.pad_slice_to_128(fixed_img)
             loss, transform_vector, warped_img_pad = self.netR_A(moving_img_pad, fixed_img_pad)
             warped_img = self.crop_slice_to_original(warped_img_pad, original_slices)
-
-            print(f"evaluation_img shape: {evaluation_img.shape}, type: {type(evaluation_img)}")
-            print(f"moving_img shape: {moving_img.shape}, type: {type(moving_img)}")
-            print(f"fixed_img shape: {fixed_img.shape}, type: {type(fixed_img)}")
-            print(f"warped_img shape: {warped_img.shape}, type: {type(warped_img)}")
-
             return evaluation_img, moving_img, fixed_img, warped_img
 
 
         
     def training_step(self, batch: Any, batch_idx: int):
         optimizer_R_A = self.optimizers()
-        # loss, a, b, c, flips, transform_vector, warped_image, moving_img, fixed_img, evaluation_img = self.model_step(batch)
         
         with optimizer_R_A.toggle_model():
-            loss = self.model_step(batch, return_loss=True)
+            loss = self.model_step_for_train(batch)
             self.manual_backward(loss)
             self.clip_gradients(
                 optimizer_R_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"

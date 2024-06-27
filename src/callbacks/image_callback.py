@@ -43,6 +43,11 @@ class ImageLoggingCallback(Callback):
         # print("use_split_inference: ", use_split_inference)
 
     def saving_to_grid(self, res):
+        if not isinstance(res, (list, tuple)):
+            print(f"Unexpected input to saving_to_grid: {type(res)}")
+            print(f"Input content: {res}")
+            return
+    
         if len(res) == 4:
             self.ngrid = 4
             a, b, preds_a, preds_b = res
@@ -96,7 +101,7 @@ class ImageLoggingCallback(Callback):
             
             if len(batch[0].size()) == 5: # 3D Image
                 d_index = 30  # 5번째 D 차원의 30번째 데이터 선택
-                evaluation_img, moving_img, fixed_img, warped_img = pl_module.model_step(batch, train=False)
+                evaluation_img, moving_img, fixed_img, warped_img = pl_module.model_step(batch, is_3d=True)
                 evaluation_img = evaluation_img[:, :, :, :, d_index].squeeze(-1)
                 moving_img = moving_img[:, :, :, :, d_index].squeeze(-1)
                 fixed_img = fixed_img[:, :, :, :, d_index].squeeze(-1)
@@ -470,7 +475,11 @@ class ImageSavingCallback(Callback):
                 preds_b = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
                 self.saving_to_nii(a, b, preds_b)
         else:
-            res = pl_module.model_step(batch)
+            if len(batch[0].size()) == 5:
+                res = pl_module.model_step(batch, is_3d=True)
+            elif len(batch[0].size()) == 4:
+                res = pl_module.model_step(batch)
+                
             if len(res) == 4:
                 a, b, preds_a, preds_b = res
                 self.saving_to_nii(a, b, preds_a, preds_b)
