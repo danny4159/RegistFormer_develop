@@ -26,9 +26,9 @@ class VoxelMorph2d(nn.Module):
         # x = torch.cat([moving_image, fixed_image], dim=3).permute(0,3,1,2)# original
         deformation_matrix = self.unet(x).permute(0,2,3,1)
         registered_image = self.spatial_transform(moving_image, deformation_matrix)
-        print(registered_image.shape)
-        registered_image = registered_image.permute(0,3,1,2)
-        print(registered_image.shape)
+        # print(registered_image.shape)
+        # registered_image = registered_image.permute(0,3,1,2)
+        # print(registered_image.shape)
         return registered_image
     
 class UNet(nn.Module):
@@ -161,9 +161,11 @@ class SpatialTransformation(nn.Module):
 
     def interpolate(self, im, x, y):
 
-        im = F.pad(im, (0,0,1,1,1,1,0,0))
+        # im = F.pad(im, (0,0,1,1,1,1,0,0)) # [1, 1, 386, 320] -> [1, 3, 386, 320] # 왤까?
+        im = F.pad(im, (1,1,1,1,0,0,0,0)) # [1, 1, 386, 320] -> [1, 3, 386, 320] # 왤까?
 
-        batch_size, height, width, channels = im.shape
+        # batch_size, height, width, channels = im.shape
+        batch_size, channels, height, width  = im.shape
 
         batch_size, out_height, out_width = x.shape
 
@@ -221,7 +223,8 @@ class SpatialTransformation(nn.Module):
         wd = ((1-dx) * (1-dy)).transpose(1,0)
 
         output = torch.sum(torch.squeeze(torch.stack([wa*Ia, wb*Ib, wc*Ic, wd*Id], dim=1)), 1)
-        output = torch.reshape(output, [-1, out_height, out_width, channels])
+        # output = torch.reshape(output, [-1, out_height, out_width, channels])
+        output = torch.reshape(output, [-1, channels, out_height, out_width])
         return output
 
     def forward(self, moving_image, deformation_matrix):
