@@ -3,10 +3,10 @@ from typing import Any, Optional
 import torch
 import torch.nn.functional as F
 from lightning import LightningModule
-from torchmetrics.clustering import NormalizedMutualInfoScore, MutualInfoScore
-from torchmetrics.image.fid import FrechetInceptionDistance
-from torchmetrics.aggregation import CatMetric #TODO: 나중에 필요하면 Catmetric 사용. std 구하기 용도
 from src.metrics.gradient_correlation import GradientCorrelationMetric
+from torchmetrics.clustering import NormalizedMutualInfoScore
+from torchmetrics.image.fid import FrechetInceptionDistance
+from torchmetrics.image.kid import KernelInceptionDistance
 from src.metrics.sharpness import SharpnessMetric
 from torchmetrics import MeanSquaredError
 
@@ -20,11 +20,11 @@ class BaseModule_Registration(LightningModule):  # single direction
         super().__init__()
         self.params = params
 
-        self.val_gc_B, self.val_nmi_B, self.val_fid_B, self.val_sharpness_B, self.val_l2_B = self.define_metrics()
-        self.test_gc_B, self.test_nmi_B, self.test_fid_B, self.test_sharpness_B, self.test_l2_B = self.define_metrics()
+        self.val_gc_B, self.val_nmi_B, self.val_fid_B, self.val_kid_B, self.val_sharpness_B, self.val_l2_B = self.define_metrics()
+        self.test_gc_B, self.test_nmi_B, self.test_fid_B, self.test_kid_B, self.test_sharpness_B, self.test_l2_B = self.define_metrics()
 
-        self.val_metrics = [self.val_gc_B, self.val_nmi_B, self.val_fid_B, self.val_sharpness_B, self.val_l2_B]
-        self.test_metrics = [self.test_gc_B, self.test_nmi_B, self.test_fid_B, self.test_sharpness_B, self.test_l2_B]
+        self.val_metrics = [self.val_gc_B, self.val_nmi_B, self.val_fid_B, self.val_kid_B, self.val_sharpness_B, self.val_l2_B]
+        self.test_metrics = [self.test_gc_B, self.test_nmi_B, self.test_fid_B, self.test_kid_B, self.test_sharpness_B, self.test_l2_B]
 
         self.nmi_scores = []
 
@@ -33,10 +33,11 @@ class BaseModule_Registration(LightningModule):  # single direction
         gc = GradientCorrelationMetric()
         nmi = NormalizedMutualInfoScore()
         fid = FrechetInceptionDistance()
+        kid = KernelInceptionDistance(kernel_size=2)
         sharpness = SharpnessMetric()
         l2 = MeanSquaredError()
 
-        return gc, nmi, fid, sharpness, l2
+        return gc, nmi, fid, kid, sharpness, l2
 
     # def forward(self, a: torch.Tensor, b: torch.Tensor):
     #     return self.netG_A(a, b)
@@ -90,6 +91,8 @@ class BaseModule_Registration(LightningModule):  # single direction
                 self.nmi_scores.append(nmi_score)
                 self.val_fid_B.update(gray2rgb(norm_to_uint8(moving_img[:, :, :, :, i])), real=True)
                 self.val_fid_B.update(gray2rgb(norm_to_uint8(warped_img[:, :, :, :, i])), real=False)
+                self.val_kid_B.update(gray2rgb(norm_to_uint8(moving_img[:, :, :, :, i])), real=True)
+                self.val_kid_B.update(gray2rgb(norm_to_uint8(warped_img[:, :, :, :, i])), real=False)
                 self.val_sharpness_B.update(norm_to_uint8(warped_img[:, :, :, :, i]))
                 self.val_l2_B.update(fixed_img[:, :, :, :, i], warped_img[:, :, :, :, i])
         elif len(evaluation_img.size()) == 4: # 2D image)
@@ -98,6 +101,8 @@ class BaseModule_Registration(LightningModule):  # single direction
             self.nmi_scores.append(nmi_score)
             self.val_fid_B.update(gray2rgb(norm_to_uint8(moving_img)), real=True)
             self.val_fid_B.update(gray2rgb(norm_to_uint8(warped_img)), real=False)
+            self.val_kid_B.update(gray2rgb(norm_to_uint8(moving_img)), real=True)
+            self.val_kid_B.update(gray2rgb(norm_to_uint8(warped_img)), real=False)
             self.val_sharpness_B.update(norm_to_uint8(warped_img))
             self.val_l2_B.update(fixed_img, warped_img)
         else:
@@ -107,12 +112,14 @@ class BaseModule_Registration(LightningModule):  # single direction
         gc = self.val_gc_B.compute()
         nmi = torch.mean(torch.stack(self.nmi_scores))
         fid = self.val_fid_B.compute()
+        kid_mean, _ = self.val_kid_B.compute()
         sharpness = self.val_sharpness_B.compute()
         l2 = self.val_l2_B.compute()
 
         self.log("val/gc_B", gc.detach(), sync_dist=True)
         self.log("val/nmi_B", nmi.detach(), sync_dist=True)
         self.log("val/fid_B", fid.detach(), sync_dist=True)
+        self.log("val/kid_B", kid_mean.detach(), sync_dist=True)
         self.log("val/sharpness_B", sharpness.detach(), sync_dist=True)
         self.log("val/l2_B", l2.detach(), sync_dist=True)
 
@@ -131,6 +138,8 @@ class BaseModule_Registration(LightningModule):  # single direction
                 self.nmi_scores.append(nmi_score)
                 self.test_fid_B.update(gray2rgb(norm_to_uint8(moving_img[:, :, :, :, i])), real=True)
                 self.test_fid_B.update(gray2rgb(norm_to_uint8(warped_img[:, :, :, :, i])), real=False)
+                self.test_kid_B.update(gray2rgb(norm_to_uint8(moving_img[:, :, :, :, i])), real=True)
+                self.test_kid_B.update(gray2rgb(norm_to_uint8(warped_img[:, :, :, :, i])), real=False)
                 self.test_sharpness_B.update(norm_to_uint8(warped_img[:, :, :, :, i]))
                 self.test_l2_B.update(fixed_img[:, :, :, :, i], warped_img[:, :, :, :, i])
         elif len(evaluation_img.size()) == 4: # 4D tensor
@@ -139,6 +148,8 @@ class BaseModule_Registration(LightningModule):  # single direction
             self.nmi_scores.append(nmi_score)
             self.test_fid_B.update(gray2rgb(norm_to_uint8(moving_img)), real=True)
             self.test_fid_B.update(gray2rgb(norm_to_uint8(warped_img)), real=False)
+            self.test_kid_B.update(gray2rgb(norm_to_uint8(moving_img)), real=True)
+            self.test_kid_B.update(gray2rgb(norm_to_uint8(warped_img)), real=False)
             self.test_sharpness_B.update(norm_to_uint8(warped_img))
             self.test_l2_B.update(fixed_img, warped_img)
         else:
@@ -148,15 +159,27 @@ class BaseModule_Registration(LightningModule):  # single direction
         gc = self.test_gc_B.compute()
         nmi = torch.mean(torch.stack(self.nmi_scores))
         fid = self.test_fid_B.compute()
+        kid_mean, kid_std = self.test_kid_B.compute()
         sharpness = self.test_sharpness_B.compute()
         l2 = self.test_l2_B.compute()
 
         self.log("test/gc_B_mean", gc.detach(), sync_dist=True)
         self.log("test/nmi_B_mean", nmi.detach(), sync_dist=True)
         self.log("test/fid_B_mean", fid.detach(), sync_dist=True)
+        self.log("test/kid_B_mean", kid_mean.detach(), sync_dist=True)
         self.log("test/sharpness_B_mean", sharpness.detach(), sync_dist=True)
         self.log("test/l2_B", l2.detach(), sync_dist=True)
 
+        gc_std = torch.std(self.test_gc_B.correlations)
+        nmi_std = torch.std(torch.stack(self.nmi_scores))
+        sharpness_std = torch.std(self.test_sharpness_B.scores)
+
+        self.log("test/gc_B_std", gc_std.detach(), sync_dist=True)
+        self.log("test/nmi_B_std", nmi_std.detach(), sync_dist=True)
+        self.log("test/fid_B_std", torch.tensor(float('nan'), device=self.device).detach(), sync_dist=True)
+        self.log("test/kid_B_std", kid_std.detach(), sync_dist=True)
+        self.log("test/sharpness_B_std", sharpness_std.detach(), sync_dist=True)
+        
         for metrics in self.test_metrics:
             metrics.reset()
         self.nmi_scores = []
