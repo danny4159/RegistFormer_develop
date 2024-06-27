@@ -36,7 +36,7 @@ class BaseModule_AtoB_BtoA(LightningModule):
         gc = GradientCorrelationMetric()
         nmi = NormalizedMutualInfoScore()
         fid = FrechetInceptionDistance()
-        kid = KernelInceptionDistance(kernel_size=2)
+        kid = KernelInceptionDistance(subset_size=2)
         sharpness = SharpnessMetric()
 
         return gc, nmi, fid, kid, sharpness
