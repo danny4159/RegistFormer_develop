@@ -10,7 +10,360 @@ import math
 import pdb
 import os
 
+class RegistFormer(nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+        try:
+            self.feat_dim = kwargs['feat_dim']
+            self.ref_ch = kwargs['ref_ch']
+            self.src_ch = kwargs['src_ch']
+            self.out_ch = kwargs['out_ch']
+            self.nhead = kwargs['nhead']
+            self.mlp_ratio = kwargs['mlp_ratio']
+            self.pos_en_flag = kwargs['pos_en_flag']
+            self.k_size = kwargs['k_size']
+            self.attn_type = kwargs['attn_type']
+            self.daca_loc = kwargs['daca_loc']
+            self.flow_type = kwargs['flow_type']
+            self.dam_type = kwargs['dam_type']
+            self.fuse_type = kwargs['fuse_type']
+            self.flow_model_path = kwargs['flow_model_path']
+            self.flow_ft = kwargs['flow_ft']
+            self.dam_ft = kwargs['dam_ft']
+            self.dam_path = kwargs['dam_path']
+            self.dam_feat = kwargs['dam_feat']
+            self.main_ft = kwargs['main_ft']
+
+        except KeyError as e:
+            raise ValueError(f"Missing required parameter: {str(e)}")
+
+        current_dir = os.path.dirname(__file__)
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+
+        self.flow_model_path = os.path.join(project_root, self.flow_model_path)
+        self.dam_path = os.path.join(project_root, self.dam_path)
+
+        if self.flow_type == "voxelmorph" or self.flow_type == "zero":
+            from src.models.components.voxelmorph import VxmDense
+
+            # device = "cuda" #TODO: 수정중. forward에서 cude 설정하려고 cuda 없애려고
+            # self.flow_estimator = VxmDense.load(path=self.flow_model_path, device=device)
+            self.flow_estimator = VxmDense.load(path=self.flow_model_path, device='cpu')
+
+            # self.flow_estimator.to(device)
+            self.flow_estimator.eval()
+
+        elif self.flow_type == "grad_icon":
+            from src.models.components.network_grad_icon import GradICON
+            self.flow_estimator = GradICON(batch_size=1, dimension=2, input_size=[384,320])
+            checkpoint = torch.load(self.flow_model_path, map_location=lambda storage, loc: storage)
+            model_state_dict = checkpoint["state_dict"]
+            adjusted_state_dict = {k.replace("netR_A.", ""): v for k, v in model_state_dict.items()}
+            self.flow_estimator.load_state_dict(adjusted_state_dict, strict=False)
+            self.flow_estimator.eval()
+            
+        else:
+            raise ValueError(f"Unrecognized flow type: {self.flow_type}.")
+
+        for param in self.flow_estimator.parameters():
+            param.requires_grad = self.flow_ft  # False
+            
+        # Define DAM.
+        if self.dam_ft:
+            assert self.dam_path != None
+
+        if self.dam_type == "synthesis_meta":
+            from src.models.components.meta_synthesis import (
+                SynthesisMetaModule,
+            )
+
+            self.DAM = SynthesisMetaModule(
+                in_ch=self.src_ch,
+                feat_ch=self.dam_feat,
+                out_ch=self.src_ch,
+                load_path=self.dam_path,
+                requires_grad=self.dam_ft,
+            )
+
+        # Define feature extractor.
+        # self.unet_q = Unet(src_ch, feat_dim, feat_dim)
+        self.unet_q = Unet(self.src_ch * 2, self.feat_dim, self.feat_dim)
+        self.unet_k = Unet(self.ref_ch, self.feat_dim, self.feat_dim)
+
+        # Define GAM.
+        self.trans_unit = nn.ModuleList(
+            [
+                TransformerUnit(
+                    self.feat_dim,
+                    self.nhead,
+                    self.pos_en_flag,
+                    self.mlp_ratio,
+                    self.k_size,
+                    self.attn_type,
+                    self.fuse_type,
+                ),
+                TransformerUnit(
+                    self.feat_dim,
+                    self.nhead,
+                    self.pos_en_flag,
+                    self.mlp_ratio,
+                    self.k_size,
+                    self.attn_type,
+                    self.fuse_type,
+                ),
+                TransformerUnit(
+                    self.feat_dim,
+                    self.nhead,
+                    self.pos_en_flag,
+                    self.mlp_ratio,
+                    self.k_size,
+                    self.attn_type,
+                    self.fuse_type,
+                ),
+            ]
+        )
+
+        self.conv0 = double_conv(self.feat_dim, self.feat_dim)
+        self.conv1 = double_conv_down(self.feat_dim, self.feat_dim)
+        self.conv2 = double_conv_down(self.feat_dim, self.feat_dim)
+        self.conv3 = double_conv(self.feat_dim, self.feat_dim)
+        self.conv4 = double_conv_up(self.feat_dim, self.feat_dim)
+        self.conv5 = double_conv_up(self.feat_dim, self.feat_dim)
+        self.conv6 = nn.Sequential(
+            single_conv(self.feat_dim, self.feat_dim), nn.Conv2d(self.feat_dim, self.out_ch, 3, 1, 1)
+        )
+
+        if not self.main_ft:
+            self.eval()
+            for key, param in self.named_parameters():
+                if "flow_estimator" not in key and "DAM" not in key:
+                    param.requires_grad = False
+        else:
+            self.train()
+            for key, param in self.named_parameters():
+                if "flow_estimator" not in key and "DAM" not in key:
+                    param.requires_grad = True
+
+    def forward(self, src, ref, mask=None, for_nce=False, for_src=False):
+        assert (
+            src.shape == ref.shape
+        ), "Shapes of source and reference images \
+                                        mismatch."
+        device = src.device
+        self.flow_estimator.to(device)
+        moved = None
+
+        # if not self.training:
+        #     N, C, H, W = src.shape
+        #     mod_size = 4
+        #     H_pad = mod_size - H % mod_size if not H % mod_size == 0 else 0
+        #     W_pad = mod_size - W % mod_size if not W % mod_size == 0 else 0
+        #     src = F.pad(src, (0, W_pad, 0, H_pad), "replicate")
+        #     ref = F.pad(ref, (0, W_pad, 0, H_pad), "replicate")
+
+        if self.dam_type == "dam":
+            src = self.DAM(src, ref)  # [4, 3, 256, 256]
+        elif self.dam_type == "synthesis_meta":
+            src_origin = src
+            src = self.DAM(src)
+        elif self.dam_type == "dam_misalign":
+            src_origin = src
+            ref_to_src = self.DAM_MR_CT(ref, src)
+            src = self.DAM(src, ref)
+        # elif self.dam_type == 'dam_misalign':
+        #     src = self.DAM.netG_B(src, ref)
+        else:
+            raise ValueError(
+                "Invalid dam_type provided. Expected 'dam' or 'synthesis_meta'."
+            )
+        #TODO: 개발중
+        # if for_nce:
+        #     if for_src:
+        #         src_lq_concat = torch.cat((src_origin, src), dim=1)
+        #         q_feat = self.unet_q(src_lq_concat, for_nce=True)
+        #         return q_feat
+        #     else:
+        #         q_feat = self.unet_k(ref, for_nce=True)
+        #         return q_feat
+
+
+
+        # with torch.no_grad():
+        #     flow = self.flow_estimator(src, ref).detach()
+        if self.flow_type in ["voxelmorph", "zero"]:
+            if self.dam_type == "synthesis_meta" or self.dam_type == "dam":
+                src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=768, width_multiple=576)
+                ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=768, width_multiple=576)
+                
+                if self.flow_type == "zero":
+                    moved, flow = self.flow_estimator(
+                        ref, src, registration=True
+                    )  # Zeroflow version
+                else:
+                    _, flow = self.flow_estimator( # flow: torch.Size([1, 2, 768, 576])
+                        src, ref, registration=True
+                    )  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
+
+                src = self.crop_tensor_to_original(src, fixed_padding)
+                ref = self.crop_tensor_to_original(ref, fixed_padding)
+                flow = self.crop_tensor_to_original(flow, fixed_padding)
+                if self.flow_type == "zero":
+                    flow = torch.zeros_like(flow)  # Zeroflow version
+
+            elif self.dam_type == "dam_misalign":
+                src_origin, moving_padding = self.pad_tensor_to_multiple(src_origin, height_multiple=768, width_multiple=576
+                )
+                ref_to_src, fixed_padding = self.pad_tensor_to_multiple(
+                    ref_to_src, height_multiple=768, width_multiple=576
+                )
+                ref, fixed_padding = self.pad_tensor_to_multiple(
+                    ref, height_multiple=768, width_multiple=576
+                )
+
+                _, flow = self.flow_estimator(src_origin, ref_to_src, registration=True)
+                _, flow_mr = self.flow_estimator(
+                    ref_to_src, src_origin, registration=True
+                )
+                ref = self.crop_tensor_to_original(ref, fixed_padding)
+                flow = self.crop_tensor_to_original(flow, fixed_padding)
+            else:
+                raise ValueError("Invalid dam_type")
+        elif self.flow_type == 'grad_icon':
+            height = src.shape[2]
+            batch_size = src.shape[0]
+            flows = []
+            src = self.pad_height_to_384(src)
+            ref = self.pad_height_to_384(ref)
+            src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=384, width_multiple=320)
+            ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=384, width_multiple=320)
+            for i in range(batch_size): #Because of flow_estimator is trained on batch 1
+                src_i = src[i:i+1]
+                ref_i = ref[i:i+1]
+                _, flow_i, _ = self.flow_estimator(src_i, ref_i)
+                flows.append(flow_i)
+            flow = torch.cat(flows, dim=0)
+            src = self.crop_height_to_original(src, height)
+            ref = self.crop_height_to_original(ref, height)
+            flow = self.crop_height_to_original(flow, height)
+            src = self.crop_tensor_to_original(src, fixed_padding)
+            ref = self.crop_tensor_to_original(ref, fixed_padding)
+            flow = self.crop_tensor_to_original(flow, fixed_padding)
+        else:
+            flow = self.flow_estimator(src, ref)  # src가 이동 ref가 고정
+
+        src_lq_concat = torch.cat((src_origin, src), dim=1)
+        # q_feat = self.unet_q(src)
+        q_feat = self.unet_q(src_lq_concat)  # 발전시킨것
+
+        k_feat = self.unet_k(ref)
+        # k_feat = self.unet_k(moved) # 이건 zeroflow인데, moved를 key,value로 쓰기위해. 결과 꽤 좋더라? Ablation의 base에서는 빼야해
+
+        outputs = []
+        for i in range(3):
+            # if i == 2:
+            if (
+                self.daca_loc == "end" and i != 2
+            ):  # end일땐 끝에거만 cross-attention하도록
+                continue
+
+            if mask != None:
+                mask = mask[:, 0:1, :, :]
+                outputs.append(
+                    self.trans_unit[i](
+                        q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow, mask
+                    )
+                )
+            else:
+                outputs.append(
+                    self.trans_unit[i](
+                        q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow
+                    )
+                )
+
+        if self.daca_loc == "end":
+            f0 = self.conv0(outputs[0])  # H, W
+            f1 = self.conv1(f0)  # H/2, W/2
+            f2 = self.conv2(f1)  # H/4, W/4
+            f3 = self.conv3(f2)  # H/4, W/4
+            f3 = f3 + f2
+            f4 = self.conv4(f3)  # H/2, W/2
+            f4 = f4 + f1
+            f5 = self.conv5(f4)  # H, W
+            f5 = f5 + outputs[0] + f0
+
+        else:
+            f0 = self.conv0(outputs[2])  # H, W
+            f1 = self.conv1(f0)  # H/2, W/2
+            f1 = f1 + outputs[1]
+            f2 = self.conv2(f1)  # H/4, W/4
+            f2 = f2 + outputs[0]
+            f3 = self.conv3(f2)  # H/4, W/4
+            f3 = f3 + outputs[0] + f2
+            f4 = self.conv4(f3)  # H/2, W/2
+            f4 = f4 + outputs[1] + f1
+            f5 = self.conv5(f4)  # H, W
+            f5 = f5 + outputs[2] + f0
+
+        out = self.conv6(f5)
+        out = torch.tanh(out)  # 내가 추가한 코드
+
+        # if not self.training:
+        #     out = out[:, :, :H, :W]
+
+        # if moved is None:
+        #     return out, src, out
+        # else:
+        #     return out, src, moved #src는 dam 결과
+        return out
+
+
+    def pad_tensor_to_multiple(self, tensor, height_multiple, width_multiple):
+        _, _, h, w = tensor.shape
+        h_pad = (height_multiple - h % height_multiple) % height_multiple
+        w_pad = (width_multiple - w % width_multiple) % width_multiple
+
+        # Pad the tensor
+        padded_tensor = F.pad(
+            tensor, (0, w_pad, 0, h_pad), mode="constant", value=-1
+        )
+
+        return padded_tensor, (h_pad, w_pad)
+
+    def crop_tensor_to_original(self, tensor, padding):
+        h_pad, w_pad = padding
+        return tensor[:, :, : tensor.shape[2] - h_pad, : tensor.shape[3] - w_pad]
+        
+    def pad_height_to_384(self, tensor, padding_value=-1):
+        # tensor shape: [batch, channel, height, width, slice]
+        height = tensor.shape[2]
+        if height < 384:
+            # padding = (0, 384 - height)  # padding only on one side
+            padding = (0, 0, 0, 384 - height)
+            tensor = F.pad(tensor, padding, mode='constant', value=padding_value)
+        return tensor
+    
+    def crop_height_to_original(self, tensor, original_height):
+        # tensor shape: [batch, channel, height, width, slice]
+        return tensor[:, :, :original_height, :]
+
+
+
+
+
+
+
+
 ####################################################################################################
+####################################################################################################
+
+
+
+
+
+
+
+
+
 
 
 def resize_flow(flow, size_type, sizes, interp_mode="bilinear", align_corners=False):
@@ -452,298 +805,4 @@ def flow_guide_sampler(
         n, k_size**2, c, h, w
     )  # [4, 25, 64, 48, 48]
     return sample_feat
-
-
-class RegistFormer(nn.Module):
-    def __init__(self, **kwargs):
-        super().__init__()
-        try:
-            self.feat_dim = kwargs['feat_dim']
-            self.ref_ch = kwargs['ref_ch']
-            self.src_ch = kwargs['src_ch']
-            self.out_ch = kwargs['out_ch']
-            self.nhead = kwargs['nhead']
-            self.mlp_ratio = kwargs['mlp_ratio']
-            self.pos_en_flag = kwargs['pos_en_flag']
-            self.k_size = kwargs['k_size']
-            self.attn_type = kwargs['attn_type']
-            self.daca_loc = kwargs['daca_loc']
-            self.flow_type = kwargs['flow_type']
-            self.dam_type = kwargs['dam_type']
-            self.fuse_type = kwargs['fuse_type']
-            self.flow_model_path = kwargs['flow_model_path']
-            self.flow_ft = kwargs['flow_ft']
-            self.dam_ft = kwargs['dam_ft']
-            self.dam_path = kwargs['dam_path']
-            self.dam_feat = kwargs['dam_feat']
-            self.main_ft = kwargs['main_ft']
-
-        except KeyError as e:
-            raise ValueError(f"Missing required parameter: {str(e)}")
-
-        current_dir = os.path.dirname(__file__)
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
-
-        self.flow_model_path = os.path.join(project_root, self.flow_model_path)
-        self.dam_path = os.path.join(project_root, self.dam_path)
-
-        if self.flow_type == "voxelmorph" or self.flow_type == "zero":
-            from src.models.components.voxelmorph import VxmDense
-
-            device = "cuda"
-            self.flow_estimator = VxmDense.load(path=self.flow_model_path, device=device)
-
-            self.flow_estimator.to(device)
-            self.flow_estimator.eval()
-            for param in self.flow_estimator.parameters():
-                param.requires_grad = self.flow_ft  # False
-        else:
-            raise ValueError(f"Unrecognized flow type: {self.flow_type}.")
-
-        # Define DAM.
-        if self.dam_ft:
-            assert self.dam_path != None
-
-        if self.dam_type == "synthesis_meta":
-            from src.models.components.meta_synthesis import (
-                SynthesisMetaModule,
-            )
-
-            self.DAM = SynthesisMetaModule(
-                in_ch=self.src_ch,
-                feat_ch=self.dam_feat,
-                out_ch=self.src_ch,
-                load_path=self.dam_path,
-                requires_grad=self.dam_ft,
-            )
-
-        # Define feature extractor.
-        # self.unet_q = Unet(src_ch, feat_dim, feat_dim)
-        self.unet_q = Unet(self.src_ch * 2, self.feat_dim, self.feat_dim)
-        self.unet_k = Unet(self.ref_ch, self.feat_dim, self.feat_dim)
-
-        # Define GAM.
-        self.trans_unit = nn.ModuleList(
-            [
-                TransformerUnit(
-                    self.feat_dim,
-                    self.nhead,
-                    self.pos_en_flag,
-                    self.mlp_ratio,
-                    self.k_size,
-                    self.attn_type,
-                    self.fuse_type,
-                ),
-                TransformerUnit(
-                    self.feat_dim,
-                    self.nhead,
-                    self.pos_en_flag,
-                    self.mlp_ratio,
-                    self.k_size,
-                    self.attn_type,
-                    self.fuse_type,
-                ),
-                TransformerUnit(
-                    self.feat_dim,
-                    self.nhead,
-                    self.pos_en_flag,
-                    self.mlp_ratio,
-                    self.k_size,
-                    self.attn_type,
-                    self.fuse_type,
-                ),
-            ]
-        )
-
-        self.conv0 = double_conv(self.feat_dim, self.feat_dim)
-        self.conv1 = double_conv_down(self.feat_dim, self.feat_dim)
-        self.conv2 = double_conv_down(self.feat_dim, self.feat_dim)
-        self.conv3 = double_conv(self.feat_dim, self.feat_dim)
-        self.conv4 = double_conv_up(self.feat_dim, self.feat_dim)
-        self.conv5 = double_conv_up(self.feat_dim, self.feat_dim)
-        self.conv6 = nn.Sequential(
-            single_conv(self.feat_dim, self.feat_dim), nn.Conv2d(self.feat_dim, self.out_ch, 3, 1, 1)
-        )
-
-        if not self.main_ft:
-            self.eval()
-            for key, param in self.named_parameters():
-                if "flow_estimator" not in key and "DAM" not in key:
-                    param.requires_grad = False
-        else:
-            self.train()
-            for key, param in self.named_parameters():
-                if "flow_estimator" not in key and "DAM" not in key:
-                    param.requires_grad = True
-
-    def pad_tensor_to_multiple(self, tensor, height_multiple, width_multiple):
-            _, _, h, w = tensor.shape
-            h_pad = (height_multiple - h % height_multiple) % height_multiple
-            w_pad = (width_multiple - w % width_multiple) % width_multiple
-
-            # Pad the tensor
-            padded_tensor = F.pad(
-                tensor, (0, w_pad, 0, h_pad), mode="constant", value=-1
-            )
-
-            return padded_tensor, (h_pad, w_pad)
-
-    def crop_tensor_to_original(self, tensor, padding):
-        h_pad, w_pad = padding
-        return tensor[:, :, : tensor.shape[2] - h_pad, : tensor.shape[3] - w_pad]
-
-    def forward(self, src, ref, mask=None, for_nce=False, for_src=False):
-        assert (
-            src.shape == ref.shape
-        ), "Shapes of source and reference images \
-                                        mismatch."
-        moved = None
-
-        # if not self.training:
-        #     N, C, H, W = src.shape
-        #     mod_size = 4
-        #     H_pad = mod_size - H % mod_size if not H % mod_size == 0 else 0
-        #     W_pad = mod_size - W % mod_size if not W % mod_size == 0 else 0
-        #     src = F.pad(src, (0, W_pad, 0, H_pad), "replicate")
-        #     ref = F.pad(ref, (0, W_pad, 0, H_pad), "replicate")
-
-        if self.dam_type == "dam":
-            src = self.DAM(src, ref)  # [4, 3, 256, 256]
-        elif self.dam_type == "synthesis_meta":
-            src_origin = src
-            src = self.DAM(src)
-        elif self.dam_type == "dam_misalign":
-            src_origin = src
-            ref_to_src = self.DAM_MR_CT(ref, src)
-            src = self.DAM(src, ref)
-        # elif self.dam_type == 'dam_misalign':
-        #     src = self.DAM.netG_B(src, ref)
-        else:
-            raise ValueError(
-                "Invalid dam_type provided. Expected 'dam' or 'synthesis_meta'."
-            )
-        #TODO: 개발중
-        # if for_nce:
-        #     if for_src:
-        #         src_lq_concat = torch.cat((src_origin, src), dim=1)
-        #         q_feat = self.unet_q(src_lq_concat, for_nce=True)
-        #         return q_feat
-        #     else:
-        #         q_feat = self.unet_k(ref, for_nce=True)
-        #         return q_feat
-
-
-
-        # with torch.no_grad():
-        #     flow = self.flow_estimator(src, ref).detach()
-        if self.flow_type in ["voxelmorph", "zero"]:
-            if self.dam_type == "synthesis_meta" or self.dam_type == "dam":
-                src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=768, width_multiple=576)
-                ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=768, width_multiple=576)
-                
-                if self.flow_type == "zero":
-                    moved, flow = self.flow_estimator(
-                        ref, src, registration=True
-                    )  # Zeroflow version
-                else:
-                    _, flow = self.flow_estimator(
-                        src, ref, registration=True
-                    )  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
-
-                moved, _ = self.flow_estimator(ref, src, registration=True)  # ref -> src moved image 그냥 시각화하기 위해(save위해)
-                moved = self.crop_tensor_to_original(moved, fixed_padding)
-                src = self.crop_tensor_to_original(src, fixed_padding)
-                ref = self.crop_tensor_to_original(ref, fixed_padding)
-                flow = self.crop_tensor_to_original(flow, fixed_padding)
-                if self.flow_type == "zero":
-                    flow = torch.zeros_like(flow)  # Zeroflow version
-
-            elif self.dam_type == "dam_misalign":
-                src_origin, moving_padding = self.pad_tensor_to_multiple(src_origin, height_multiple=768, width_multiple=576
-                )
-                ref_to_src, fixed_padding = self.pad_tensor_to_multiple(
-                    ref_to_src, height_multiple=768, width_multiple=576
-                )
-                ref, fixed_padding = self.pad_tensor_to_multiple(
-                    ref, height_multiple=768, width_multiple=576
-                )
-
-                _, flow = self.flow_estimator(src_origin, ref_to_src, registration=True)
-                _, flow_mr = self.flow_estimator(
-                    ref_to_src, src_origin, registration=True
-                )
-                moved = self.flow_estimator.transformer(ref, flow_mr)
-
-                ref = self.crop_tensor_to_original(ref, fixed_padding)
-                moved = self.crop_tensor_to_original(moved, fixed_padding)
-                flow = self.crop_tensor_to_original(flow, fixed_padding)
-            else:
-                raise ValueError("Invalid dam_type")
-        else:
-            flow = self.flow_estimator(src, ref)  # src가 이동 ref가 고정
-
-        src_lq_concat = torch.cat((src_origin, src), dim=1)
-        # q_feat = self.unet_q(src)
-        q_feat = self.unet_q(src_lq_concat)  # 발전시킨것
-
-        k_feat = self.unet_k(ref)
-        # k_feat = self.unet_k(moved) # 이건 zeroflow인데, moved를 key,value로 쓰기위해. 결과 꽤 좋더라? Ablation의 base에서는 빼야해
-
-        outputs = []
-        for i in range(3):
-            # if i == 2:
-            if (
-                self.daca_loc == "end" and i != 2
-            ):  # end일땐 끝에거만 cross-attention하도록
-                continue
-
-            if mask != None:
-                mask = mask[:, 0:1, :, :]
-                outputs.append(
-                    self.trans_unit[i](
-                        q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow, mask
-                    )
-                )
-            else:
-                outputs.append(
-                    self.trans_unit[i](
-                        q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow
-                    )
-                )
-
-        if self.daca_loc == "end":
-            f0 = self.conv0(outputs[0])  # H, W
-            f1 = self.conv1(f0)  # H/2, W/2
-            f2 = self.conv2(f1)  # H/4, W/4
-            f3 = self.conv3(f2)  # H/4, W/4
-            f3 = f3 + f2
-            f4 = self.conv4(f3)  # H/2, W/2
-            f4 = f4 + f1
-            f5 = self.conv5(f4)  # H, W
-            f5 = f5 + outputs[0] + f0
-
-        else:
-            f0 = self.conv0(outputs[2])  # H, W
-            f1 = self.conv1(f0)  # H/2, W/2
-            f1 = f1 + outputs[1]
-            f2 = self.conv2(f1)  # H/4, W/4
-            f2 = f2 + outputs[0]
-            f3 = self.conv3(f2)  # H/4, W/4
-            f3 = f3 + outputs[0] + f2
-            f4 = self.conv4(f3)  # H/2, W/2
-            f4 = f4 + outputs[1] + f1
-            f5 = self.conv5(f4)  # H, W
-            f5 = f5 + outputs[2] + f0
-
-        out = self.conv6(f5)
-        out = torch.tanh(out)  # 내가 추가한 코드
-
-        # if not self.training:
-        #     out = out[:, :, :H, :W]
-
-        # if moved is None:
-        #     return out, src, out
-        # else:
-        #     return out, src, moved #src는 dam 결과
-        return out
 

@@ -405,8 +405,8 @@ class GradientICON(RegistrationModule):
         # print("Identity map shape:", self.identity_map.shape)
         # print("Image A shape:", image_A.shape)
         
-        assert self.identity_map.shape[2:] == image_A.shape[2:]
-        assert self.identity_map.shape[2:] == image_B.shape[2:]
+        assert self.identity_map.shape[2:] == image_A.shape[2:], f"{self.identity_map.shape[2:]}, {image_A.shape[2:]}"
+        assert self.identity_map.shape[2:] == image_B.shape[2:], f"{self.identity_map.shape[2:]}, {image_B.shape[2:]}"
 
         # Tag used elsewhere for optimization.
         # Must be set at beginning of forward b/c not preserved by .cuda() etc

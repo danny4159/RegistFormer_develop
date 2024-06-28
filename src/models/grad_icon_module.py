@@ -91,11 +91,12 @@ class GradICONModule(BaseModule_Registration):
             return evaluation_img, moving_img, fixed_img, warped_img_tensor
     
         else:
-            original_slices = evaluation_img.shape[-1]
-            moving_img_pad = self.pad_slice_to_128(moving_img)
-            fixed_img_pad = self.pad_slice_to_128(fixed_img)
-            loss, transform_vector, warped_img_pad = self.netR_A(moving_img_pad, fixed_img_pad)
-            warped_img = self.crop_slice_to_original(warped_img_pad, original_slices)
+            # original_slices = evaluation_img.shape[-1] #Padding is not needed
+            # moving_img_pad = self.pad_slice_to_128(moving_img)
+            # fixed_img_pad = self.pad_slice_to_128(fixed_img)
+            # loss, transform_vector, warped_img_pad = self.netR_A(moving_img_pad, fixed_img_pad)
+            loss, transform_vector, warped_img = self.netR_A(moving_img, fixed_img)
+            # warped_img = self.crop_slice_to_original(warped_img_pad, original_slices)
             return evaluation_img, moving_img, fixed_img, warped_img
 
 

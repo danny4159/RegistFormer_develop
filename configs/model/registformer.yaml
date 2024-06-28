@@ -28,10 +28,12 @@ netG_A:
   k_size: 28
   attn_type: 'softmax'
   daca_loc: null
-  flow_type: 'voxelmorph' # 'voxelmorph' 'zero'-> Ablation
+  # flow_type: 'voxelmorph' # 'voxelmorph' 'zero'-> Ablation
+  flow_type: 'grad_icon' 
   dam_type: 'synthesis_meta'
   fuse_type: null
-  flow_model_path: 'pretrained/registration/Voxelmorph_Loss_MSE_MaskMSE1_0075.pt'
+  # flow_model_path: 'pretrained/registration/Voxelmorph_Loss_MSE_MaskMSE1_0075.pt'
+  flow_model_path: 'logs/Model_GradICON_Registration_Data_SynthRAD_MR_CT_Pelvis/GradICON_CTsynCTPelvis_2D/runs/2024-06-27_11-08-03/checkpoints/epoch001-fid20.69-gc0.3429-nmi0.3991-sharp64.19.ckpt'
   flow_ft: false
   dam_ft: false
   dam_path: 'pretrained/synthesis/meta_synthesis_epoch_089.ckpt'
