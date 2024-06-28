@@ -159,3 +159,7 @@ configs/local/default.yaml
 # Aim logging
 .aim
 Mambaforge-Linux-x86_64.sh
+
+# Save model
+*.ckpt
+*.pt
