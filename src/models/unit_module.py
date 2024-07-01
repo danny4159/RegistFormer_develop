@@ -107,7 +107,23 @@ class UnitModule(BaseModule_AtoB_BtoA):
         loss_kl_cross = (loss_G_recon_kl_ab + loss_G_recon_kl_ba) * self.params.lambda_kl_cross
         self.log("KL_cross_Loss", loss_kl_cross.detach(), prog_bar=True)
         loss_G += loss_kl_cross
- 
+
+        # perceptual loss (extra)
+        if self.params.lambda_perceptual != 0:
+            loss_G_vgg_a = self.criterionPerceptual(recon_b_a, real_b)
+            loss_G_vgg_b = self.criterionPerceptual(recon_a_b, real_a)
+            loss_perceptual = (loss_G_vgg_a + loss_G_vgg_b) * self.params.lambda_perceptual
+            self.log("Percept_Loss", loss_perceptual.detach(), prog_bar=True)
+            loss_G += loss_perceptual
+
+        # contextual loss (extra)
+        if self.params.lambda_contextual != 0:
+            loss_contextual_a = torch.mean(self.contextual_loss(real_a, recon_b_a))
+            loss_contextual_b = torch.mean(self.contextual_loss(real_b, recon_a_b))
+            loss_contextual = (loss_contextual_a + loss_contextual_b) * self.params.lambda_contextual
+            self.log("Context_Loss", loss_contextual.detach(), prog_bar=True)
+            loss_G += loss_contextual
+
         return loss_G
 
     def model_step_unit(self, batch: Any):

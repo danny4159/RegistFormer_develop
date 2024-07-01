@@ -57,8 +57,8 @@ netD_B:
 params: # Other params
   pool_size: 0
   lambda_content: 1
-  lambda_kl: 1
+  lambda_kl: 0.001
   lambda_cycle: 1
-  lambda_kl_cross: 1
-  lambda_perceptual: 0
+  lambda_kl_cross: 0.001
+  lambda_perceptual: 1
   lambda_contextual: 0
