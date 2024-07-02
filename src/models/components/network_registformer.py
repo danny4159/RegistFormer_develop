@@ -33,6 +33,7 @@ class RegistFormer(nn.Module):
             self.dam_path = kwargs['dam_path']
             self.dam_feat = kwargs['dam_feat']
             self.main_ft = kwargs['main_ft']
+            self.is_moved_feat = kwargs['is_moved_feat']
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -45,12 +46,7 @@ class RegistFormer(nn.Module):
 
         if self.flow_type == "voxelmorph" or self.flow_type == "zero":
             from src.models.components.voxelmorph import VxmDense
-
-            # device = "cuda" #TODO: 수정중. forward에서 cude 설정하려고 cuda 없애려고
-            # self.flow_estimator = VxmDense.load(path=self.flow_model_path, device=device)
             self.flow_estimator = VxmDense.load(path=self.flow_model_path, device='cpu')
-
-            # self.flow_estimator.to(device)
             self.flow_estimator.eval()
 
         elif self.flow_type == "grad_icon":
@@ -196,34 +192,25 @@ class RegistFormer(nn.Module):
                 ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=768, width_multiple=576)
                 
                 if self.flow_type == "zero":
-                    moved, flow = self.flow_estimator(
-                        ref, src, registration=True
-                    )  # Zeroflow version
+                    moved, flow = self.flow_estimator(ref, src, registration=True)  # Zeroflow version
                 else:
-                    _, flow = self.flow_estimator( # flow: torch.Size([1, 2, 768, 576])
-                        src, ref, registration=True
-                    )  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
+                    _, flow = self.flow_estimator(src, ref, registration=True)  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
 
                 src = self.crop_tensor_to_original(src, fixed_padding)
                 ref = self.crop_tensor_to_original(ref, fixed_padding)
                 flow = self.crop_tensor_to_original(flow, fixed_padding)
                 if self.flow_type == "zero":
                     flow = torch.zeros_like(flow)  # Zeroflow version
+                if self.is_moved_feat:
+                    moved = self.crop_tensor_to_original(moved, fixed_padding)
 
             elif self.dam_type == "dam_misalign":
-                src_origin, moving_padding = self.pad_tensor_to_multiple(src_origin, height_multiple=768, width_multiple=576
-                )
-                ref_to_src, fixed_padding = self.pad_tensor_to_multiple(
-                    ref_to_src, height_multiple=768, width_multiple=576
-                )
-                ref, fixed_padding = self.pad_tensor_to_multiple(
-                    ref, height_multiple=768, width_multiple=576
-                )
+                src_origin, moving_padding = self.pad_tensor_to_multiple(src_origin, height_multiple=768, width_multiple=576)
+                ref_to_src, fixed_padding = self.pad_tensor_to_multiple(ref_to_src, height_multiple=768, width_multiple=576)
+                ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=768, width_multiple=576)
 
                 _, flow = self.flow_estimator(src_origin, ref_to_src, registration=True)
-                _, flow_mr = self.flow_estimator(
-                    ref_to_src, src_origin, registration=True
-                )
+                _, flow_mr = self.flow_estimator(ref_to_src, src_origin, registration=True)
                 ref = self.crop_tensor_to_original(ref, fixed_padding)
                 flow = self.crop_tensor_to_original(flow, fixed_padding)
             else:
@@ -255,8 +242,10 @@ class RegistFormer(nn.Module):
         # q_feat = self.unet_q(src)
         q_feat = self.unet_q(src_lq_concat)  # 발전시킨것
 
-        k_feat = self.unet_k(ref)
-        # k_feat = self.unet_k(moved) # 이건 zeroflow인데, moved를 key,value로 쓰기위해. 결과 꽤 좋더라? Ablation의 base에서는 빼야해
+        if self.is_moved_feat:
+            k_feat = self.unet_k(moved) # 이건 zeroflow와 함께. moved를 key,value로 쓰기위해. 결과 꽤 좋더라?
+        else:
+            k_feat = self.unet_k(ref)
 
         outputs = []
         for i in range(3):

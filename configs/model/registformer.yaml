@@ -28,12 +28,12 @@ netG_A:
   k_size: 28
   attn_type: 'softmax'
   daca_loc: null
-  # flow_type: 'voxelmorph' # 'voxelmorph' 'zero'-> Ablation
-  flow_type: 'grad_icon' 
+  flow_type: 'voxelmorph' # 'voxelmorph' 'zero'-> Ablation
+  # flow_type: 'grad_icon' 
   dam_type: 'synthesis_meta'
   fuse_type: null
-  # flow_model_path: 'pretrained/registration/Voxelmorph_Loss_MSE_MaskMSE1_0075.pt'
-  flow_model_path: 'pretrained/registration/GradICON/epoch001-fid20.69-gc0.3429-nmi0.3991-sharp64.19.ckpt'
+  flow_model_path: 'pretrained/registration/Voxelmorph_Loss_MSE_MaskMSE1_0075.pt'
+  # flow_model_path: 'pretrained/registration/GradICON/epoch001-fid20.69-gc0.3429-nmi0.3991-sharp64.19.ckpt'
   flow_ft: false
   dam_ft: false
   dam_path: 'pretrained/synthesis/meta_synthesis_epoch_089.ckpt'
@@ -41,6 +41,7 @@ netG_A:
   main_ft: true
   init_type: 'normal'
   init_gain: 0.02
+  is_moved_feat: false
 
 netD_A:
   _target_: src.models.components.networks_define.define_D

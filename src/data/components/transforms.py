@@ -369,7 +369,13 @@ class dataset_SynthRAD(Dataset):
                 A, B, C = random_crop_height_width(A, B, C, target_size=self.crop_size) 
             else:
                 A, B = random_crop_height_width(A, B, target_size=self.crop_size) 
-
+        else:
+            _, h, w = A.shape
+            if self.data_group_3:
+                A, B, C = even_crop(A, B, C, (h // 16 * 16, w // 16 * 16)) # 16의 배수로
+            else:
+                A, B = even_crop(A, B, (h // 16 * 16, w // 16 * 16)) # 16의 배수로
+                
         if self.reverse:
             if self.data_group_3:
                 return C, B, A
