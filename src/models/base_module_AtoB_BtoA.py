@@ -58,6 +58,12 @@ class BaseModule_AtoB_BtoA(LightningModule):
             fake_a = self.netG_A.decode(c_b, self.s_a.to(device))
             fake_b = self.netG_B.decode(c_a, self.s_b.to(device))
         
+        elif self.netG_A._get_name() == 'G_Resnet': # For UNIT
+            hidden_a, _ = self.netG_A.encode(real_a)
+            fake_b = self.netG_B.decode(hidden_a)
+            hidden_b, _ = self.netG_B.encode(real_b)
+            fake_a = self.netG_A.decode(hidden_b)
+        
         elif self.netG_A._get_name() == 'DAModule' or self.netG_A._get_name() == 'ProposedSynthesisModule': # For DAM
             fake_b = self.netG_B.forward(real_a, real_b)
             fake_a = self.netG_A.forward(real_b, real_a)
