@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from src.losses.gan_loss import GANLoss
 from src.losses.mind_loss import MINDLoss
-from src.losses.contextual_loss import Contextual_Loss
+from src.losses.contextual_loss import Contextual_Loss, VGG_Model
 from src.losses.occlusion_contextual_loss import OcclusionContextualLoss
 from src.losses.patch_nce_loss import PatchNCELoss
 
@@ -36,6 +36,10 @@ class RegistFormerModule(BaseModule_AtoB):
         self.optimizer = optimizer
         self.params = params
 
+        if self.params.nce_on_vgg: # vgg for patchNCE
+            listen_list = ["conv_1_2", "conv_2_2", "conv_3_4"]  # choose layers what you want # "conv_1_2", "conv_2_2", "conv_3_4", "conv_4_4", "conv_5_4"
+            self.vgg = VGG_Model(listen_list=listen_list)
+
         # loss function
         style_feat_layers = {"conv_4_4": 1.0} 
         # style_feat_layers = {"conv_2_2": 1.0, "conv_3_2": 1.0, "conv_4_2": 1.0}
@@ -50,7 +54,7 @@ class RegistFormerModule(BaseModule_AtoB):
         self.criterionMIND = MINDLoss() if params.lambda_mind != 0 else None
 
         self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size) if params.lambda_nce != 0 else None 
-
+        
         self.criterionL1 = torch.nn.L1Loss()
 
         # PatchNCE specific initializations
@@ -86,13 +90,26 @@ class RegistFormerModule(BaseModule_AtoB):
             loss_G += loss_MIND
 
         if self.criterionNCE:
-            feat_b = self.netG_A(real_a, fake_b, for_nce=True, for_src=False)
+            if self.params.nce_on_vgg:
+                if real_a.shape[1] == 1 and fake_b.shape[1] == 1:
+                    real_a_rgb = real_a.repeat(1, 3, 1, 1)
+                    fake_b_rgb = fake_b.repeat(1, 3, 1, 1)
+                self.vgg.to(real_a.device)
+                feat_b = self.vgg(fake_b_rgb)
+                feat_b = list(feat_b.values())
+            else:
+                feat_b = self.netG_A(real_a, fake_b, for_nce=True, for_src=False)
 
             flipped_for_equivariance = np.random.random() < 0.5
             if self.flip_equivariance and flipped_for_equivariance:
                 feat_b = [torch.flip(fb, [3]) for fb in feat_b]
 
-            feat_a = self.netG_A(real_a, real_b, for_nce=True, for_src=True)
+            if self.params.nce_on_vgg:
+                feat_a = feat_a = self.vgg(real_a_rgb)
+                feat_a = list(feat_a.values())
+            else:
+                feat_a = self.netG_A(real_a, real_b, for_nce=True, for_src=True)
+
             feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
             feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
 
@@ -116,7 +133,8 @@ class RegistFormerModule(BaseModule_AtoB):
             if self.params.lambda_nce == 0:
                 optimizer_G_A, optimizer_D_A = self.optimizers()
             else:
-                optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
+                optimizer_G_A, optimizer_D_A = self.optimizers()
+                # optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
         else:
             optimizer_G_A = self.optimizers()
         real_a, real_b, fake_b = self.model_step(batch)
@@ -124,20 +142,20 @@ class RegistFormerModule(BaseModule_AtoB):
         # Renew
         with optimizer_G_A.toggle_model():
             optimizer_G_A.zero_grad() # 이것만 위로 올림
-            if self.params.lambda_nce != 0:
-                optimizer_F_A.zero_grad()
+            # if self.params.lambda_nce != 0:
+            #     optimizer_F_A.zero_grad()
             loss_G = self.backward_G(real_a, real_b, fake_b)
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
             )
-            if self.params.lambda_nce != 0:
-                self.clip_gradients(
-                        optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-                )
+            # if self.params.lambda_nce != 0:
+            #     self.clip_gradients(
+            #             optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+            #     )
             optimizer_G_A.step()
-            if self.params.lambda_nce != 0:
-                optimizer_F_A.step()
+            # if self.params.lambda_nce != 0:
+            #     optimizer_F_A.step()
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         
@@ -165,18 +183,18 @@ class RegistFormerModule(BaseModule_AtoB):
             optimizer_D_A = self.hparams.optimizer(params=self.netD_A.parameters())
             optimizers.append(optimizer_D_A)
         
-        if self.params.lambda_nce != 0:
-            optimizer_F_A = self.hparams.optimizer(params=self.netF_A.parameters())
-            optimizers.append(optimizer_F_A)
+        # if self.params.lambda_nce != 0:
+        #     optimizer_F_A = self.hparams.optimizer(params=self.netF_A.parameters())
+        #     optimizers.append(optimizer_F_A)
 
         if self.hparams.scheduler is not None:
                 scheduler_G_A = self.hparams.scheduler(optimizer=optimizer_G_A)
                 schedulers.append(scheduler_G_A)
                 scheduler_D_B = self.hparams.scheduler(optimizer=optimizer_D_A)
                 schedulers.append(scheduler_D_B)
-                if self.params.lambda_nce != 0:
-                    scheduler_F_A = self.hparams.scheduler(optimizer=optimizer_F_A)
-                    schedulers.append(scheduler_F_A)
+                # if self.params.lambda_nce != 0:
+                #     scheduler_F_A = self.hparams.scheduler(optimizer=optimizer_F_A)
+                #     schedulers.append(scheduler_F_A)
                 return optimizers, schedulers
         
         return optimizers

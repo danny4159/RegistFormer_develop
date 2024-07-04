@@ -173,14 +173,14 @@ class RegistFormer(nn.Module):
                 "Invalid dam_type provided. Expected 'dam' or 'synthesis_meta'."
             )
         #TODO: 개발중
-        # if for_nce:
-        #     if for_src:
-        #         src_lq_concat = torch.cat((src_origin, src), dim=1)
-        #         q_feat = self.unet_q(src_lq_concat, for_nce=True)
-        #         return q_feat
-        #     else:
-        #         q_feat = self.unet_k(ref, for_nce=True)
-        #         return q_feat
+        if for_nce:
+            if for_src:
+                src_lq_concat = torch.cat((src_origin, src), dim=1)
+                q_feat = self.unet_q(src_lq_concat, for_nce=True)
+                return q_feat
+            else:
+                q_feat = self.unet_k(ref, for_nce=True)
+                return q_feat
 
 
 

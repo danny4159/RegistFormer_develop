@@ -70,6 +70,7 @@ params: # Other params
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
   batch_size: ${data.batch_size}
+  nce_on_vgg: False
 
   #Ablation
   ran_shift: 10 #null # "Put null or Interger" / random shift to ground truth when calculating Contextual Loss
