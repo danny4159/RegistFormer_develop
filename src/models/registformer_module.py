@@ -37,12 +37,15 @@ class RegistFormerModule(BaseModule_AtoB):
         self.params = params
 
         if self.params.nce_on_vgg: # vgg for patchNCE
-            listen_list = ["conv_1_2", "conv_2_2", "conv_3_4"]  # choose layers what you want # "conv_1_2", "conv_2_2", "conv_3_4", "conv_4_4", "conv_5_4"
+            # listen_list = ["conv_1_2", "conv_2_2", "conv_3_4"]  # choose layers what you want # "conv_1_2", "conv_2_2", "conv_3_4", "conv_4_4", "conv_5_4"
+            # listen_list = ["conv_2_2", "conv_3_4"]  # choose layers what you want # "conv_1_2", "conv_2_2", "conv_3_4", "conv_4_4", "conv_5_4"
+            listen_list = ["conv_4_2", "conv_5_4"]  # choose layers what you want # "conv_1_2", "conv_2_2", "conv_3_4", "conv_4_4", "conv_5_4"
             self.vgg = VGG_Model(listen_list=listen_list)
 
         # loss function
-        style_feat_layers = {"conv_4_4": 1.0} 
+        # style_feat_layers = {"conv_4_4": 1.0} 
         # style_feat_layers = {"conv_2_2": 1.0, "conv_3_2": 1.0, "conv_4_2": 1.0}
+        style_feat_layers = {"conv_1_2": 1.0, "conv_2_2": 1.0, "conv_3_4": 1.0}
         
         if params.flag_occlusionCTX:
             self.criterionCTX = OcclusionContextualLoss(flow_model_path=self.params.flow_model_path) if params.lambda_ctx != 0 else None
@@ -55,7 +58,7 @@ class RegistFormerModule(BaseModule_AtoB):
 
         self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size) if params.lambda_nce != 0 else None 
         
-        self.criterionL1 = torch.nn.L1Loss()
+        self.criterionL1 = torch.nn.L1Loss() if params.lambda_l1 != 0 else None
 
         # PatchNCE specific initializations
         self.flip_equivariance = params.flip_equivariance
@@ -133,8 +136,7 @@ class RegistFormerModule(BaseModule_AtoB):
             if self.params.lambda_nce == 0:
                 optimizer_G_A, optimizer_D_A = self.optimizers()
             else:
-                optimizer_G_A, optimizer_D_A = self.optimizers()
-                # optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
+                optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
         else:
             optimizer_G_A = self.optimizers()
         real_a, real_b, fake_b = self.model_step(batch)
@@ -142,20 +144,20 @@ class RegistFormerModule(BaseModule_AtoB):
         # Renew
         with optimizer_G_A.toggle_model():
             optimizer_G_A.zero_grad() # 이것만 위로 올림
-            # if self.params.lambda_nce != 0:
-            #     optimizer_F_A.zero_grad()
+            if self.params.lambda_nce != 0:
+                optimizer_F_A.zero_grad()
             loss_G = self.backward_G(real_a, real_b, fake_b)
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
             )
-            # if self.params.lambda_nce != 0:
-            #     self.clip_gradients(
-            #             optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-            #     )
+            if self.params.lambda_nce != 0:
+                self.clip_gradients(
+                        optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+                )
             optimizer_G_A.step()
-            # if self.params.lambda_nce != 0:
-            #     optimizer_F_A.step()
+            if self.params.lambda_nce != 0:
+                optimizer_F_A.step()
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         
@@ -183,18 +185,18 @@ class RegistFormerModule(BaseModule_AtoB):
             optimizer_D_A = self.hparams.optimizer(params=self.netD_A.parameters())
             optimizers.append(optimizer_D_A)
         
-        # if self.params.lambda_nce != 0:
-        #     optimizer_F_A = self.hparams.optimizer(params=self.netF_A.parameters())
-        #     optimizers.append(optimizer_F_A)
+        if self.params.lambda_nce != 0:
+            optimizer_F_A = self.hparams.optimizer(params=self.netF_A.parameters())
+            optimizers.append(optimizer_F_A)
 
         if self.hparams.scheduler is not None:
                 scheduler_G_A = self.hparams.scheduler(optimizer=optimizer_G_A)
                 schedulers.append(scheduler_G_A)
                 scheduler_D_B = self.hparams.scheduler(optimizer=optimizer_D_A)
                 schedulers.append(scheduler_D_B)
-                # if self.params.lambda_nce != 0:
-                #     scheduler_F_A = self.hparams.scheduler(optimizer=optimizer_F_A)
-                #     schedulers.append(scheduler_F_A)
+                if self.params.lambda_nce != 0:
+                    scheduler_F_A = self.hparams.scheduler(optimizer=optimizer_F_A)
+                    schedulers.append(scheduler_F_A)
                 return optimizers, schedulers
         
         return optimizers
