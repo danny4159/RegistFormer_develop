@@ -139,6 +139,56 @@ def random_crop_height_width(tensorA, tensorB, tensorC=None, target_size=(128, 1
         return tensorA, tensorB, tensorC
     else:
         return tensorA, tensorB
+    
+def even_crop_height_width(tensorA, tensorB, tensorC=None, multiple=(16, 16)):
+    """
+    Crop the image to the target size evenly from all sides.
+
+    Args:
+        tensorA (Tensor): Image to be cropped.
+        tensorB (Tensor): Second Image to be cropped.
+        target_size (tuple): Desired output size (height, width).
+        tensorC (Tensor, optional): Third image to be cropped.
+
+    Returns:
+        Tensor: Cropped images.
+    """
+    if len(tensorA.shape) == 3:
+        # 2D case
+        _, h, w = tensorA.shape
+    elif len(tensorA.shape) == 4:
+        # 3D case
+        _, h, w, _ = tensorA.shape
+    else:
+        raise ValueError("Input tensors must have 3 or 4 dimensions")
+
+    new_h = (h // multiple[0]) * multiple[0]
+    new_w = (w // multiple[1]) * multiple[1]
+
+    # Calculate cropping dimensions
+    top = (h - new_h) // 2
+    bottom = h - new_h - top
+    left = (w - new_w) // 2
+    right = w - new_w - left
+
+    if len(tensorA.shape) == 3:
+        # Crop images
+        tensorA = F.crop(tensorA, top, left, new_h, new_w)
+        tensorB = F.crop(tensorB, top, left, new_h, new_w)
+        if tensorC is not None:
+            tensorC = F.crop(tensorC, top, left, new_h, new_w)
+    elif len(tensorA.shape) == 4:
+        # Crop images
+        tensorA = tensorA[:, top:top + new_h, left:left + new_w, :]
+        tensorB = tensorB[:, top:top + new_h, left:left + new_w, :]
+        if tensorC is not None:
+            tensorC = tensorC[:, top:top + new_h, left:left + new_w, :]
+
+    if tensorC is not None:
+        return tensorA, tensorB, tensorC
+    else:
+        return tensorA, tensorB
+
 
 def random_crop(tensorA, tensorB, output_size=(128, 128)):
     """
@@ -370,11 +420,10 @@ class dataset_SynthRAD(Dataset):
             else:
                 A, B = random_crop_height_width(A, B, target_size=self.crop_size) 
         else:
-            _, h, w = A.shape
             if self.data_group_3:
-                A, B, C = even_crop(A, B, C, (h // 16 * 16, w // 16 * 16)) # 16의 배수로
+                A, B, C = even_crop_height_width(A, B, C, (16, 16)) # 16의 배수로 Crop
             else:
-                A, B = even_crop(A, B, (h // 16 * 16, w // 16 * 16)) # 16의 배수로
+                A, B = even_crop_height_width(A, B, (16, 16)) # 16의 배수로 Crop
                 
         if self.reverse:
             if self.data_group_3:
