@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 
 from src.losses.grad_loss import Grad
+from src.losses.mask_mse_loss import MaskMSELoss
 
 from src import utils
 from src.models.base_module_registration import BaseModule_Registration
@@ -35,6 +36,7 @@ class VoxelmorphOriginalModule(BaseModule_Registration):
 
         self.criterionL2 = torch.nn.MSELoss()
         self.criterionGrad = Grad(penalty='l1', loss_mult=2)
+        self.criterionMaskL2 = MaskMSELoss()
 
     def pad_slice_to_128(self, tensor, padding_value=-1):
         # tensor shape: [batch, channel, height, width, slice]
@@ -51,25 +53,44 @@ class VoxelmorphOriginalModule(BaseModule_Registration):
     def backward_R(self, fixed_img, warped_img): 
         loss_R = 0.0
 
-        loss_l2 = self.criterionL2(fixed_img, warped_img) * self.params.lambda_l2        
-        self.log("L2_Loss", loss_l2.detach(), prog_bar=True)
-        loss_R += loss_l2
+        if self.criterionL2:
+            loss_l2 = self.criterionL2(fixed_img, warped_img) * self.params.lambda_l2        
+            self.log("L2_Loss", loss_l2.detach(), prog_bar=True)
+            loss_R += loss_l2
+        
+        if self.criterionGrad:
+            loss_grad = self.criterionGrad(warped_img) * self.params.lambda_grad
+            self.log("Grad_Loss", loss_grad.detach(), prog_bar=True)
+            loss_R += loss_grad 
 
-        loss_grad = self.criterionGrad(warped_img) * self.params.lambda_grad
-        self.log("Grad_Loss", loss_grad.detach(), prog_bar=True)
-        loss_R += loss_grad 
+        if self.criterionMaskL2:
+            loss_mask_l2 = self.criterionMaskL2(fixed_img, warped_img) * self.params.lambda_mask_l2
+            self.log("Mask_L2_Loss", loss_mask_l2.detach(), prog_bar=True)
+            loss_R += loss_mask_l2
 
         self.log("R_loss", loss_R.detach(), prog_bar=True)
         
         return loss_R
 
-    # def model_step_for_train(self, batch: Any):
-    #     evaluation_img, moving_img, fixed_img = batch # MR, CT, syn_CT
-    #     original_slices = evaluation_img.shape[-1]
-    #     moving_img = self.pad_slice_to_128(moving_img)
-    #     fixed_img = self.pad_slice_to_128(fixed_img)
-    #     loss, transform_vector, warped_img = self.netR_A(moving_img, fixed_img)
-    #     return loss
+    def model_step_for_train(self, batch: Any, is_3d=False):
+        evaluation_img, fixed_img, moving_img = batch # Moving, Fixed is changed in training
+        if is_3d:
+            original_slices = evaluation_img.shape[-1]
+            moving_img = self.pad_slice_to_128(moving_img)
+            fixed_img = self.pad_slice_to_128(fixed_img)
+
+            warped_img, _ = self.netR_A(moving_img, fixed_img, registration=True)
+
+            moving_img = self.crop_slice_to_original(moving_img, original_slices)
+            fixed_img = self.crop_slice_to_original(fixed_img, original_slices)
+            warped_img = self.crop_slice_to_original(warped_img, original_slices)
+
+            return evaluation_img, moving_img, fixed_img, warped_img
+            
+        else:
+            warped_img, _ = self.netR_A(moving_img, fixed_img, registration=True)
+            return evaluation_img, moving_img, fixed_img, warped_img
+
 
     def model_step(self, batch: Any, is_3d=False):
         evaluation_img, moving_img, fixed_img = batch
@@ -92,8 +113,11 @@ class VoxelmorphOriginalModule(BaseModule_Registration):
         
     def training_step(self, batch: Any, batch_idx: int):
         optimizer_R_A = self.optimizers()
-        evaluation_img, moving_img, fixed_img, warped_img = self.model_step(batch, is_3d=self.params.is_3d)
-        
+        if self.params.flag_train_fixed_moving:
+            evaluation_img, moving_img, fixed_img, warped_img = self.model_step_for_train(batch, is_3d=self.params.is_3d)
+        else:
+            evaluation_img, moving_img, fixed_img, warped_img = self.model_step(batch, is_3d=self.params.is_3d)
+    
         with optimizer_R_A.toggle_model():
             loss = self.backward_R(fixed_img, warped_img)
             self.manual_backward(loss)

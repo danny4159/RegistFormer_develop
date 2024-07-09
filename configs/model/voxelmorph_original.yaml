@@ -36,6 +36,8 @@ netR_A:
 params: # Other params
   lambda_l2: 1
   lambda_grad: 0.01
+  lambda_mask_l2: 0
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   is_3d: ${data.is_3d}
+  flag_train_fixed_moving: False # Swap moving and fixed only during training to encourage learning without compromising reference features. (My guess, experimenting)
