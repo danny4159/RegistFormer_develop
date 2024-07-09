@@ -180,7 +180,7 @@ class ImageLoggingCallback(Callback):
             
             if len(batch[0].size()) == 5: # 3D Image
                 d_index = 30  # 5번째 D 차원의 30번째 데이터 선택
-                evaluation_img, moving_img, fixed_img, warped_img = pl_module.model_step(batch, train=False)
+                evaluation_img, moving_img, fixed_img, warped_img = pl_module.model_step(batch, is_3d=True)
                 evaluation_img = evaluation_img[:, :, :, :, d_index].squeeze(-1)
                 moving_img = moving_img[:, :, :, :, d_index].squeeze(-1)
                 fixed_img = fixed_img[:, :, :, :, d_index].squeeze(-1)
