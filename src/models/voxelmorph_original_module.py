@@ -35,7 +35,7 @@ class VoxelmorphOriginalModule(BaseModule_Registration):
         self.scheduler = scheduler
 
         self.criterionL2 = torch.nn.MSELoss()
-        self.criterionGrad = Grad(penalty='l1', loss_mult=2)
+        self.criterionGrad = Grad(penalty='l2', loss_mult=2)
         self.criterionMaskL2 = MaskMSELoss()
 
     def pad_slice_to_128(self, tensor, padding_value=-1):
