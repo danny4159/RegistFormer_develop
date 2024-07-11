@@ -57,7 +57,7 @@ class UnitModule(BaseModule_AtoB_BtoA):
             "conv_3_2": 1.0,
             "conv_4_2": 1.0
         }
-        # self.contextual_loss = Contextual_Loss(style_feat_layers)
+        self.contextual_loss = Contextual_Loss(style_feat_layers)
 
         
         # Image Pool
