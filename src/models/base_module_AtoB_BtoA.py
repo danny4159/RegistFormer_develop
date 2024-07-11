@@ -57,6 +57,9 @@ class BaseModule_AtoB_BtoA(LightningModule):
             device = real_a.device
             fake_a = self.netG_A.decode(c_b, self.s_a.to(device))
             fake_b = self.netG_B.decode(c_a, self.s_b.to(device))
+            # Non noise
+            # fake_a = self.netG_A.decode(c_b, s_a_fake)
+            # fake_b = self.netG_B.decode(c_a, s_b_fake)
         
         elif self.netG_A._get_name() == 'G_Resnet': # For UNIT
             hidden_a, _ = self.netG_A.encode(real_a)

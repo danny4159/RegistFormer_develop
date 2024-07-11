@@ -92,6 +92,10 @@ class MunitModule(BaseModule_AtoB_BtoA):
         loss_gen_recon_s_a = self.criterionRecon(s_a_recon, s_a)
         loss_gen_recon_s_b = self.criterionRecon(s_b_recon, s_b)
         loss_style = (loss_gen_recon_s_a + loss_gen_recon_s_b) * lambda_style
+        # Non noise
+        # loss_gen_recon_s_a = self.criterionRecon(s_a_recon, s_a_prime)
+        # loss_gen_recon_s_b = self.criterionRecon(s_b_recon, s_b_prime)
+        # loss_style = (loss_gen_recon_s_a + loss_gen_recon_s_b) * lambda_style
 
         loss_gen_recon_c_a = self.criterionRecon(c_a_recon, c_a)
         loss_gen_recon_c_b = self.criterionRecon(c_b_recon, c_b)
@@ -127,8 +131,10 @@ class MunitModule(BaseModule_AtoB_BtoA):
         x_a_recon = self.netG_A.decode(c_a, s_a_prime)
         x_b_recon = self.netG_B.decode(c_b, s_b_prime)
         # decode (cross domain)
-        x_ba = self.netG_A.decode(c_b, s_a)
-        x_ab = self.netG_B.decode(c_a, s_b)
+        # x_ba = self.netG_A.decode(c_b, s_a)
+        # x_ab = self.netG_B.decode(c_a, s_b)
+        x_ba = self.netG_A.decode(c_b, s_a_prime)
+        x_ab = self.netG_B.decode(c_a, s_b_prime)
         # encode again
         c_b_recon, s_a_recon = self.netG_A.encode(x_ba)
         c_a_recon, s_b_recon = self.netG_B.encode(x_ab)

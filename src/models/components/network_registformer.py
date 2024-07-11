@@ -201,7 +201,7 @@ class RegistFormer(nn.Module):
                 flow = self.crop_tensor_to_original(flow, fixed_padding)
                 if self.flow_type == "zero":
                     flow = torch.zeros_like(flow)  # Zeroflow version
-                if self.is_moved_feat:
+                if self.is_moved_feat: # Comparison
                     moved = self.crop_tensor_to_original(moved, fixed_padding)
 
             elif self.dam_type == "dam_misalign":
