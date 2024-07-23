@@ -9,6 +9,8 @@ from torch.autograd import Variable
 import math
 import pdb
 import os
+from flash_attn import flash_attn_func
+
 
 class RegistFormer(nn.Module):
     def __init__(self, **kwargs):
@@ -449,6 +451,24 @@ def dotproduct_attention(q, k, v):
 
     return output, attn
 
+def flash_attention(q, k, v):
+    height, width = q.shape[4], q.shape[5]
+    q = q.permute(0, 2, 4, 5, 1, 3)  # (batch_size, head, height, width, 1, dim)
+    q = q.reshape(q.shape[0], q.shape[1], q.shape[2] * q.shape[3], q.shape[5])  # (batch_size, head, height * width, dim)
+
+    k = k.permute(0, 2, 4, 5, 3, 1)  # (batch_size, head, height, width, dim, k^2)
+    k = k.reshape(k.shape[0], k.shape[1], k.shape[2] * k.shape[3], k.shape[4], k.shape[5])  # (batch_size, head, height * width, dim, k_sq)
+    k = k.permute(0, 1, 2, 4, 3)  # (batch_size, head, height * width, k^2, dim)
+
+    v = v.permute(0, 2, 4, 5, 1, 3)  # (batch_size, head, height, width, k^2, dim)
+    v = v.reshape(v.shape[0], v.shape[1], v.shape[2] * v.shape[3], v.shape[4], v.shape[5])  # (batch_size, head, height * width, k_sq, dim)
+
+    output = flash_attn_func(q=q,k=k,v=v)
+
+    output = output.reshape(output.shape[0], output.shape[1], height, width, output.shape[3])
+    output = output.permute(0, 1, 4, 2, 3)  # (batch_size, head, dim, height, width)
+    output = output.reshape(output.shape[0], 1, output.shape[1], output.shape[2], output.shape[3], output.shape[4])
+
 
 class single_conv(nn.Module):
     def __init__(self, in_ch, out_ch):
@@ -726,6 +746,9 @@ class MultiheadAttention(nn.Module):
             q, attn = softmax_attention(q, k, v)
         elif attn_type == "dot":
             q, attn = dotproduct_attention(q, k, v)
+        elif attn_type == "flash":
+            q = flash_attention(q, k, v)
+            attn = None
         else:
             raise NotImplementedError(f"Unknown attention type {attn_type}")
 
