@@ -1,13 +1,13 @@
 import torch
 import torch.nn as nn
 
-class Grad(nn.Module):
+class GradLoss(nn.Module):
     """
     N-D gradient loss.
     """
 
     def __init__(self, penalty='l1', loss_mult=None):
-        super(Grad, self).__init__()
+        super(GradLoss, self).__init__()
         self.penalty = penalty
         self.loss_mult = loss_mult
 
@@ -45,3 +45,28 @@ class Grad(nn.Module):
             grad *= self.loss_mult
 
         return grad.mean()
+    
+class SmoothLoss(nn.Module):
+    def __init__(self):
+        super(SmoothLoss, self).__init__()
+
+    def forward(self, deform):
+        ndims = len(deform.shape) - 2  # except batch and channel dimensions
+        if ndims not in [2, 3]:
+            raise ValueError(f"Input data should be 2D or 3D. Got {ndims}D.")
+
+        diffs = []
+        if ndims == 2:
+            dy = torch.abs(deform[:, :, 1:, :] - deform[:, :, :-1, :])
+            dx = torch.abs(deform[:, :, :, 1:] - deform[:, :, :, :-1])
+            diffs = [dy, dx]
+        elif ndims == 3:
+            dy = torch.abs(deform[:, :, 1:, :, :] - deform[:, :, :-1, :, :])
+            dx = torch.abs(deform[:, :, :, 1:, :] - deform[:, :, :, :-1, :])
+            dz = torch.abs(deform[:, :, :, :, 1:] - deform[:, :, :, :, :-1])
+            diffs = [dy, dx, dz]
+
+        squared_diffs = [diff * diff for diff in diffs]
+        loss = sum(torch.mean(diff) for diff in squared_diffs)
+
+        return loss
