@@ -235,7 +235,7 @@ class BaseModule_AtoB_BtoA(LightningModule):
         self.log("test/gc_B_std", gc_B_std.detach(), sync_dist=True)
         self.log("test/nmi_B_std", nmi_B_std.detach(), sync_dist=True)
         self.log("test/fid_B_std", torch.tensor(float('nan'), device=self.device).detach(), sync_dist=True)
-        self.log("test/kid_B_std", kid_B_mean.detach(), sync_dist=True)
+        self.log("test/kid_B_std", kid_B_std.detach(), sync_dist=True)
         self.log("test/sharpness_B_std", sharpness_B_std.detach(), sync_dist=True)
 
         for metrics in self.test_metrics:
