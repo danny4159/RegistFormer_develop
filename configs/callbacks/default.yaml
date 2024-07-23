@@ -9,13 +9,13 @@ model_checkpoint:
   dirpath: ${paths.output_dir}/checkpoints
   filename: "epoch{epoch:03d}-fid{val/fid_B:.2f}-kid{val/kid_B:.2f}-gc{val/gc_B:.4f}-nmi{val/nmi_B:.4f}-sharp{val/sharpness_B:.2f}"
   monitor: "val/fid_B" # modified to look for best fid
-  # save_top_k: 5 # 매 epoch마다 저장할거 아니면 이거 다시 resume
+  save_top_k: 10 # 매 epoch마다 저장할거 아니면 이거 다시 resume
   mode: "min" # max, min
   save_last: True
   auto_insert_metric_name: False #True
   # 모든 epoch에서 저장하기 위해 아래 2개를 추가. 잠깐만.
-  save_top_k: -1
-  every_n_epochs: 1 
+  # save_top_k: -1
+  # every_n_epochs: 1 
 
 model_summary:
   max_depth: 1
