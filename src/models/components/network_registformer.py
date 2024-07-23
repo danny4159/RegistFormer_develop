@@ -71,7 +71,7 @@ class RegistFormer(nn.Module):
         if self.dam_type == "synthesis_meta":
             from src.models.components.meta_synthesis import (
                 SynthesisMetaModule,
-            )
+            )   
 
             self.DAM = SynthesisMetaModule(
                 in_ch=self.src_ch,
@@ -80,6 +80,15 @@ class RegistFormer(nn.Module):
                 load_path=self.dam_path,
                 requires_grad=self.dam_ft,
             )
+
+        elif self.dam_type == "proposed_synthesis":
+            from src.models.components.network_proposed_synthesis import ProposedSynthesisModule
+            self.DAM = ProposedSynthesisModule(input_nc=1, feat_ch=256, output_nc=1, demodulate=True)
+            checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
+            model_state_dict = checkpoint["state_dict"]
+            adjusted_state_dict = {k.replace("netG_A.", ""): v for k, v in model_state_dict.items()}
+            self.flow_estimator.load_state_dict(adjusted_state_dict, strict=False)
+            self.flow_estimator.eval()
 
         # Define feature extractor.
         # self.unet_q = Unet(src_ch, feat_dim, feat_dim)
@@ -157,7 +166,8 @@ class RegistFormer(nn.Module):
         #     src = F.pad(src, (0, W_pad, 0, H_pad), "replicate")
         #     ref = F.pad(ref, (0, W_pad, 0, H_pad), "replicate")
 
-        if self.dam_type == "dam":
+        if self.dam_type == "dam" or self.dam_type == "proposed_synthesis":
+            src_origin = src
             src = self.DAM(src, ref)  # [4, 3, 256, 256]
         elif self.dam_type == "synthesis_meta":
             src_origin = src
@@ -187,7 +197,7 @@ class RegistFormer(nn.Module):
         # with torch.no_grad():
         #     flow = self.flow_estimator(src, ref).detach()
         if self.flow_type in ["voxelmorph", "zero"]:
-            if self.dam_type == "synthesis_meta" or self.dam_type == "dam":
+            if self.dam_type == "synthesis_meta" or self.dam_type == "dam" or self.dam_type == "proposed_synthesis":
                 src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=768, width_multiple=576)
                 ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=768, width_multiple=576)
                 

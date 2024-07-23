@@ -37,6 +37,8 @@ netG_A:
   flow_ft: false
   dam_ft: false
   dam_path: 'pretrained/synthesis/meta_synthesis_epoch_089.ckpt'
+  # pretrained/synthesis/proposed_synthesis_epoch37.ckpt
+  # pretrained/synthesis/meta_synthesis_epoch_089.ckpt
   dam_feat: 64
   main_ft: true
   init_type: 'normal'
