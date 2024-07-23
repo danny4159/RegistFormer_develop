@@ -90,6 +90,9 @@ class DAMModule(BaseModule_AtoB_BtoA):
         with optimizer_G.toggle_model():
             loss_G = self.backward_G(real_a, real_b, fake_a, fake_b, self.params.lambda_style, self.params.lambda_cycle_a, self.params.lambda_cycle_b, self.params.lambda_sc)
             self.manual_backward(loss_G)
+            self.clip_gradients(
+                optimizer_G, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+            )
             optimizer_G.step()
             optimizer_G.zero_grad()
             
