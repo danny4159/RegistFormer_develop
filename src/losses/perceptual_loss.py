@@ -133,6 +133,12 @@ class Perceptual_Loss(nn.Module):
             input: the shape should be BNHW[D].
             target: the shape should be BNHW[D].
         """
+
+        if input.shape[1] == 1:
+            input = input.repeat(1, 3, 1, 1)
+        if target.shape[1] == 1:
+            target = target.repeat(1, 3, 1, 1)
+            
         if target.shape != input.shape:
             raise ValueError(f"ground truth has differing shape ({target.shape}) from input ({input.shape})")
 

@@ -8,8 +8,11 @@ from torchmetrics.clustering import NormalizedMutualInfoScore
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.kid import KernelInceptionDistance
 from src.metrics.sharpness import SharpnessMetric
+from torchmetrics.image import StructuralSimilarityIndexMeasure, PeakSignalNoiseRatio
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
-gray2rgb = lambda x: torch.cat((x, x, x), dim=1)
+# gray2rgb = lambda x: torch.cat((x, x, x), dim=1)
+gray2rgb = lambda x: torch.cat((x, x, x), dim=1) if x.shape[1] == 1 else x
 # norm_0_to_1 = lambda x: (x + 1) / 2
 flatten_to_1d = lambda x: x.view(-1)
 norm_to_uint8 = lambda x: ((x + 1) / 2 * 255).to(torch.uint8)
@@ -18,6 +21,23 @@ class BaseModule_AtoB_BtoA(LightningModule):
     def __init__(self, params, *args: Any, **kwargs: Any):
         super().__init__()
         self.params = params
+        
+        if self.params.eval_on_align:
+            self.val_ssim_A, self.val_psnr_A, self.val_lpips_A, self.val_sharpness_A = self.define_metrics()
+            self.test_ssim_A, self.test_psnr_A, self.test_lpips_A, self.test_sharpness_A = self.define_metrics()
+
+            self.val_ssim_B, self.val_psnr_B, self.val_lpips_B, self.val_sharpness_B = self.define_metrics()
+            self.test_ssim_B, self.test_psnr_B, self.test_lpips_B, self.test_sharpness_B = self.define_metrics()
+            
+            self.val_metrics = [self.val_ssim_A, self.val_psnr_A, self.val_lpips_A, self.val_sharpness_A, self.val_ssim_B, self.val_psnr_B, self.val_lpips_B, self.val_sharpness_B]
+            self.test_metrics = [self.test_ssim_A, self.test_psnr_A, self.test_lpips_A, self.test_sharpness_A, self.test_ssim_B, self.test_psnr_B, self.test_lpips_B, self.test_sharpness_B]
+            
+            self.psnr_values_A = []
+            self.lpips_values_A = []
+            self.psnr_values_B = []
+            self.lpips_values_B = []
+
+            return
 
         self.val_gc_A, self.val_nmi_A, self.val_fid_A, self.val_kid_A, self.val_sharpness_A = self.define_metrics()
         self.test_gc_A, self.test_nmi_A, self.test_fid_A, self.test_kid_A, self.test_sharpness_A = self.define_metrics()
@@ -31,16 +51,23 @@ class BaseModule_AtoB_BtoA(LightningModule):
         self.nmi_scores_A = []
         self.nmi_scores_B = []
 
-    @staticmethod
-    def define_metrics():
+    def define_metrics(self):
+        if self.params.eval_on_align:
+            # Following Pytorch lightning metric
+            # PSNR, LPIPS: 'update', 'compute', and 'append' at each step, calculate 'mean and std' at the end of epoch
+            # SSIM: initialize with reduction='none', 'update' at each step, 'compute' at the end of epoch, then calculate 'mean and std'
+            ssim = StructuralSimilarityIndexMeasure(reduction="none")
+            psnr = PeakSignalNoiseRatio()
+            lpips = LearnedPerceptualImagePatchSimilarity()
+            sharpness = SharpnessMetric()
+            return ssim, psnr, lpips, sharpness
+
         gc = GradientCorrelationMetric()
         nmi = NormalizedMutualInfoScore()
         fid = FrechetInceptionDistance()
         kid = KernelInceptionDistance(subset_size=2)
         sharpness = SharpnessMetric()
-
         return gc, nmi, fid, kid, sharpness
-    
 
     def forward(self, a: torch.Tensor, b: Optional[torch.Tensor]=None):        
         if b is None:
@@ -49,7 +76,10 @@ class BaseModule_AtoB_BtoA(LightningModule):
             return self.netG_A(a), self.netG_B(b)
 
     def model_step(self, batch: Any):
-        real_a, real_b = batch
+        if self.params.eval_on_align:
+            real_a, real_a2, real_b2, real_b = batch
+        else:
+            real_a, real_b = batch
 
         if self.netG_A._get_name() == 'AdaINGen': # For MUNIT
             c_a, s_a_fake = self.netG_A.encode(real_a)
@@ -74,6 +104,8 @@ class BaseModule_AtoB_BtoA(LightningModule):
         else:
             fake_b, fake_a = self.forward(real_a, real_b)
 
+        if self.params.eval_on_align:
+            return real_a, real_b, real_a2, real_b2, fake_a, fake_b
         return real_a, real_b, fake_a, fake_b
 
     def on_train_start(self):
@@ -118,6 +150,31 @@ class BaseModule_AtoB_BtoA(LightningModule):
         return super().on_train_epoch_end()
 
     def validation_step(self, batch: Any, batch_idx: int):
+        if self.params.eval_on_align:
+            real_A, real_B, real_A2, real_B2, fake_A, fake_B = self.model_step(batch)
+
+            self.val_ssim_A.update(real_A2, fake_A)
+            self.val_psnr_A.update(real_A2, fake_A)
+            self.psnr_values_A.append(self.val_psnr_A.compute().item())
+            self.val_psnr_A.reset()
+            # self.val_lpips_A.update(real_A2, fake_A)
+            self.val_lpips_A.update(gray2rgb(real_A2), gray2rgb(fake_A))
+            self.lpips_values_A.append(self.val_lpips_A.compute().item())
+            self.val_lpips_A.reset()            
+            self.val_sharpness_A.update(norm_to_uint8(fake_A).float())
+
+            self.val_ssim_B.update(real_B2, fake_B)
+            self.val_psnr_B.update(real_B2, fake_B)
+            self.psnr_values_B.append(self.val_psnr_B.compute().item())
+            self.val_psnr_B.reset()
+            # self.val_lpips_B.update(real_B2, fake_B)
+            self.val_lpips_B.update(gray2rgb(real_A2), gray2rgb(fake_A))
+            self.lpips_values_B.append(self.val_lpips_B.compute().item())
+            self.val_lpips_B.reset()
+            self.val_sharpness_B.update(norm_to_uint8(fake_B).float())
+            
+            return
+
         real_A, real_B, fake_A, fake_B = self.model_step(batch)
 
         self.val_gc_A.update(norm_to_uint8(real_B), norm_to_uint8(fake_A))
@@ -127,7 +184,7 @@ class BaseModule_AtoB_BtoA(LightningModule):
         self.val_fid_A.update(gray2rgb(norm_to_uint8(fake_A)), real=False)
         self.val_kid_A.update(gray2rgb(norm_to_uint8(real_B)), real=True)
         self.val_kid_A.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
-        self.val_sharpness_A.update(norm_to_uint8(fake_A))
+        self.val_sharpness_A.update(norm_to_uint8(fake_A).float())
 
         self.val_gc_B.update(norm_to_uint8(real_A), norm_to_uint8(fake_B))
         nmi_score_B = self.val_nmi_B(flatten_to_1d(norm_to_uint8(real_A)), flatten_to_1d(norm_to_uint8(fake_B)))
@@ -136,10 +193,48 @@ class BaseModule_AtoB_BtoA(LightningModule):
         self.val_fid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
         self.val_kid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
         self.val_kid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
-        self.val_sharpness_B.update(norm_to_uint8(fake_B))
+        self.val_sharpness_B.update(norm_to_uint8(fake_B).float())
 
     def on_validation_epoch_end(self):
+        if self.params.eval_on_align:
+            ssim_A = self.val_ssim_A.compute().mean()
+            psnr_A = torch.mean(torch.tensor(self.psnr_values_A))
+            lpips_A = torch.mean(torch.tensor(self.lpips_values_A))
+            sharpness_A = self.val_sharpness_A.compute()
 
+            ssim_B = self.val_ssim_B.compute().mean()
+            psnr_B = torch.mean(torch.tensor(self.psnr_values_B))
+            lpips_B = torch.mean(torch.tensor(self.lpips_values_B))
+            sharpness_B = self.val_sharpness_B.compute()
+
+            ssim_A = self.val_ssim_A.compute().mean().to(self.device)
+            psnr_A = torch.mean(torch.tensor(self.psnr_values_A, device=self.device))
+            lpips_A = torch.mean(torch.tensor(self.lpips_values_A, device=self.device))
+            sharpness_A = self.val_sharpness_A.compute().to(self.device)
+
+            ssim_B = self.val_ssim_B.compute().mean().to(self.device)
+            psnr_B = torch.mean(torch.tensor(self.psnr_values_B, device=self.device))
+            lpips_B = torch.mean(torch.tensor(self.lpips_values_B, device=self.device))
+            sharpness_B = self.val_sharpness_B.compute().to(self.device)
+
+            self.log("val/ssim_A", ssim_A.detach(), sync_dist=True)
+            self.log("val/psnr_A", psnr_A.detach(), sync_dist=True)
+            self.log("val/lpips_A", lpips_A.detach(), sync_dist=True)
+            self.log("val/sharpness_A", sharpness_A.detach(), sync_dist=True)
+
+            self.log("val/ssim_B", ssim_B.detach(), sync_dist=True)
+            self.log("val/psnr_B", psnr_B.detach(), sync_dist=True)
+            self.log("val/lpips_B", lpips_B.detach(), sync_dist=True)
+            self.log("val/sharpness_B", sharpness_B.detach(), sync_dist=True)
+
+            for metrics in self.val_metrics:
+                metrics.reset()
+            self.psnr_values_A = []
+            self.psnr_values_B = []
+            self.lpips_values_A = []
+            self.lpips_values_B = []
+            return
+        
         gc_A = self.val_gc_A.compute()
         nmi_A = torch.mean(torch.stack(self.nmi_scores_A))
         fid_A = self.val_fid_A.compute()
@@ -170,6 +265,30 @@ class BaseModule_AtoB_BtoA(LightningModule):
         self.nmi_scores_B = []
 
     def test_step(self, batch: Any, batch_idx: int):
+        if self.params.eval_on_align:
+            real_A, real_B, real_A2, real_B2, fake_A, fake_B = self.model_step(batch)
+
+            self.test_ssim_A.update(real_A2, fake_A)
+            self.test_psnr_A.update(real_A2, fake_A)
+            self.psnr_values_A.append(self.test_psnr_A.compute().item())
+            self.test_psnr_A.reset()
+            # self.test_lpips_A.update(real_A2, fake_A)
+            self.test_lpips_A.update(gray2rgb(real_A2), gray2rgb(fake_A))
+            self.lpips_values_A.append(self.test_lpips_A.compute().item())
+            self.test_lpips_A.reset()
+            self.test_sharpness_B.update(norm_to_uint8(fake_A).float())
+
+            self.test_ssim_B.update(real_B2, fake_B)
+            self.test_psnr_B.update(real_B2, fake_B)
+            self.psnr_values_B.append(self.test_psnr_B.compute().item())
+            self.test_psnr_B.reset()
+            # self.test_lpips_B.update(real_B2, fake_B)
+            self.test_lpips_B.update(gray2rgb(real_A2), gray2rgb(fake_A))
+            self.lpips_values_B.append(self.test_lpips_B.compute().item())
+            self.test_lpips_B.reset()
+            self.test_sharpness_B.update(norm_to_uint8(fake_B).float())
+
+            return
 
         real_A, real_B, fake_A, fake_B = self.model_step(batch)
 
@@ -193,6 +312,57 @@ class BaseModule_AtoB_BtoA(LightningModule):
 
 
     def on_test_epoch_end(self):
+
+        if self.params.eval_on_align:
+            ssim_A = self.test_ssim_A.compute()
+            psnr_A = torch.mean(torch.tensor(self.psnr_values_A))
+            lpips_A = torch.mean(torch.tensor(self.lpips_values_A))
+            sharpness_A = self.test_sharpness_B.compute()
+
+            ssim_B = self.test_ssim_B.compute()
+            psnr_B = torch.mean(torch.tensor(self.psnr_values_B))
+            lpips_B = torch.mean(torch.tensor(self.lpips_values_B))
+            sharpness_B = self.test_sharpness_B.compute()
+
+            self.log("test/ssim_A", ssim_A.detach(), sync_dist=True)
+            self.log("test/psnr_A", psnr_A.detach(), sync_dist=True)
+            self.log("test/lpips_A", lpips_A.detach(), sync_dist=True)
+            self.log("test/sharpness_A", sharpness_A.detach(), sync_dist=True)
+
+            self.log("test/ssim_B", ssim_B.detach(), sync_dist=True)
+            self.log("test/psnr_B", psnr_B.detach(), sync_dist=True)
+            self.log("test/lpips_B", lpips_B.detach(), sync_dist=True)
+            self.log("test/sharpness_B", sharpness_B.detach(), sync_dist=True)
+
+            ssim_A_std = torch.std(torch.tensor([metric.item() for metric in self.test_ssim_A.similarity]))
+            psnr_A_std = torch.std(torch.tensor(self.psnr_values_A))
+            lpips_A_std = torch.std(torch.tensor(self.lpips_values_A))
+            sharpness_A_std = torch.std(self.test_sharpness_A.scores)
+
+            ssim_B_std = torch.std(torch.tensor([metric.item() for metric in self.test_ssim_B.similarity]))
+            psnr_B_std = torch.std(torch.tensor(self.psnr_values_B))
+            lpips_B_std = torch.std(torch.tensor(self.lpips_values_B))
+            sharpness_B_std = torch.std(self.test_sharpness_B.scores)
+
+            self.log("test/ssim_A_std", ssim_A_std.detach(), sync_dist=True)
+            self.log("test/psnr_A_std", psnr_A_std.detach(), sync_dist=True)
+            self.log("test/lpips_A_std", lpips_A_std.detach(), sync_dist=True)
+            self.log("test/sharpness_A_std", sharpness_A_std.detach(), sync_dist=True)
+
+            self.log("test/ssim_B_std", ssim_B_std.detach(), sync_dist=True)
+            self.log("test/psnr_B_std", psnr_B_std.detach(), sync_dist=True)
+            self.log("test/lpips_B_std", lpips_B_std.detach(), sync_dist=True)
+            self.log("test/sharpness_B_std", sharpness_B_std.detach(), sync_dist=True)
+
+
+            for metrics in self.test_metrics:
+                metrics.reset()
+            self.psnr_values_A = []
+            self.psnr_values_B = []
+            self.lpips_values_A = []
+            self.lpips_values_B = []
+            return
+        
         gc_A = self.test_gc_A.compute()
         nmi_A = torch.mean(torch.stack(self.nmi_scores_A))
         fid_A = self.test_fid_A.compute()

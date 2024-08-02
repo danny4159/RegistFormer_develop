@@ -50,3 +50,4 @@ params: # Other params
   lambda_l1: 20
   lambda_vgg: 20
   lambda_smooth: 25
+  eval_on_align: ${data.eval_on_align}

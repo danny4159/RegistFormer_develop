@@ -62,3 +62,4 @@ params: # Other params
   lambda_kl_cross: 0.001
   lambda_perceptual: 1
   lambda_contextual: 0
+  eval_on_align: ${data.eval_on_align}

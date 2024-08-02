@@ -120,7 +120,10 @@ class MunitModule(BaseModule_AtoB_BtoA):
         return loss_G
 
     def model_step_munit(self, batch: Any):
-        real_a, real_b = batch
+        if self.params.eval_on_align:
+            real_a, real_a2, real_b2, real_b = batch
+        else:
+            real_a, real_b = batch
         device = real_a.device
         s_a = torch.randn(real_a.size(0), self.style_dim).to(device)
         s_b = torch.randn(real_b.size(0), self.style_dim).to(device)

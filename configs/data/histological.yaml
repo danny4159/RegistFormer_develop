@@ -6,28 +6,28 @@
 # Detailed modifications can be made through transform.py
 
 ## Core setting (Important)
-_target_: src.data.SynthRAD_MR_CT_Pelvis_datamodule.SynthRAD_MR_CT_Pelvis_DataModule
-name: SynthRAD_MR_CT_Pelvis
-type: nifti
-data_dir: ${paths.root_dir}/data/SynthRAD_MR_CT_Pelvis
-data_group_1: "MR"
-data_group_2: "CT"
-data_group_3: null # If exist put it, or null # Regist:syn_CT
-is_3d: False # True: 3D processing, False: 2D processing
+_target_: src.data.Histological_datamodule.Histological_DataModule
+name: Histological_Data
+type: photo
+data_dir: ${paths.root_dir}/data/Histological
+data_group_1: "source_T" # 1channel gray
+data_group_2: "source_R"
+data_group_4: "target_T" # 3channel RGB
+data_group_3: "target_R"
 batch_size: 4 #5 #10 #4 #30 #16 #12 #2 #1
 num_workers: 6 # 3
 pin_memory: False
 use_split_inference: False # Inference for valid and test is divided into half from the original image (for memory issue)
-eval_on_align: False
+eval_on_align: True 
 
 ## Dataset File Name
 # prepared_data_0_0_0_0_0_ver3_final.h5
 # Ver3_AllPatientSameSize_final_2.h5
 # Ver3_OnlyOnePatient.h5
 # Registration_MR_CT_synCT.h5
-train_file: 'prepared_data_0_0_0_0_0_ver3_final.h5'
-val_file: 'prepared_data_0_0_0_0_0_ver3_final.h5'
-test_file: 'prepared_data_0_0_0_0_0_ver3_final.h5' 
+train_file: 'level1_resize320_norm-1~1.h5'
+val_file: 'level1_resize320_norm-1~1.h5'
+test_file: 'level1_resize320_norm-1~1.h5' 
 
 ## Preprocessing
 reverse: False # New

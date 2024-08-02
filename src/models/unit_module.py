@@ -127,7 +127,10 @@ class UnitModule(BaseModule_AtoB_BtoA):
         return loss_G
 
     def model_step_unit(self, batch: Any):
-        real_a, real_b = batch
+        if self.params.eval_on_align:
+            real_a, real_a2, real_b2, real_b = batch
+        else:
+            real_a, real_b = batch
 
         hidden_a, noise_a = self.netG_A.encode(real_a)
         hidden_b, noise_b = self.netG_B.encode(real_b)

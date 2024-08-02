@@ -10,6 +10,7 @@ import numpy as np
 import nibabel as nib
 import h5py
 import os
+from PIL import Image
 # import itk
 
 
@@ -43,12 +44,38 @@ class ImageLoggingCallback(Callback):
         # print("use_split_inference: ", use_split_inference)
 
     def saving_to_grid(self, res):
+        def gray2rgb(tensor):
+            if tensor.size(0) == 1:  # Grayscale image with 1 channel
+                tensor = tensor.repeat(3, 1, 1)  # Repeat the channel 3 times
+            return tensor
+        
         if not isinstance(res, (list, tuple)):
             print(f"Unexpected input to saving_to_grid: {type(res)}")
             print(f"Input content: {res}")
             return
-    
-        if len(res) == 4:
+        if len(res) == 6:
+            self.ngrid = 6
+            a, b, a2, b2, preds_a, preds_b = res
+            err_a = torch.abs(a2 - preds_a)
+            err_b = torch.abs(b2 - preds_b)
+
+            if len(self.img_grid) == 0:
+                self.first_image_size = a[0].shape[1:3]
+
+            self.img_grid.extend([
+            resize(gray2rgb((a[0] + 1) / 2), self.first_image_size),
+            resize(gray2rgb((a2[0] + 1) / 2), self.first_image_size),
+            resize(gray2rgb((preds_a[0] + 1) / 2), self.first_image_size),
+            resize(gray2rgb((b[0] + 1) / 2), self.first_image_size),
+            resize(gray2rgb((b2[0] + 1) / 2), self.first_image_size),
+            resize(gray2rgb((preds_b[0] + 1) / 2), self.first_image_size),
+            ])
+            self.err_grid.extend([
+                resize(gray2rgb(err_a[0]), self.first_image_size),
+                resize(gray2rgb(err_b[0]), self.first_image_size),
+            ])
+
+        elif len(res) == 4:
             self.ngrid = 4
             a, b, preds_a, preds_b = res
             err_a = torch.abs(a - preds_a)
@@ -58,14 +85,14 @@ class ImageLoggingCallback(Callback):
                 self.first_image_size = a[0].shape[1:3]
 
             self.img_grid.extend([
-                resize((a[0] + 1) / 2, self.first_image_size),
-                resize((preds_a[0] + 1) / 2, self.first_image_size),
-                resize((b[0] + 1) / 2, self.first_image_size),
-                resize((preds_b[0] + 1) / 2, self.first_image_size),
+                resize(gray2rgb((a[0] + 1) / 2), self.first_image_size),
+                resize(gray2rgb((preds_a[0] + 1) / 2), self.first_image_size),
+                resize(gray2rgb((b[0] + 1) / 2), self.first_image_size),
+                resize(gray2rgb((preds_b[0] + 1) / 2), self.first_image_size),
             ])
             self.err_grid.extend([
-                resize(err_a[0], self.first_image_size),
-                resize(err_b[0], self.first_image_size),
+                resize(gray2rgb(err_a[0]), self.first_image_size),
+                resize(gray2rgb(err_b[0]), self.first_image_size),
             ])
             
         elif len(res) == 3:
@@ -77,14 +104,14 @@ class ImageLoggingCallback(Callback):
                 self.first_image_size = a[0].shape[1:3]
 
             self.img_grid.extend([
-                resize((a[0] + 1) / 2, self.first_image_size),
-                resize((preds_b[0] + 1) / 2, self.first_image_size),
-                resize((b[0] + 1) / 2, self.first_image_size),
+                resize(gray2rgb((a[0] + 1) / 2), self.first_image_size),
+                resize(gray2rgb((preds_b[0] + 1) / 2), self.first_image_size),
+                resize(gray2rgb((b[0] + 1) / 2), self.first_image_size),
             ])
             self.err_grid.extend([
-                resize(err_b[0], self.first_image_size),
+                resize(gray2rgb(err_b[0]), self.first_image_size),
             ])
-        
+            
     def on_validation_start(self, trainer, pl_module):
         self.img_grid = []
         self.err_grid = []
@@ -116,7 +143,15 @@ class ImageLoggingCallback(Callback):
                     res_first_half = pl_module.model_step(first_half)
                     res_second_half = pl_module.model_step(second_half)
 
-                    if len(res_first_half) == 4 and len(res_second_half) == 4:
+                    if len(res_first_half) == 6 and len(res_second_half) == 6:
+                        a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
+                        b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
+                        a2 = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
+                        b2 = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
+                        preds_a = torch.cat([res_first_half[4], res_second_half[4]], dim=2)
+                        preds_b = torch.cat([res_first_half[5], res_second_half[5]], dim=2)
+                        self.saving_to_grid([a, b, a2, b2, preds_a, preds_b])
+                    elif len(res_first_half) == 4 and len(res_second_half) == 4:
                         a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
                         b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
                         preds_a = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
@@ -130,22 +165,6 @@ class ImageLoggingCallback(Callback):
                 else:
                     res = pl_module.model_step(batch)
                     self.saving_to_grid(res)
-
-            # # 이미지 크기 다를 때
-            #  # 초기 이미지 크기를 설정합니다.
-            # if len(self.img_grid) == 0:
-            #     self.first_image_size = a[0].shape[1:3]  # 첫 번째 이미지의 크기를 저장합니다.
-
-            # # 이미지 크기 조정과 함께 그리드에 이미지를 추가합니다.
-            # for img in [a[0], preds_b[0], b[0]]:
-            #     img = (img + 1) / 2
-            #     resized_img = resize(img, self.first_image_size)  # 첫 번째 이미지 크기로 조정
-            #     self.img_grid.append(resized_img)
-
-            # # 오차 이미지를 처리합니다.
-            # err_b = torch.abs(b - preds_b)[0]
-            # resized_err = resize(err_b, self.first_image_size)
-            # self.err_grid.append(resized_err)
             
 
     def on_validation_epoch_end(self, trainer, pl_module) -> None:
@@ -195,7 +214,15 @@ class ImageLoggingCallback(Callback):
                     res_first_half = pl_module.model_step(first_half)
                     res_second_half = pl_module.model_step(second_half)
 
-                    if len(res_first_half) == 4 and len(res_second_half) == 4:
+                    if len(res_first_half) == 6 and len(res_second_half) == 6:
+                        a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
+                        b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
+                        a2 = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
+                        b2 = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
+                        preds_a = torch.cat([res_first_half[4], res_second_half[4]], dim=2)
+                        preds_b = torch.cat([res_first_half[5], res_second_half[5]], dim=2)
+                        self.saving_to_grid([a, b, a2, b2, preds_a, preds_b])
+                    elif len(res_first_half) == 4 and len(res_second_half) == 4:
                         a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
                         b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
                         preds_a = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
@@ -211,15 +238,6 @@ class ImageLoggingCallback(Callback):
                 else:
                     res = pl_module.model_step(batch)
                     self.saving_to_grid(res)
-            
-            # if len(self.img_grid) == 0:
-            #     self.first_image_size = a[0].shape[1:3] 
-
-            # for img in [a[0], preds_b[0], b[0]]:
-            #     img = (img + 1) / 2  # normalize to [0, 1] for visualization
-            #     img = resize(img, self.first_image_size)
-            #     self.img_grid.append(img)
-
 
     def on_test_end(self, trainer, pl_module):
         log.info(f"Saving test img_grid shape: <{len(self.img_grid)}>")
@@ -232,7 +250,9 @@ class ImageLoggingCallback(Callback):
         else:
             log.warning(f"No images to log for testing")
 
+#####################################################################################################################################
 
+#####################################################################################################################################
 class ImageSavingCallback(Callback):
     def __init__(self, 
                  center_crop: int = 256, 
@@ -240,6 +260,8 @@ class ImageSavingCallback(Callback):
                  test_file: str = None,
                  use_split_inference: bool = False,
                  flag_normalize: bool = True,
+                 data_dir: str = None,
+                 data_type:str = None,
                  ):
         """_summary_
         Image saving callback : Save images in nii format for each subject
@@ -251,22 +273,31 @@ class ImageSavingCallback(Callback):
         self.test_file = test_file
         self.use_split_inference = use_split_inference
         self.flag_normalize = flag_normalize
+        self.data_dir = data_dir
+        self.data_type = data_type
         # print("test_file: ", test_file)
         # print("flag_normalize: ", self.flag_normalize)
 
     @staticmethod
-    def change_torch_numpy(a, b, c, d):
+    def change_torch_numpy(a, b, c, d, e=None, f=None):
         assert (
             a.ndim == b.ndim == c.ndim == d.ndim
-        ), "All input arrays must have the same number of dimensions"
+        ), "Arrays a, b, c, and d must have the same number of dimensions"
+        
+        if e is not None or f is not None:
+            assert (e is None or e.ndim == a.ndim) and (f is None or f.ndim == a.ndim), "Arrays e and f must have the same number of dimensions as a, b, c, and d if they are provided"
+
         if a.ndim == 4 or a.ndim == 5:
             a_np = a.cpu().detach().numpy()[0, 0]
             b_np = b.cpu().detach().numpy()[0, 0]
             c_np = c.cpu().detach().numpy()[0, 0]
-            d_np = d.cpu().detach().numpy()[0, 0]  # d_np : (256,256)
+            d_np = d.cpu().detach().numpy()[0, 0]
+            e_np = e.cpu().detach().numpy()[0, 0] if e is not None else None
+            f_np = f.cpu().detach().numpy()[0, 0] if f is not None else None
         else:
             raise NotImplementedError("This function has not been implemented yet.")
-        return a_np, b_np, c_np, d_np
+        
+        return a_np, b_np, c_np, d_np, e_np, f_np
 
     @staticmethod
     def change_numpy_nii(a, b, c, d, flag_normalize=True):
@@ -316,6 +347,16 @@ class ImageSavingCallback(Callback):
         )
 
         return a_nii, b_nii, c_nii, d_nii
+    
+    @staticmethod
+    def change_numpy_tif(a, b, a2, b2, preds_a, preds_b):
+        a = ((a + 1) / 2 * 255).astype(np.uint8)
+        b = ((b + 1) / 2 * 255).astype(np.uint8)
+        a2 = ((a2 + 1) / 2 * 255).astype(np.uint8)
+        b2 = ((b2 + 1) / 2 * 255).astype(np.uint8)
+        preds_a = ((preds_a + 1) / 2 * 255).astype(np.uint8)
+        preds_b = ((preds_b + 1) / 2 * 255).astype(np.uint8)
+        return a, b, a2, b2, preds_a, preds_b
 
     @staticmethod
     def save_nii(a_nii, b_nii, c_nii, d_nii, subject_number, folder_path):
@@ -339,13 +380,30 @@ class ImageSavingCallback(Callback):
             )
         return
 
+    @staticmethod
+    def save_tif(a, b, a2, b2, preds_a, preds_b, subject_number, folder_path):
+        a_tif = Image.fromarray(a)
+        b_tif = Image.fromarray(b)
+        a2_tif = Image.fromarray(a2)
+        b2_tif = Image.fromarray(b2)
+        preds_a_tif = Image.fromarray(preds_a)
+        preds_b_tif = Image.fromarray(preds_b)
+        
+        a_tif.save(os.path.join(folder_path, f"{subject_number}_a.tif"))
+        b_tif.save(os.path.join(folder_path, f"{subject_number}_b.tif"))
+        a2_tif.save(os.path.join(folder_path, f"{subject_number}_a2.tif"))
+        b2_tif.save(os.path.join(folder_path, f"{subject_number}_b2.tif"))
+        preds_a_tif.save(os.path.join(folder_path, f"{subject_number}_preds_a.tif"))
+        preds_b_tif.save(os.path.join(folder_path, f"{subject_number}_preds_b.tif"))
+        return
+    
     def saving_to_nii(self, a, b, preds_a, preds_b=None):
         if preds_a is None:
             preds_a = torch.zeros_like(a)
         if preds_b is None:
             preds_b = torch.zeros_like(b)
             
-        a, b, preds_a, preds_b = self.change_torch_numpy(a, b, preds_a, preds_b)
+        a, b, preds_a, preds_b, _, _= self.change_torch_numpy(a, b, preds_a, preds_b)
         if a.ndim == 2: # 2D image
             self.img_a.append(a)
             self.img_b.append(b)
@@ -406,7 +464,24 @@ class ImageSavingCallback(Callback):
             )
             self.dataset_list.pop(0)
 
-
+    def saving_to_tif(self, a, b, a2, b2, preds_a, preds_b=None):
+        if preds_a is None:
+            preds_a = torch.zeros_like(a)
+        if preds_b is None:
+            preds_b = torch.zeros_like(b)
+            
+        a, b, a2, b2, preds_a, preds_b = self.change_torch_numpy(a, b, a2, b2, preds_a, preds_b)
+        a, b, a2, b2, preds_a, preds_b = self.change_numpy_tif(a, b, a2, b2, preds_a, preds_b)
+        self.save_tif(
+            a,
+            b,
+            a2,
+            b2,
+            preds_a,
+            preds_b if preds_b is not None else None,
+            subject_number=self.dataset_list.pop(0),  # Use the dataset name for saving
+            folder_path=self.save_folder_name,
+        )
         
     def on_test_start(self, trainer, pl_module):
         # make save folder
@@ -426,33 +501,24 @@ class ImageSavingCallback(Callback):
         self.subject_slice_num = []
         self.subject_number = 1
 
-        ################################################################
-        # synthRAD위해 추가한 코드!
-        head, _ = os.path.split(trainer.default_root_dir)
-        while head:
-            # 분할된 경로의 마지막 부분을 확인합니다.
-            tail = os.path.basename(head)
-            if tail == "logs":
-                # "logs"를 찾았을 경우 그 전까지의 경로를 반환합니다.
-                code_root_dir = os.path.dirname(head)
-                break
-            head, _ = os.path.split(head)
-        data_path = os.path.join(
-            code_root_dir,
-            "data",
-            "SynthRAD_MR_CT_Pelvis",
-            "test",
-            self.test_file,
-        )
-        # h5 파일에서 MR 그룹의 모든 데이터셋을 리스트로 불러오기
-        with h5py.File(data_path, "r") as file:
-            mr_group = file["MR"]
-            self.dataset_list = [
-                key for key in mr_group.keys()
-            ]  # 데이터셋 이름을 리스트로 저장
-            self.subject_slice_num = [
-                mr_group[key].shape[2] for key in self.dataset_list
-            ]  # slice number를 리스트로 저장
+        data_path = os.path.join(self.data_dir, "test", self.test_file)
+
+        if self.data_type == 'nifti':
+            with h5py.File(data_path, "r") as file:
+                first_group = file[list(file.keys())[0]]
+                self.dataset_list = [
+                    key for key in first_group.keys()
+                ]  # 데이터셋 이름을 리스트로 저장
+                self.subject_slice_num = [
+                    first_group[key].shape[2] for key in self.dataset_list
+                ]  # slice number를 리스트로 저장
+
+        elif self.data_type == 'photo':
+            with h5py.File(data_path, "r") as file:
+                first_group = file[list(file.keys())[0]]
+                self.dataset_list = [
+                    key for key in first_group.keys()
+                ]
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if self.use_split_inference:
@@ -463,170 +529,63 @@ class ImageSavingCallback(Callback):
             res_first_half = pl_module.model_step(first_half)
             res_second_half = pl_module.model_step(second_half)
 
-            if len(res_first_half) == 4 and len(res_second_half) == 4:
+            if len(res_first_half) == 6 and len(res_second_half) == 6:
+                a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
+                b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
+                a2 = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
+                b2 = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
+                preds_a = torch.cat([res_first_half[4], res_second_half[4]], dim=2)
+                preds_b = torch.cat([res_first_half[5], res_second_half[5]], dim=2)
+                if self.data_type == 'nifti':
+                    self.saving_to_nii(a, b, a2, b2, preds_a, preds_b)
+                elif self.data_type == 'photo':
+                    self.saving_to_tif(a, b, a2, b2, preds_a, preds_b)
+            elif len(res_first_half) == 4 and len(res_second_half) == 4:
                 a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
                 b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
                 preds_a = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
                 preds_b = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
-                self.saving_to_nii(a, b, preds_a, preds_b)
+                if self.data_type == 'nifti':
+                    self.saving_to_nii(a, b, preds_a, preds_b)
+                elif self.data_type == 'photo':
+                    self.saving_to_tif(a, b, preds_a, preds_b)
             elif len(res_first_half) == 3 and len(res_second_half) == 3:
                 a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
                 b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
                 preds_b = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
-                self.saving_to_nii(a, b, preds_b)
+                if self.data_type == 'nifti':
+                    self.saving_to_nii(a, b, preds_b)
+                elif self.data_type == 'photo':
+                    self.saving_to_tif(a, b, preds_b)
         else:
             if len(batch[0].size()) == 5:
                 res = pl_module.model_step(batch, is_3d=True)
             elif len(batch[0].size()) == 4:
                 res = pl_module.model_step(batch)
+            
+            if len(res) == 6:
+                a, b, a2, b2, preds_a, preds_b = res
+                if self.data_type == 'nifti':
+                    self.saving_to_nii(a, b, a2, b2, preds_a, preds_b)
+                elif self.data_type == 'photo':
+                    self.saving_to_tif(a, b, a2, b2, preds_a, preds_b)
                 
             if len(res) == 4:
                 a, b, preds_a, preds_b = res
-                self.saving_to_nii(a, b, preds_a, preds_b)
+                if self.data_type == 'nifti':
+                    self.saving_to_nii(a, b, preds_a, preds_b)
+                elif self.data_type == 'photo':
+                    self.saving_to_tif(a, b, preds_a, preds_b)
 
             elif len(res) == 3:
                 a, b, preds_b = res
-                self.saving_to_nii(a, b, preds_b)
-                
-                # a, b, preds_a, _ = self.change_torch_numpy(a, b, preds_a, a*0)
+                if self.data_type == 'nifti':
+                    self.saving_to_nii(a, b, preds_b)
+                elif self.data_type == 'photo':
+                    self.saving_to_tif(a, b, preds_b)
 
-                # self.img_a.append(a)
-                # self.img_b.append(b)
-                # self.img_preds_a.append(preds_a)
-
-                # if len(self.img_a) == self.subject_slice_num[0]:
-                # # if len(self.img_a) == 91:
-                #     a_nii = np.stack(self.img_a, -1)
-                #     b_nii = np.stack(self.img_b, -1)
-                #     preds_a_nii = np.stack(self.img_preds_a, -1)
-
-                #     # convert numpy to nii
-                #     a_nii, b_nii, preds_a_nii, _ = self.change_numpy_nii(
-                #         a_nii, b_nii, preds_a_nii, a_nii*0
-                #     )
-                #     # save nii image to (.nii) file
-                #     self.save_nii(
-                #         a_nii,
-                #         b_nii,
-                #         preds_a_nii,
-                #         None,
-                #         subject_number=self.dataset_list[0],
-                #         # subject_number=self.subject_number,
-                #         folder_path=self.save_folder_name,
-                #     )
-
-                #     # empty list
-                #     self.img_a = []
-                #     self.img_b = []
-                #     self.img_preds_a = []
-                #     self.dataset_list.pop(0)
-                #     # self.subject_number += 1
-                #     self.subject_slice_num.pop(0)
-                    
-                # if self.subject_number > self.subject_number_length:
-                #     log.info(f"Saving test images up to {self.subject_number_length}")
-                #     return
             else:
+                log.error(f"Unexpected res length: {len(res)}. This case has not been implemented.")
                 raise NotImplementedError("This function has not been implemented yet.")
             return
         
-
-# batch 받아온걸
-# netR_A를 같이 받아서 self.fullres_net를 받아와
-# itk_wrapper.register_pair에 넘겨 (itk_wrapper.register_pair 적절히 수정은 필요)
-# 그다음 코드 진행하면 돼
-        
-# class GradICON_Registration_ImageSavingCallback(Callback):
-#     def __init__(self, 
-#                  center_crop: int = 256, 
-#                  subject_number_length: int = 3, 
-#                  test_file: str = None,
-#                  use_split_inference: bool = False,
-#                  flag_normalize: bool = True,
-#                  ):
-#         """_summary_
-#         Image saving callback : Save images in nii format for each subject
-
-#         """
-#         super().__init__()
-
-#     @staticmethod
-#     def save_nii_registration(a_nii, b_nii, c_nii, d_nii, subject_number, folder_path):
-#         nib.save(a_nii, os.path.join(folder_path, f"evaluation_img_{subject_number}.nii.gz"))
-#         nib.save(b_nii, os.path.join(folder_path, f"moving_img_{subject_number}.nii.gz"))
-#         nib.save(c_nii, os.path.join(folder_path, f"fixed_img_{subject_number}.nii.gz"))
-#         if d_nii is not None:
-#             nib.save(
-#                 d_nii, os.path.join(folder_path, f"warped_img_{subject_number}.nii.gz")
-#             )
-#         return
-        
-#     def on_test_start(self, trainer, pl_module):
-#         folder_name = os.path.join(trainer.default_root_dir, "results")
-#         log.info(f"Saving test images to nifti files to {folder_name}")
-
-#         if not os.path.exists(folder_name):
-#             os.makedirs(folder_name)
-
-#         self.save_folder_name = folder_name
-
-#         ################################################################
-#         # synthRAD위해 추가한 코드!
-#         head, _ = os.path.split(trainer.default_root_dir)
-#         while head:
-#             # 분할된 경로의 마지막 부분을 확인합니다.
-#             tail = os.path.basename(head)
-#             if tail == "logs":
-#                 # "logs"를 찾았을 경우 그 전까지의 경로를 반환합니다.
-#                 code_root_dir = os.path.dirname(head)
-#                 break
-#             head, _ = os.path.split(head)
-#         data_path = os.path.join(
-#             code_root_dir,
-#             "data",
-#             "SynthRAD_MR_CT_Pelvis",
-#             "test",
-#             self.test_file,
-#         )
-#         # h5 파일에서 MR 그룹의 모든 데이터셋을 리스트로 불러오기
-#         with h5py.File(data_path, "r") as file:
-#             mr_group = file["MR"]
-#             self.dataset_list = [
-#                 key for key in mr_group.keys()
-#             ]  # 데이터셋 이름을 리스트로 저장
-
-#     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-
-#         from src.models.components.component_grad_icon import register_pair
-
-#         print(pl_module.netR_A.fullres_net)
-#         model = pl_module.netR_A.fullres_net
-#         evaluation_img, moving_img, fixed_img = batch
-#         evaluation_img_np = evaluation_img.cpu().detach().squeeze().numpy()
-#         moving_img_np = moving_img.cpu().detach().squeeze().numpy()
-#         fixed_img_np = fixed_img.cpu().detach().squeeze().numpy()
-#         moving_img_itk = itk.image_from_array(moving_img_np)
-#         fixed_img_itk = itk.image_from_array(fixed_img_np)
-#         phi_AB, phi_BA = register_pair(model, moving_img_itk, fixed_img_itk)
-
-#         interpolator = itk.LinearInterpolateImageFunction.New(moving_img_itk)
-#         warped_image_A = itk.resample_image_filter(moving_img_itk, 
-#                                                 transform=phi_AB, 
-#                                                 interpolator=interpolator,
-#                                                 size=itk.size(fixed_img_itk),
-#                                                 output_spacing=itk.spacing(fixed_img_itk),
-#                                                 output_direction=fixed_img_itk.GetDirection(), #TODO: 필요없으면 지우기
-#                                                 output_origin=fixed_img_itk.GetOrigin() #TODO: 필요없으면 지우기
-#                                             )
-        
-        
-#         warped_image_A_np = itk.array_from_image(warped_image_A)
-
-#         self.save_nii_registration(evaluation_img_np, 
-#                                    moving_img_np, 
-#                                    fixed_img_np, 
-#                                    warped_image_A_np,
-#                                    subject_number=self.dataset_list[0],
-#                                    folder_path=self.save_folder_name,
-#                                    )
-#         self.dataset_list.pop(0)

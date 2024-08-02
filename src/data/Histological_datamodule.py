@@ -9,10 +9,10 @@ from lightning import LightningDataModule
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, random_split
 
 from src.data.components.transforms import (
-    dataset_SynthRAD
+    dataset_Histological
 )
 
-class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
+class Histological_DataModule(LightningDataModule):
 
     def __init__(
         self,
@@ -20,7 +20,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         data_group_1: str,
         data_group_2: str,
         data_group_3: str,
-        is_3d: bool,
+        data_group_4: str,
         batch_size: int,
         num_workers: int,
         pin_memory: bool,
@@ -45,7 +45,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         self.data_group_1 = data_group_1
         self.data_group_2 = data_group_2
         self.data_group_3 = data_group_3
-        self.is_3d = is_3d
+        self.data_group_4 = data_group_4
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
@@ -68,36 +68,36 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         self.val_dir = os.path.join(self.data_dir, 'val', self.val_file)
         self.test_dir = os.path.join(self.data_dir, 'test', self.test_file)
 
-        self.data_train = dataset_SynthRAD(
+        self.data_train = dataset_Histological(
             self.train_dir,
             data_group_1=self.data_group_1,
             data_group_2=self.data_group_2,
             data_group_3=self.data_group_3,
-            is_3d=self.is_3d,
+            data_group_4=self.data_group_4,
             padding_size=self.padding_size,
             flip_prob=self.flip_prob,
             rot_prob=self.rot_prob,
             crop_size=self.crop_size,
             reverse=self.reverse,
         )  # Use flip and crop augmentation for training data
-        self.data_val = dataset_SynthRAD(
+        self.data_val = dataset_Histological(
             self.val_dir,
             data_group_1=self.data_group_1,
             data_group_2=self.data_group_2,
             data_group_3=self.data_group_3,
-            is_3d=self.is_3d,
+            data_group_4=self.data_group_4,
             # padding_size=self.padding_size,
             # flip_prob=0.0,
             # rot_prob=0.0,
             # crop_size=self.crop_size,
             reverse=self.reverse,
         )
-        self.data_test = dataset_SynthRAD(
+        self.data_test = dataset_Histological(
             self.test_dir,
             data_group_1=self.data_group_1,
             data_group_2=self.data_group_2,
             data_group_3=self.data_group_3,
-            is_3d=self.is_3d,
+            data_group_4=self.data_group_4,
             # padding_size=self.padding_size,
             # flip_prob=0.0,
             # rot_prob=0.0,
@@ -146,5 +146,5 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
 
 
 if __name__ == "__main__":
-    _ = SynthRAD_MR_CT_Pelvis_DataModule() 
+    _ = Histological_DataModule() 
     _.setup()
