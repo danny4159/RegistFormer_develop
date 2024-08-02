@@ -452,23 +452,56 @@ def dotproduct_attention(q, k, v):
     return output, attn
 
 def flash_attention(q, k, v):
-    height, width = q.shape[4], q.shape[5]
-    q = q.permute(0, 2, 4, 5, 1, 3)  # (batch_size, head, height, width, 1, dim)
-    q = q.reshape(q.shape[0], q.shape[1], q.shape[2] * q.shape[3], q.shape[5])  # (batch_size, head, height * width, dim)
+    # k = k.to(torch.bfloat16)
+    # v = v.to(torch.bfloat16)
+    # print("#############################################################")
+    # print(f"q dtype: {q.dtype}, k dtype: {k.dtype}, v dtype: {v.dtype}")
+    # print("#############################################################")
+    # height, width = q.shape[4], q.shape[5]
+    # q = q.permute(0, 2, 4, 5, 1, 3)  # (batch_size, head, height, width, 1, dim)
+    # q = q.reshape(q.shape[0], q.shape[1], q.shape[2] * q.shape[3], q.shape[5])  # (batch_size, head, height * width, dim)
 
-    k = k.permute(0, 2, 4, 5, 3, 1)  # (batch_size, head, height, width, dim, k^2)
-    k = k.reshape(k.shape[0], k.shape[1], k.shape[2] * k.shape[3], k.shape[4], k.shape[5])  # (batch_size, head, height * width, dim, k_sq)
-    k = k.permute(0, 1, 2, 4, 3)  # (batch_size, head, height * width, k^2, dim)
+    # k = k.permute(0, 2, 4, 5, 3, 1)  # (batch_size, head, height, width, dim, k^2)
+    # k = k.reshape(k.shape[0], k.shape[1], k.shape[2] * k.shape[3], k.shape[4], k.shape[5])  # (batch_size, head, height * width, dim, k_sq)
+    # k = k.permute(0, 1, 2, 4, 3)  # (batch_size, head, height * width, k^2, dim)
 
-    v = v.permute(0, 2, 4, 5, 1, 3)  # (batch_size, head, height, width, k^2, dim)
-    v = v.reshape(v.shape[0], v.shape[1], v.shape[2] * v.shape[3], v.shape[4], v.shape[5])  # (batch_size, head, height * width, k_sq, dim)
+    # v = v.permute(0, 2, 4, 5, 1, 3)  # (batch_size, head, height, width, k^2, dim)
+    # v = v.reshape(v.shape[0], v.shape[1], v.shape[2] * v.shape[3], v.shape[4], v.shape[5])  # (batch_size, head, height * width, k_sq, dim)
 
-    output = flash_attn_func(q=q,k=k,v=v)
+    # output = flash_attn_func(q=q,k=k,v=v)
 
-    output = output.reshape(output.shape[0], output.shape[1], height, width, output.shape[3])
-    output = output.permute(0, 1, 4, 2, 3)  # (batch_size, head, dim, height, width)
-    output = output.reshape(output.shape[0], 1, output.shape[1], output.shape[2], output.shape[3], output.shape[4])
+    # output = output.reshape(output.shape[0], output.shape[1], height, width, output.shape[3])
+    # output = output.permute(0, 1, 4, 2, 3)  # (batch_size, head, dim, height, width)
+    # output = output.reshape(output.shape[0], 1, output.shape[1], output.shape[2], output.shape[3], output.shape[4])
 
+    k = k.to(torch.bfloat16)
+    v = v.to(torch.bfloat16)
+    q = q.to(torch.bfloat16)
+
+    # Check the expected dimensions
+    batch_size = q.shape[0]
+    num_heads = q.shape[1]
+    seqlen_q = q.shape[2] * q.shape[3]  # Assume q's last two dims are h and w
+    seqlen_kv = k.shape[2] * k.shape[3]  # Similarly for k and v
+
+    head_size = q.shape[-1]
+
+    # Reshape q, k, v
+    q = q.permute(0, 2, 3, 1, 4).reshape(batch_size, seqlen_q, num_heads, head_size)  # (batch_size, seqlen_q, num_heads, head_size)
+    k = k.permute(0, 2, 3, 1, 4).reshape(batch_size, seqlen_kv, num_heads, head_size)  # (batch_size, seqlen_kv, num_heads, head_size)
+    v = v.permute(0, 2, 3, 1, 4).reshape(batch_size, seqlen_kv, num_heads, head_size)  # (batch_size, seqlen_kv, num_heads, head_size)
+
+    # Print shapes for debugging
+    print(f"q shape: {q.shape}, k shape: {k.shape}, v shape: {v.shape}")
+
+    # Apply flash attention
+    output = flash_attn_func(q=q, k=k, v=v)
+
+    # Reshape output back to original format
+    output = output.reshape(batch_size, seqlen_q, num_heads, head_size)
+    output = output.permute(0, 2, 1, 3).reshape(batch_size, num_heads, head_size, q.shape[2], q.shape[3])
+
+    return output
 
 class single_conv(nn.Module):
     def __init__(self, in_ch, out_ch):
