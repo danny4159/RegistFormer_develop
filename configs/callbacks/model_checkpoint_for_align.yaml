@@ -2,6 +2,7 @@
 
 
 model_checkpoint:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
   dirpath: ${paths.output_dir}/checkpoints
   filename: "epoch{epoch:03d}-fid{val/ssim_B:.4f}-kid{val/psnr_B:.4f}-gc{val/lpips_B:.4f}"
   monitor: "val/ssim_B" # modified to look for best fid

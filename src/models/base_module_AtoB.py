@@ -122,7 +122,6 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.val_psnr_B.update(real_B, fake_B)
             self.psnr_values_B.append(self.val_psnr_B.compute().item())
             self.val_psnr_B.reset()
-            # self.val_lpips_B.update(real_B2, fake_B)
             self.val_lpips_B.update(gray2rgb(real_B), gray2rgb(fake_B))
             self.lpips_values_B.append(self.val_lpips_B.compute().item())
             self.val_lpips_B.reset()
@@ -140,14 +139,9 @@ class BaseModule_AtoB(LightningModule):  # single direction
     def on_validation_epoch_end(self):
         if self.params.eval_on_align:
             ssim_B = self.val_ssim_B.compute().mean()
-            psnr_B = torch.mean(torch.tensor(self.psnr_values_B))
-            lpips_B = torch.mean(torch.tensor(self.lpips_values_B))
-            sharpness_B = self.val_sharpness_B.compute()
-
-            ssim_B = self.val_ssim_B.compute().mean().to(self.device)
             psnr_B = torch.mean(torch.tensor(self.psnr_values_B, device=self.device))
             lpips_B = torch.mean(torch.tensor(self.lpips_values_B, device=self.device))
-            sharpness_B = self.val_sharpness_B.compute().to(self.device)
+            sharpness_B = self.val_sharpness_B.compute()
 
             self.log("val/ssim_B", ssim_B.detach(), sync_dist=True)
             self.log("val/psnr_B", psnr_B.detach(), sync_dist=True)
@@ -158,23 +152,23 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 metrics.reset()
             self.psnr_values_B = []
             self.lpips_values_B = []
-            return
-        
-        gc = self.val_gc_B.compute()
-        nmi = torch.mean(torch.stack(self.nmi_scores))
-        fid = self.val_fid_B.compute()
-        kid_mean, _ = self.val_kid_B.compute()
-        sharpness = self.val_sharpness_B.compute()
 
-        self.log("val/gc_B", gc.detach(), sync_dist=True)
-        self.log("val/nmi_B", nmi.detach(), sync_dist=True)
-        self.log("val/fid_B", fid.detach(), sync_dist=True)
-        self.log("val/kid_B", kid_mean.detach(), sync_dist=True)
-        self.log("val/sharpness_B", sharpness.detach(), sync_dist=True)
+        else:
+            gc = self.val_gc_B.compute()
+            nmi = torch.mean(torch.stack(self.nmi_scores))
+            fid = self.val_fid_B.compute()
+            kid_mean, _ = self.val_kid_B.compute()
+            sharpness = self.val_sharpness_B.compute()
 
-        for metrics in self.val_metrics:
-            metrics.reset()
-        self.nmi_scores = []
+            self.log("val/gc_B", gc.detach(), sync_dist=True)
+            self.log("val/nmi_B", nmi.detach(), sync_dist=True)
+            self.log("val/fid_B", fid.detach(), sync_dist=True)
+            self.log("val/kid_B", kid_mean.detach(), sync_dist=True)
+            self.log("val/sharpness_B", sharpness.detach(), sync_dist=True)
+
+            for metrics in self.val_metrics:
+                metrics.reset()
+            self.nmi_scores = []
 
     def test_step(self, batch: Any, batch_idx: int):
         if self.params.use_split_inference:
@@ -214,9 +208,9 @@ class BaseModule_AtoB(LightningModule):  # single direction
     def on_test_epoch_end(self):
         if self.params.eval_on_align:
 
-            ssim_B = self.test_ssim_B.compute()
-            psnr_B = torch.mean(torch.tensor(self.psnr_values_B))
-            lpips_B = torch.mean(torch.tensor(self.lpips_values_B))
+            ssim_B = self.test_ssim_B.compute().mean()
+            psnr_B = torch.mean(torch.tensor(self.psnr_values_B, device=self.device))
+            lpips_B = torch.mean(torch.tensor(self.lpips_values_B, device=self.device))
             sharpness_B = self.test_sharpness_B.compute()
 
             self.log("test/ssim_B", ssim_B.detach(), sync_dist=True)
@@ -224,9 +218,9 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.log("test/lpips_B", lpips_B.detach(), sync_dist=True)
             self.log("test/sharpness_B", sharpness_B.detach(), sync_dist=True)
 
-            ssim_B_std = torch.std(torch.tensor([metric.item() for metric in self.test_ssim_B.similarity]))
-            psnr_B_std = torch.std(torch.tensor(self.psnr_values_B))
-            lpips_B_std = torch.std(torch.tensor(self.lpips_values_B))
+            ssim_B_std = torch.std(torch.tensor([metric.item() for metric in self.test_ssim_B.similarity], device=self.device))
+            psnr_B_std = torch.std(torch.tensor(self.psnr_values_B, device=self.device))
+            lpips_B_std = torch.std(torch.tensor(self.lpips_values_B, device=self.device))
             sharpness_B_std = torch.std(self.test_sharpness_B.scores)
 
             self.log("test/ssim_B_std", ssim_B_std.detach(), sync_dist=True)
@@ -238,33 +232,33 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 metrics.reset()
             self.psnr_values_B = []
             self.lpips_values_B = []
-            return
         
-        gc = self.test_gc_B.compute()
-        nmi = torch.mean(torch.stack(self.nmi_scores))
-        fid = self.test_fid_B.compute()
-        kid_mean, kid_std = self.test_kid_B.compute()
-        sharpness = self.test_sharpness_B.compute()
-        
-        self.log("test/gc_B_mean", gc.detach(), sync_dist=True)
-        self.log("test/nmi_B_mean", nmi.detach(), sync_dist=True)
-        self.log("test/fid_B_mean", fid.detach(), sync_dist=True)
-        self.log("test/kid_B_mean", kid_mean.detach(), sync_dist=True)
-        self.log("test/sharpness_B_mean", sharpness.detach(), sync_dist=True)
+        else:
+            gc = self.test_gc_B.compute()
+            nmi = torch.mean(torch.stack(self.nmi_scores))
+            fid = self.test_fid_B.compute()
+            kid_mean, kid_std = self.test_kid_B.compute()
+            sharpness = self.test_sharpness_B.compute()
+            
+            self.log("test/gc_B_mean", gc.detach(), sync_dist=True)
+            self.log("test/nmi_B_mean", nmi.detach(), sync_dist=True)
+            self.log("test/fid_B_mean", fid.detach(), sync_dist=True)
+            self.log("test/kid_B_mean", kid_mean.detach(), sync_dist=True)
+            self.log("test/sharpness_B_mean", sharpness.detach(), sync_dist=True)
 
-        gc_std = torch.std(self.test_gc_B.correlations)
-        nmi_std = torch.std(torch.stack(self.nmi_scores))
-        sharpness_std = torch.std(self.test_sharpness_B.scores)
+            gc_std = torch.std(self.test_gc_B.correlations)
+            nmi_std = torch.std(torch.stack(self.nmi_scores))
+            sharpness_std = torch.std(self.test_sharpness_B.scores)
 
-        self.log("test/gc_B_std", gc_std.detach(), sync_dist=True)
-        self.log("test/nmi_B_std", nmi_std.detach(), sync_dist=True)
-        self.log("test/fid_B_std", torch.tensor(float('nan'), device=self.device).detach(), sync_dist=True)
-        self.log("test/kid_B_std", kid_std.detach(), sync_dist=True)
-        self.log("test/sharpness_B_std", sharpness_std.detach(), sync_dist=True)
+            self.log("test/gc_B_std", gc_std.detach(), sync_dist=True)
+            self.log("test/nmi_B_std", nmi_std.detach(), sync_dist=True)
+            self.log("test/fid_B_std", torch.tensor(float('nan'), device=self.device).detach(), sync_dist=True)
+            self.log("test/kid_B_std", kid_std.detach(), sync_dist=True)
+            self.log("test/sharpness_B_std", sharpness_std.detach(), sync_dist=True)
 
-        for metrics in self.test_metrics:
-            metrics.reset()
-        self.nmi_scores = []
+            for metrics in self.test_metrics:
+                metrics.reset()
+            self.nmi_scores = []
 
     def configure_optimizers(self):
         pass

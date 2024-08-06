@@ -155,13 +155,11 @@ class BaseModule_AtoB_BtoA(LightningModule):
                 real_A, real_B, real_A2, real_B2, fake_A, fake_B = self.model_step(batch)    
             else: # MR 3T 7T dataset
                 real_A2, real_B2, fake_A, fake_B = self.model_step(batch) 
-            
-
+        
             self.val_ssim_A.update(real_A2, fake_A)
             self.val_psnr_A.update(real_A2, fake_A)
             self.psnr_values_A.append(self.val_psnr_A.compute().item())
             self.val_psnr_A.reset()
-            # self.val_lpips_A.update(real_A2, fake_A)
             self.val_lpips_A.update(gray2rgb(real_A2), gray2rgb(fake_A))
             self.lpips_values_A.append(self.val_lpips_A.compute().item())
             self.val_lpips_A.reset()            
@@ -171,55 +169,43 @@ class BaseModule_AtoB_BtoA(LightningModule):
             self.val_psnr_B.update(real_B2, fake_B)
             self.psnr_values_B.append(self.val_psnr_B.compute().item())
             self.val_psnr_B.reset()
-            # self.val_lpips_B.update(real_B2, fake_B)
             self.val_lpips_B.update(gray2rgb(real_B2), gray2rgb(fake_B))
             self.lpips_values_B.append(self.val_lpips_B.compute().item())
             self.val_lpips_B.reset()
             self.val_sharpness_B.update(norm_to_uint8(fake_B).float())
             
-            return
+        else:
+            real_A, real_B, fake_A, fake_B = self.model_step(batch)
 
-        real_A, real_B, fake_A, fake_B = self.model_step(batch)
+            self.val_gc_A.update(norm_to_uint8(real_B), norm_to_uint8(fake_A))
+            nmi_score_A = self.val_nmi_A(flatten_to_1d(norm_to_uint8(real_B)), flatten_to_1d(norm_to_uint8(fake_A)))
+            self.nmi_scores_A.append(nmi_score_A)
+            self.val_fid_A.update(gray2rgb(norm_to_uint8(real_A)), real=True)
+            self.val_fid_A.update(gray2rgb(norm_to_uint8(fake_A)), real=False)
+            self.val_kid_A.update(gray2rgb(norm_to_uint8(real_B)), real=True)
+            self.val_kid_A.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
+            self.val_sharpness_A.update(norm_to_uint8(fake_A).float())
 
-        self.val_gc_A.update(norm_to_uint8(real_B), norm_to_uint8(fake_A))
-        nmi_score_A = self.val_nmi_A(flatten_to_1d(norm_to_uint8(real_B)), flatten_to_1d(norm_to_uint8(fake_A)))
-        self.nmi_scores_A.append(nmi_score_A)
-        self.val_fid_A.update(gray2rgb(norm_to_uint8(real_A)), real=True)
-        self.val_fid_A.update(gray2rgb(norm_to_uint8(fake_A)), real=False)
-        self.val_kid_A.update(gray2rgb(norm_to_uint8(real_B)), real=True)
-        self.val_kid_A.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
-        self.val_sharpness_A.update(norm_to_uint8(fake_A).float())
-
-        self.val_gc_B.update(norm_to_uint8(real_A), norm_to_uint8(fake_B))
-        nmi_score_B = self.val_nmi_B(flatten_to_1d(norm_to_uint8(real_A)), flatten_to_1d(norm_to_uint8(fake_B)))
-        self.nmi_scores_B.append(nmi_score_B)
-        self.val_fid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
-        self.val_fid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
-        self.val_kid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
-        self.val_kid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
-        self.val_sharpness_B.update(norm_to_uint8(fake_B).float())
+            self.val_gc_B.update(norm_to_uint8(real_A), norm_to_uint8(fake_B))
+            nmi_score_B = self.val_nmi_B(flatten_to_1d(norm_to_uint8(real_A)), flatten_to_1d(norm_to_uint8(fake_B)))
+            self.nmi_scores_B.append(nmi_score_B)
+            self.val_fid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
+            self.val_fid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
+            self.val_kid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
+            self.val_kid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
+            self.val_sharpness_B.update(norm_to_uint8(fake_B).float())
 
     def on_validation_epoch_end(self):
         if self.params.eval_on_align:
             ssim_A = self.val_ssim_A.compute().mean()
-            psnr_A = torch.mean(torch.tensor(self.psnr_values_A))
-            lpips_A = torch.mean(torch.tensor(self.lpips_values_A))
+            psnr_A = torch.mean(torch.tensor(self.psnr_values_A, device=self.device))
+            lpips_A = torch.mean(torch.tensor(self.lpips_values_A, device=self.device))
             sharpness_A = self.val_sharpness_A.compute()
 
             ssim_B = self.val_ssim_B.compute().mean()
-            psnr_B = torch.mean(torch.tensor(self.psnr_values_B))
-            lpips_B = torch.mean(torch.tensor(self.lpips_values_B))
-            sharpness_B = self.val_sharpness_B.compute()
-
-            ssim_A = self.val_ssim_A.compute().mean().to(self.device)
-            psnr_A = torch.mean(torch.tensor(self.psnr_values_A, device=self.device))
-            lpips_A = torch.mean(torch.tensor(self.lpips_values_A, device=self.device))
-            sharpness_A = self.val_sharpness_A.compute().to(self.device)
-
-            ssim_B = self.val_ssim_B.compute().mean().to(self.device)
             psnr_B = torch.mean(torch.tensor(self.psnr_values_B, device=self.device))
             lpips_B = torch.mean(torch.tensor(self.lpips_values_B, device=self.device))
-            sharpness_B = self.val_sharpness_B.compute().to(self.device)
+            sharpness_B = self.val_sharpness_B.compute()
 
             self.log("val/ssim_A", ssim_A.detach(), sync_dist=True)
             self.log("val/psnr_A", psnr_A.detach(), sync_dist=True)
@@ -237,36 +223,36 @@ class BaseModule_AtoB_BtoA(LightningModule):
             self.psnr_values_B = []
             self.lpips_values_A = []
             self.lpips_values_B = []
-            return
-        
-        gc_A = self.val_gc_A.compute()
-        nmi_A = torch.mean(torch.stack(self.nmi_scores_A))
-        fid_A = self.val_fid_A.compute()
-        kid_A_mean, _ = self.val_kid_A.compute()
-        sharpness_A = self.val_sharpness_A.compute()
 
-        self.log("val/gc_A", gc_A.detach(), sync_dist=True)
-        self.log("val/nmi_A", nmi_A.detach(), sync_dist=True)
-        self.log("val/fid_A", fid_A.detach(), sync_dist=True)
-        self.log("val/kid_A", kid_A_mean.detach(), sync_dist=True)
-        self.log("val/sharpness_A", sharpness_A.detach(), sync_dist=True)
+        else:        
+            gc_A = self.val_gc_A.compute()
+            nmi_A = torch.mean(torch.stack(self.nmi_scores_A))
+            fid_A = self.val_fid_A.compute()
+            kid_A_mean, _ = self.val_kid_A.compute()
+            sharpness_A = self.val_sharpness_A.compute()
 
-        gc_B = self.val_gc_B.compute()
-        nmi_B = torch.mean(torch.stack(self.nmi_scores_B))
-        fid_B = self.val_fid_B.compute()
-        kid_B_mean, _ = self.val_kid_B.compute()
-        sharpness_B = self.val_sharpness_B.compute()
+            self.log("val/gc_A", gc_A.detach(), sync_dist=True)
+            self.log("val/nmi_A", nmi_A.detach(), sync_dist=True)
+            self.log("val/fid_A", fid_A.detach(), sync_dist=True)
+            self.log("val/kid_A", kid_A_mean.detach(), sync_dist=True)
+            self.log("val/sharpness_A", sharpness_A.detach(), sync_dist=True)
 
-        self.log("val/gc_B", gc_B.detach(), sync_dist=True)
-        self.log("val/nmi_B", nmi_B.detach(), sync_dist=True)
-        self.log("val/fid_B", fid_B.detach(), sync_dist=True)
-        self.log("val/kid_B", kid_B_mean.detach(), sync_dist=True)
-        self.log("val/sharpness_B", sharpness_B.detach(), sync_dist=True)
+            gc_B = self.val_gc_B.compute()
+            nmi_B = torch.mean(torch.stack(self.nmi_scores_B))
+            fid_B = self.val_fid_B.compute()
+            kid_B_mean, _ = self.val_kid_B.compute()
+            sharpness_B = self.val_sharpness_B.compute()
 
-        for metrics in self.val_metrics:
-            metrics.reset()
-        self.nmi_scores_A = []
-        self.nmi_scores_B = []
+            self.log("val/gc_B", gc_B.detach(), sync_dist=True)
+            self.log("val/nmi_B", nmi_B.detach(), sync_dist=True)
+            self.log("val/fid_B", fid_B.detach(), sync_dist=True)
+            self.log("val/kid_B", kid_B_mean.detach(), sync_dist=True)
+            self.log("val/sharpness_B", sharpness_B.detach(), sync_dist=True)
+
+            for metrics in self.val_metrics:
+                metrics.reset()
+            self.nmi_scores_A = []
+            self.nmi_scores_B = []
 
     def test_step(self, batch: Any, batch_idx: int):
         if self.params.eval_on_align:
@@ -295,40 +281,38 @@ class BaseModule_AtoB_BtoA(LightningModule):
             self.test_lpips_B.reset()
             self.test_sharpness_B.update(norm_to_uint8(fake_B).float())
 
-            return
+        else:
+            real_A, real_B, fake_A, fake_B = self.model_step(batch)
 
-        real_A, real_B, fake_A, fake_B = self.model_step(batch)
-
-        self.test_gc_A.update(norm_to_uint8(real_B), norm_to_uint8(fake_A))
-        nmi_score_A = self.test_nmi_A(flatten_to_1d(norm_to_uint8(real_B)), flatten_to_1d(norm_to_uint8(fake_A)))
-        self.nmi_scores_A.append(nmi_score_A)
-        self.test_fid_A.update(gray2rgb(norm_to_uint8(real_A)), real=True)
-        self.test_fid_A.update(gray2rgb(norm_to_uint8(fake_A)), real=False)
-        self.test_kid_A.update(gray2rgb(norm_to_uint8(real_A)), real=True)
-        self.test_kid_A.update(gray2rgb(norm_to_uint8(fake_A)), real=False)
-        self.test_sharpness_A.update(norm_to_uint8(fake_A))
-       
-        self.test_gc_B.update(norm_to_uint8(real_A), norm_to_uint8(fake_B))
-        nmi_score_B = self.test_nmi_B(flatten_to_1d(norm_to_uint8(real_A)), flatten_to_1d(norm_to_uint8(fake_B)))
-        self.nmi_scores_B.append(nmi_score_B)
-        self.test_fid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
-        self.test_fid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
-        self.test_kid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
-        self.test_kid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
-        self.test_sharpness_B.update(norm_to_uint8(fake_B))
+            self.test_gc_A.update(norm_to_uint8(real_B), norm_to_uint8(fake_A))
+            nmi_score_A = self.test_nmi_A(flatten_to_1d(norm_to_uint8(real_B)), flatten_to_1d(norm_to_uint8(fake_A)))
+            self.nmi_scores_A.append(nmi_score_A)
+            self.test_fid_A.update(gray2rgb(norm_to_uint8(real_A)), real=True)
+            self.test_fid_A.update(gray2rgb(norm_to_uint8(fake_A)), real=False)
+            self.test_kid_A.update(gray2rgb(norm_to_uint8(real_A)), real=True)
+            self.test_kid_A.update(gray2rgb(norm_to_uint8(fake_A)), real=False)
+            self.test_sharpness_A.update(norm_to_uint8(fake_A))
+        
+            self.test_gc_B.update(norm_to_uint8(real_A), norm_to_uint8(fake_B))
+            nmi_score_B = self.test_nmi_B(flatten_to_1d(norm_to_uint8(real_A)), flatten_to_1d(norm_to_uint8(fake_B)))
+            self.nmi_scores_B.append(nmi_score_B)
+            self.test_fid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
+            self.test_fid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
+            self.test_kid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
+            self.test_kid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
+            self.test_sharpness_B.update(norm_to_uint8(fake_B))
 
 
     def on_test_epoch_end(self):
-
         if self.params.eval_on_align:
-            ssim_A = self.test_ssim_A.compute()
-            psnr_A = torch.mean(torch.tensor(self.psnr_values_A))
-            lpips_A = torch.mean(torch.tensor(self.lpips_values_A))
+            ssim_A = self.test_ssim_A.compute().mean()
+            psnr_A = torch.mean(torch.tensor(self.psnr_values_A, device=self.device))
+            lpips_A = torch.mean(torch.tensor(self.lpips_values_A, device=self.device))
             sharpness_A = self.test_sharpness_A.compute()
 
-            ssim_B = self.test_ssim_B.compute()
-            psnr_B = torch.mean(torch.tensor(self.psnr_values_B))
-            lpips_B = torch.mean(torch.tensor(self.lpips_values_B))
+            ssim_B = self.test_ssim_B.compute().mean()
+            psnr_B = torch.mean(torch.tensor(self.psnr_values_B, device=self.device))
+            lpips_B = torch.mean(torch.tensor(self.lpips_values_B, device=self.device))
             sharpness_B = self.test_sharpness_B.compute()
 
             self.log("test/ssim_A", ssim_A.detach(), sync_dist=True)
@@ -341,14 +325,14 @@ class BaseModule_AtoB_BtoA(LightningModule):
             self.log("test/lpips_B", lpips_B.detach(), sync_dist=True)
             self.log("test/sharpness_B", sharpness_B.detach(), sync_dist=True)
 
-            ssim_A_std = torch.std(torch.tensor([metric.item() for metric in self.test_ssim_A.similarity]))
-            psnr_A_std = torch.std(torch.tensor(self.psnr_values_A))
-            lpips_A_std = torch.std(torch.tensor(self.lpips_values_A))
+            ssim_A_std = torch.std(torch.tensor([metric.item() for metric in self.test_ssim_A.similarity], device=self.device))
+            psnr_A_std = torch.std(torch.tensor(self.psnr_values_A, device=self.device))
+            lpips_A_std = torch.std(torch.tensor(self.lpips_values_A, device=self.device))
             sharpness_A_std = torch.std(self.test_sharpness_A.scores)
 
-            ssim_B_std = torch.std(torch.tensor([metric.item() for metric in self.test_ssim_B.similarity]))
-            psnr_B_std = torch.std(torch.tensor(self.psnr_values_B))
-            lpips_B_std = torch.std(torch.tensor(self.lpips_values_B))
+            ssim_B_std = torch.std(torch.tensor([metric.item() for metric in self.test_ssim_B.similarity], device=self.device))
+            psnr_B_std = torch.std(torch.tensor(self.psnr_values_B, device=self.device))
+            lpips_B_std = torch.std(torch.tensor(self.lpips_values_B, device=self.device))
             sharpness_B_std = torch.std(self.test_sharpness_B.scores)
 
             self.log("test/ssim_A_std", ssim_A_std.detach(), sync_dist=True)
@@ -361,64 +345,63 @@ class BaseModule_AtoB_BtoA(LightningModule):
             self.log("test/lpips_B_std", lpips_B_std.detach(), sync_dist=True)
             self.log("test/sharpness_B_std", sharpness_B_std.detach(), sync_dist=True)
 
-
             for metrics in self.test_metrics:
                 metrics.reset()
             self.psnr_values_A = []
             self.psnr_values_B = []
             self.lpips_values_A = []
             self.lpips_values_B = []
-            return
-        
-        gc_A = self.test_gc_A.compute()
-        nmi_A = torch.mean(torch.stack(self.nmi_scores_A))
-        fid_A = self.test_fid_A.compute()
-        kid_A_mean, kid_A_std = self.test_kid_A.compute()
-        sharpness_A = self.test_sharpness_A.compute()
 
-        self.log("test/gc_A_mean", gc_A.detach(), sync_dist=True)
-        self.log("test/nmi_A_mean", nmi_A.detach(), sync_dist=True)
-        self.log("test/fid_A_mean", fid_A.detach(), sync_dist=True)
-        self.log("test/kid_A_mean", kid_A_mean.detach(), sync_dist=True)
-        self.log("test/sharpness_A_mean", sharpness_A.detach(), sync_dist=True)
+        else:
+            gc_A = self.test_gc_A.compute()
+            nmi_A = torch.mean(torch.stack(self.nmi_scores_A))
+            fid_A = self.test_fid_A.compute()
+            kid_A_mean, kid_A_std = self.test_kid_A.compute()
+            sharpness_A = self.test_sharpness_A.compute()
 
-        gc_A_std = torch.std(self.test_gc_A.correlations)
-        nmi_A_std = torch.std(torch.stack(self.nmi_scores_A))
-        sharpness_A_std = torch.std(self.test_sharpness_A.scores)
-        
-        self.log("test/gc_A_std", gc_A_std.detach(), sync_dist=True)
-        self.log("test/nmi_A_std", nmi_A_std.detach(), sync_dist=True)
-        self.log("test/fid_A_std", torch.tensor(float('nan'), device=self.device).detach(), sync_dist=True)
-        self.log("test/kid_A_std", kid_A_mean.detach(), sync_dist=True)
-        self.log("test/sharpness_A_std", sharpness_A_std.detach(), sync_dist=True)
+            self.log("test/gc_A_mean", gc_A.detach(), sync_dist=True)
+            self.log("test/nmi_A_mean", nmi_A.detach(), sync_dist=True)
+            self.log("test/fid_A_mean", fid_A.detach(), sync_dist=True)
+            self.log("test/kid_A_mean", kid_A_mean.detach(), sync_dist=True)
+            self.log("test/sharpness_A_mean", sharpness_A.detach(), sync_dist=True)
+
+            gc_A_std = torch.std(self.test_gc_A.correlations)
+            nmi_A_std = torch.std(torch.stack(self.nmi_scores_A))
+            sharpness_A_std = torch.std(self.test_sharpness_A.scores)
+            
+            self.log("test/gc_A_std", gc_A_std.detach(), sync_dist=True)
+            self.log("test/nmi_A_std", nmi_A_std.detach(), sync_dist=True)
+            self.log("test/fid_A_std", torch.tensor(float('nan'), device=self.device).detach(), sync_dist=True)
+            self.log("test/kid_A_std", kid_A_mean.detach(), sync_dist=True)
+            self.log("test/sharpness_A_std", sharpness_A_std.detach(), sync_dist=True)
 
 
-        gc_B = self.test_gc_B.compute()
-        nmi_B = torch.mean(torch.stack(self.nmi_scores_B))
-        fid_B = self.test_fid_B.compute()
-        kid_B_mean, kid_B_std = self.test_kid_B.compute()
-        sharpness_B = self.test_sharpness_B.compute()
+            gc_B = self.test_gc_B.compute()
+            nmi_B = torch.mean(torch.stack(self.nmi_scores_B))
+            fid_B = self.test_fid_B.compute()
+            kid_B_mean, kid_B_std = self.test_kid_B.compute()
+            sharpness_B = self.test_sharpness_B.compute()
 
-        self.log("test/gc_B_mean", gc_B.detach(), sync_dist=True)
-        self.log("test/nmi_B_mean", nmi_B.detach(), sync_dist=True)
-        self.log("test/fid_B_mean", fid_B.detach(), sync_dist=True)
-        self.log("test/kid_B_mean", kid_B_mean.detach(), sync_dist=True)
-        self.log("test/sharpness_B_mean", sharpness_B.detach(), sync_dist=True)
+            self.log("test/gc_B_mean", gc_B.detach(), sync_dist=True)
+            self.log("test/nmi_B_mean", nmi_B.detach(), sync_dist=True)
+            self.log("test/fid_B_mean", fid_B.detach(), sync_dist=True)
+            self.log("test/kid_B_mean", kid_B_mean.detach(), sync_dist=True)
+            self.log("test/sharpness_B_mean", sharpness_B.detach(), sync_dist=True)
 
-        gc_B_std = torch.std(self.test_gc_B.correlations)
-        nmi_B_std = torch.std(torch.stack(self.nmi_scores_B))
-        sharpness_B_std = torch.std(self.test_sharpness_B.scores)
+            gc_B_std = torch.std(self.test_gc_B.correlations)
+            nmi_B_std = torch.std(torch.stack(self.nmi_scores_B))
+            sharpness_B_std = torch.std(self.test_sharpness_B.scores)
 
-        self.log("test/gc_B_std", gc_B_std.detach(), sync_dist=True)
-        self.log("test/nmi_B_std", nmi_B_std.detach(), sync_dist=True)
-        self.log("test/fid_B_std", torch.tensor(float('nan'), device=self.device).detach(), sync_dist=True)
-        self.log("test/kid_B_std", kid_B_std.detach(), sync_dist=True)
-        self.log("test/sharpness_B_std", sharpness_B_std.detach(), sync_dist=True)
+            self.log("test/gc_B_std", gc_B_std.detach(), sync_dist=True)
+            self.log("test/nmi_B_std", nmi_B_std.detach(), sync_dist=True)
+            self.log("test/fid_B_std", torch.tensor(float('nan'), device=self.device).detach(), sync_dist=True)
+            self.log("test/kid_B_std", kid_B_std.detach(), sync_dist=True)
+            self.log("test/sharpness_B_std", sharpness_B_std.detach(), sync_dist=True)
 
-        for metrics in self.test_metrics:
-            metrics.reset()
-        self.nmi_scores_A = []
-        self.nmi_scores_B = []
+            for metrics in self.test_metrics:
+                metrics.reset()
+            self.nmi_scores_A = []
+            self.nmi_scores_B = []
 
     def configure_optimizers(self):
         pass
