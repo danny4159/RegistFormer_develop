@@ -103,20 +103,6 @@ class BaseModule_AtoB(LightningModule):  # single direction
         return super().on_train_epoch_end()
 
     def validation_step(self, batch: Any, batch_idx: int):
-        if self.params.eval_on_align:
-            real_A, real_B, fake_B = self.model_step(batch)
-
-            self.val_ssim_B.update(real_B, fake_B)
-            self.val_psnr_B.update(real_B, fake_B)
-            self.psnr_values_B.append(self.val_psnr_B.compute().item())
-            self.val_psnr_B.reset()
-            # self.val_lpips_B.update(real_B2, fake_B)
-            self.val_lpips_B.update(gray2rgb(real_B), gray2rgb(fake_B))
-            self.lpips_values_B.append(self.val_lpips_B.compute().item())
-            self.val_lpips_B.reset()
-            self.val_sharpness_B.update(norm_to_uint8(fake_B).float())
-            
-            return
         if self.params.use_split_inference:
             half_size = batch[0].shape[2] // 2
             first_half = [x[:, :, :half_size, :] for x in batch]
@@ -130,15 +116,26 @@ class BaseModule_AtoB(LightningModule):  # single direction
             fake_B = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
         else: 
             real_A, real_B, fake_B = self.model_step(batch)
-        
-        self.val_gc_B.update(norm_to_uint8(real_A), norm_to_uint8(fake_B))
-        nmi_score = self.val_nmi_B(flatten_to_1d(norm_to_uint8(real_A)), flatten_to_1d(norm_to_uint8(fake_B)))
-        self.nmi_scores.append(nmi_score)
-        self.val_fid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
-        self.val_fid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
-        self.val_kid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
-        self.val_kid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
-        self.val_sharpness_B.update(norm_to_uint8(fake_B))
+
+        if self.params.eval_on_align:
+            self.val_ssim_B.update(real_B, fake_B)
+            self.val_psnr_B.update(real_B, fake_B)
+            self.psnr_values_B.append(self.val_psnr_B.compute().item())
+            self.val_psnr_B.reset()
+            # self.val_lpips_B.update(real_B2, fake_B)
+            self.val_lpips_B.update(gray2rgb(real_B), gray2rgb(fake_B))
+            self.lpips_values_B.append(self.val_lpips_B.compute().item())
+            self.val_lpips_B.reset()
+            self.val_sharpness_B.update(norm_to_uint8(fake_B).float())
+        else:
+            self.val_gc_B.update(norm_to_uint8(real_A), norm_to_uint8(fake_B))
+            nmi_score = self.val_nmi_B(flatten_to_1d(norm_to_uint8(real_A)), flatten_to_1d(norm_to_uint8(fake_B)))
+            self.nmi_scores.append(nmi_score)
+            self.val_fid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
+            self.val_fid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
+            self.val_kid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
+            self.val_kid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
+            self.val_sharpness_B.update(norm_to_uint8(fake_B))
 
     def on_validation_epoch_end(self):
         if self.params.eval_on_align:
@@ -180,21 +177,6 @@ class BaseModule_AtoB(LightningModule):  # single direction
         self.nmi_scores = []
 
     def test_step(self, batch: Any, batch_idx: int):
-        if self.params.eval_on_align:
-            real_A, real_B, fake_B = self.model_step(batch)
-
-            self.test_ssim_B.update(real_B, fake_B)
-            self.test_psnr_B.update(real_B, fake_B)
-            self.psnr_values_B.append(self.test_psnr_B.compute().item())
-            self.test_psnr_B.reset()
-            # self.test_lpips_B.update(real_B2, fake_B)
-            self.test_lpips_B.update(gray2rgb(real_B), gray2rgb(fake_B))
-            self.lpips_values_B.append(self.test_lpips_B.compute().item())
-            self.test_lpips_B.reset()
-            self.test_sharpness_B.update(norm_to_uint8(fake_B).float())
-
-            return
-        
         if self.params.use_split_inference:
             half_size = batch[0].shape[2] // 2
             first_half = [x[:, :, :half_size, :] for x in batch]
@@ -209,16 +191,25 @@ class BaseModule_AtoB(LightningModule):  # single direction
         else: 
             real_A, real_B, fake_B = self.model_step(batch)
 
-        self.test_gc_B.update(norm_to_uint8(real_A), norm_to_uint8(fake_B))
-        nmi_score = self.test_nmi_B(flatten_to_1d(norm_to_uint8(real_A)), flatten_to_1d(norm_to_uint8(fake_B)))
-        self.nmi_scores.append(nmi_score)
-        self.test_fid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
-        self.test_fid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
-        self.test_kid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
-        self.test_kid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
-        self.test_sharpness_B.update(norm_to_uint8(fake_B))
-
-
+        if self.params.eval_on_align:
+            self.test_ssim_B.update(real_B, fake_B)
+            self.test_psnr_B.update(real_B, fake_B)
+            self.psnr_values_B.append(self.test_psnr_B.compute().item())
+            self.test_psnr_B.reset()
+            # self.test_lpips_B.update(real_B2, fake_B)
+            self.test_lpips_B.update(gray2rgb(real_B), gray2rgb(fake_B))
+            self.lpips_values_B.append(self.test_lpips_B.compute().item())
+            self.test_lpips_B.reset()
+            self.test_sharpness_B.update(norm_to_uint8(fake_B).float())
+        else:
+            self.test_gc_B.update(norm_to_uint8(real_A), norm_to_uint8(fake_B))
+            nmi_score = self.test_nmi_B(flatten_to_1d(norm_to_uint8(real_A)), flatten_to_1d(norm_to_uint8(fake_B)))
+            self.nmi_scores.append(nmi_score)
+            self.test_fid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
+            self.test_fid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
+            self.test_kid_B.update(gray2rgb(norm_to_uint8(real_B)), real=True)
+            self.test_kid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
+            self.test_sharpness_B.update(norm_to_uint8(fake_B))
 
     def on_test_epoch_end(self):
         if self.params.eval_on_align:
