@@ -53,4 +53,5 @@ params: # Other params
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
   batch_size: ${data.batch_size}
-  nce_layers: [0,1,2,3] # [0,2,4,6] # 3까지가 encoder
+  nce_layers: [0,2,4,6] # [0,2,4,6] # 3까지가 encoder # [0,1,2,3]-> encoder만 하니까 성능 떨어진다. 전부다 하는게 낫다.
+  eval_on_align: ${data.eval_on_align}
