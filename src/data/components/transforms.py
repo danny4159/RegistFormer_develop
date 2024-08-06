@@ -11,6 +11,13 @@ import torch
 import torchvision.transforms.functional as F
 import torch.nn.functional as nnF
 
+# Misalign
+import torchio as tio
+from scipy.fft import fftn, ifftn, fftshift, ifftshift
+from monai.transforms import Affine
+import random
+import math
+
 def padding_height_width(tensorA, tensorB, tensorC=None, tensorD=None, target_size=(256, 256), pad_value=-1):
     # 기존 코드와 동일
     # Determine if the input is 2D or 3D based on the number of dimensions
@@ -384,3 +391,252 @@ class dataset_Histological(Dataset):
             return C, D, A, B
         else:
             return A, B, C, D
+        
+
+
+def download_process_MR_3T_7T(data_dir: str,
+                         write_dir: str,
+                         misalign_x: float = 0.0,  # maximum misalignment in x direction (float)
+                         misalign_y: float = 0.0,  # maximum misalignment in y direction (float)
+                         degree: float = 0.0,      # maximum rotation in z direction (float)
+                         motion_prob: float = 0.0, # the probability of occurrence of motion.
+                         deform_prob: float = 0.0, # the probability of performing deformation.
+                         ret: bool = False
+                        ):
+    """Downloads, preprocesses and saves the IXI dataset. The images are randomly translated.
+
+    Args:
+        data_dir (str): The directory where the input dataset is located.
+        write_dir (str): The directory where the processed dataset will be saved.
+        misalign_x (float): Maximum allowable misalignment along the x dimension. Defaults to 0.0.
+        misalign_y (float): Maximum allowable misalignment along the y dimension. Defaults to 0.0.
+        degree (float): Maximum rotation in z direction. Defaults to 0.0.
+        motion_prob (float): The probability of occurrence of motion. Defaults to 0.0.
+        deform_prob (float): The probability of performing deformation. Defaults to 0.0.
+        ret (bool): If True, the function also returns the processed dataset. Defaults to False.
+
+    Returns:
+        Optional[Tuple[torch.Tensor, torch.Tensor]]: A pair of tensors representing the processed datasets
+        for A and B. This is returned only when 'ret' is set to True.
+    """
+
+    with h5py.File(data_dir, "r") as f:
+        data_A = np.array(f["data_x"])
+        data_B = np.array(f["data_y"])
+
+    # create torch tensors
+    data_A = np.transpose(data_A, (2, 0, 1)) # H, W, Slice -> # Slice, H, W
+    # data_A = np.flipud(data_A)
+    data_A = np.expand_dims(data_A, axis=0) # 1, Slice, H, W
+    print('data_A shape: ', data_A.shape)
+
+    data_B = np.transpose(data_B, (2, 0, 1))
+    # data_B = np.flipud(data_B)
+    data_B = np.expand_dims(data_B, axis=0)
+    print('data_B shape: ', data_B.shape)
+
+    # ensure that data is in range [-1,1]
+    data_A[data_A < 0] = 0
+    data_B[data_B < 0] = 0
+
+    data_A, data_B = Deformation(data_A.copy(), data_B.copy(), deform_prob)
+    data_A, data_B = Motion_artifacts(data_A, data_B, motion_prob)
+
+    data_A = (data_A - 0.5) / 0.5
+    data_B = (data_B - 0.5) / 0.5
+
+    log.info(f"Preparing the misalignment from <{data_dir}>")
+
+    data_A, data_B = Rotate_images(data_A, data_B, degree)
+
+    num_slices_per_patient = 200
+    num_patients = data_A.shape[1] // num_slices_per_patient
+
+    log.info(f"Saving the prepared dataset to <{write_dir}>")
+
+    with h5py.File(write_dir, "w") as hw:
+        data_A_group = hw.create_group("3T")
+        data_B_group = hw.create_group("7T")
+
+        for patient_idx in range(num_patients):
+            start_idx = patient_idx * num_slices_per_patient
+            end_idx = start_idx + num_slices_per_patient
+
+            patient_data_A_list = []
+            patient_data_B_list = []
+
+            for sl in range(start_idx, end_idx): # Translation each slice
+                A = torch.from_numpy(data_A[:, sl, :, :])
+                B = torch.from_numpy(data_B[:, sl, :, :])
+
+                A, B = Translate_images(A, B, misalign_x, misalign_y)
+
+                patient_data_A_list.append(A)
+                patient_data_B_list.append(B)
+
+            patient_data_A = torch.stack(patient_data_A_list) # num_slices, 1, H, W
+            patient_data_B = torch.stack(patient_data_B_list)
+
+            patient_data_A = patient_data_A.squeeze(1) # num_slices, H, W
+            patient_data_B = patient_data_B.squeeze(1)
+
+            data_A_group.create_dataset(str(patient_idx + 1), data=patient_data_A.numpy())
+            data_B_group.create_dataset(str(patient_idx + 1), data=patient_data_B.numpy())
+
+    if ret:
+        return patient_data_A, patient_data_B
+    else:
+        return
+
+################################################################################################################################
+################################################################################################################################
+
+def Deformation(A:np.ndarray,
+                    B:np.ndarray,
+                    deform_prob:float):
+    """Apply dense random elastic deformation.
+
+    Args:
+        A (np.ndarray: An input image ndarray.
+        deform_prob (float): The probability of performing deformation.
+
+    Returns:
+        Tuple[np.ndarray]: A deformed image.
+    """
+
+    elastic_transform = tio.transforms.RandomElasticDeformation(
+        num_control_points=9,  # Number of control points along each dimension.
+        max_displacement=5,    # Maximum displacement along each dimension at each control point.
+    )
+
+    elastic_A = elastic_transform(A)
+    elastic_B = elastic_transform(B)
+    num_samples = A.shape[1]
+    num_transform_samples = int(num_samples * deform_prob)
+    indices_A = random.sample(range(num_samples), num_transform_samples)
+    indices_B = random.sample(range(num_samples), num_transform_samples)
+
+    for index in indices_A:
+        A[:,index,:,:] = elastic_A[:,index,:,:]
+
+    for index in indices_B:
+        B[:,index,:,:] = elastic_B[:,index,:,:]
+
+    return A, B
+
+def JHL_motion_region(raw_img, motion_img, prob):
+    raw_k = fftshift(fftn(raw_img))
+    motion_k = fftshift(fftn(motion_img))
+    diff = math.ceil(2.56*prob)
+
+    raw_k[:,128-diff : 128,:] = motion_k[:,128-diff : 128,:]
+
+    res = abs(ifftn(ifftshift(raw_k)))
+    return res
+
+def Motion_artifacts(A:np.ndarray,
+                         B:np.ndarray,
+                         motion_prob:float):
+    """Simulates motion artifacts.
+
+    Args:
+        A (np.ndarray): An input image ndarray.
+        motion_prob (float): The probability of occurrence of motion.
+
+    Returns:
+        Tuple[np.ndarray]: A motion artifacts-injected tensor image.
+    """
+
+    # Define the 3D-RandomMotion transform
+    random_motion = tio.RandomMotion(
+        degrees=(5,5),              # Maximum rotation angle in degrees
+        translation=(10,10),         # Maximum translation in mm
+        num_transforms=10         # Number of motion transformations to apply
+    )
+
+    A = np.transpose(A, [0,2,3,1])
+    B = np.transpose(B, [0,2,3,1])
+    motion_A = random_motion(A)
+    motion_A_prob = JHL_motion_region(A, motion_A, prob=6)
+    motion_B = random_motion(B)
+    motion_B_prob = JHL_motion_region(B, motion_B, prob=6)
+
+    num_samples = A.shape[3]
+    num_transform_samples = int(num_samples * motion_prob)
+    indices_A = random.sample(range(num_samples), num_transform_samples)
+    indices_B = random.sample(range(num_samples), num_transform_samples)
+
+    for index in indices_A:
+        A[:,:,:,index] = motion_A_prob[:,:,:,index]
+
+    for index in indices_B:
+        B[:,:,:,index] = motion_B_prob[:,:,:,index]
+
+    A = np.transpose(A, [0,3,1,2])
+    B = np.transpose(B, [0,3,1,2])
+
+    return A, B
+
+def Rotate_images(A:np.ndarray,
+                      B:np.ndarray,
+                      degree:float):
+    """Rotates a given image (A) by random degree along z dimensions.
+
+    Args:
+        A (np.ndarray): An input image ndarray.
+        degree (float): Maximum allowable degree along the z dimension.
+
+    Returns:
+        Tuple[np.ndarray]: A rotated tensor image.
+    """
+
+    # rotation
+    transform = tio.RandomAffine(
+        scales=0,
+        degrees=(degree,0,0),        # z-axis 3D-Rotation range in degrees.
+        translation=(0,0,0),
+        default_pad_value='otsu',  # edge control, fill value is the mean of the values at the border that lie under an Otsu threshold.
+    )
+
+    rotated_A = transform(A)
+    rotated_B = transform(B)
+    
+    return rotated_A, rotated_B
+
+def Translate_images(A: torch.Tensor,
+              B: torch.Tensor,
+              misalign_x: float,
+              misalign_y: float):
+    """Translates two given images (A and B) by random misalignments along x and y dimensions.
+
+    Args:
+        A (torch.Tensor): The first input image tensor.
+        B (torch.Tensor): The second input image tensor.
+        misalign_x (float): Maximum allowable misalignment along the x dimension.
+        misalign_y (float): Maximum allowable misalignment along the y dimension.
+
+    Returns:
+        Tuple[torch.Tensor]: A pair of tensors representing the translated images.
+    """
+
+    # translation (changed : misalign is the smae but magnitude is different)
+    _misalign_x = np.random.uniform(-1, 1, size=2)
+    _misalign_y = np.random.uniform(-1, 1, size=2)
+
+    misalign_x = misalign_x * _misalign_x
+    misalign_y = misalign_y * _misalign_y
+
+    # misalign_x = np.random.uniform(-misalign_x, misalign_x, size=2) # This is the previous version
+    # misalign_y = np.random.uniform(-misalign_y, misalign_y, size=2)
+
+    translate_params_A = (misalign_y[0], misalign_x[0])  # (y, x) for image A
+    translate_params_B = (misalign_y[1], misalign_x[1])  # (y, x) for image B
+
+    # create affine transform
+    affine_A = Affine(translate_params=translate_params_A)
+    affine_B = Affine(translate_params=translate_params_B)
+
+    moved_A = affine_A(A)
+    moved_B = affine_B(B)
+
+    return moved_A[0], moved_B[0]

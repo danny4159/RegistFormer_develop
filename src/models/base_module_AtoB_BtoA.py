@@ -76,7 +76,7 @@ class BaseModule_AtoB_BtoA(LightningModule):
             return self.netG_A(a), self.netG_B(b)
 
     def model_step(self, batch: Any):
-        if self.params.eval_on_align:
+        if len(batch) == 4:
             real_a, real_a2, real_b2, real_b = batch
         else:
             real_a, real_b = batch
@@ -104,7 +104,7 @@ class BaseModule_AtoB_BtoA(LightningModule):
         else:
             fake_b, fake_a = self.forward(real_a, real_b)
 
-        if self.params.eval_on_align:
+        if len(batch) == 4:
             return real_a, real_b, real_a2, real_b2, fake_a, fake_b
         return real_a, real_b, fake_a, fake_b
 
@@ -151,7 +151,11 @@ class BaseModule_AtoB_BtoA(LightningModule):
 
     def validation_step(self, batch: Any, batch_idx: int):
         if self.params.eval_on_align:
-            real_A, real_B, real_A2, real_B2, fake_A, fake_B = self.model_step(batch)
+            if len(batch) == 4: # histological dataset
+                real_A, real_B, real_A2, real_B2, fake_A, fake_B = self.model_step(batch)    
+            else: # MR 3T 7T dataset
+                real_A2, real_B2, fake_A, fake_B = self.model_step(batch) 
+            
 
             self.val_ssim_A.update(real_A2, fake_A)
             self.val_psnr_A.update(real_A2, fake_A)
@@ -168,7 +172,7 @@ class BaseModule_AtoB_BtoA(LightningModule):
             self.psnr_values_B.append(self.val_psnr_B.compute().item())
             self.val_psnr_B.reset()
             # self.val_lpips_B.update(real_B2, fake_B)
-            self.val_lpips_B.update(gray2rgb(real_A2), gray2rgb(fake_A))
+            self.val_lpips_B.update(gray2rgb(real_B2), gray2rgb(fake_B))
             self.lpips_values_B.append(self.val_lpips_B.compute().item())
             self.val_lpips_B.reset()
             self.val_sharpness_B.update(norm_to_uint8(fake_B).float())
@@ -266,7 +270,10 @@ class BaseModule_AtoB_BtoA(LightningModule):
 
     def test_step(self, batch: Any, batch_idx: int):
         if self.params.eval_on_align:
-            real_A, real_B, real_A2, real_B2, fake_A, fake_B = self.model_step(batch)
+            if len(batch) == 4:
+                real_A, real_B, real_A2, real_B2, fake_A, fake_B = self.model_step(batch)    
+            else:
+                real_A2, real_B2, fake_A, fake_B = self.model_step(batch) 
 
             self.test_ssim_A.update(real_A2, fake_A)
             self.test_psnr_A.update(real_A2, fake_A)
@@ -276,14 +283,14 @@ class BaseModule_AtoB_BtoA(LightningModule):
             self.test_lpips_A.update(gray2rgb(real_A2), gray2rgb(fake_A))
             self.lpips_values_A.append(self.test_lpips_A.compute().item())
             self.test_lpips_A.reset()
-            self.test_sharpness_B.update(norm_to_uint8(fake_A).float())
+            self.test_sharpness_A.update(norm_to_uint8(fake_A).float())
 
             self.test_ssim_B.update(real_B2, fake_B)
             self.test_psnr_B.update(real_B2, fake_B)
             self.psnr_values_B.append(self.test_psnr_B.compute().item())
             self.test_psnr_B.reset()
             # self.test_lpips_B.update(real_B2, fake_B)
-            self.test_lpips_B.update(gray2rgb(real_A2), gray2rgb(fake_A))
+            self.test_lpips_B.update(gray2rgb(real_B2), gray2rgb(fake_B))
             self.lpips_values_B.append(self.test_lpips_B.compute().item())
             self.test_lpips_B.reset()
             self.test_sharpness_B.update(norm_to_uint8(fake_B).float())
@@ -317,7 +324,7 @@ class BaseModule_AtoB_BtoA(LightningModule):
             ssim_A = self.test_ssim_A.compute()
             psnr_A = torch.mean(torch.tensor(self.psnr_values_A))
             lpips_A = torch.mean(torch.tensor(self.lpips_values_A))
-            sharpness_A = self.test_sharpness_B.compute()
+            sharpness_A = self.test_sharpness_A.compute()
 
             ssim_B = self.test_ssim_B.compute()
             psnr_B = torch.mean(torch.tensor(self.psnr_values_B))

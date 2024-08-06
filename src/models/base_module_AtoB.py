@@ -8,10 +8,10 @@ from torchmetrics.clustering import NormalizedMutualInfoScore
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.kid import KernelInceptionDistance
 from src.metrics.sharpness import SharpnessMetric
+from torchmetrics.image import StructuralSimilarityIndexMeasure, PeakSignalNoiseRatio
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
-from torchmetrics.aggregation import CatMetric #TODO: 나중에 필요하면 Catmetric 사용. std 구하기 용도
-
-gray2rgb = lambda x: torch.cat((x, x, x), dim=1)
+gray2rgb = lambda x: torch.cat((x, x, x), dim=1) if x.shape[1] == 1 else x
 # norm_0_to_1 = lambda x: (x + 1) / 2
 flatten_to_1d = lambda x: x.view(-1)
 norm_to_uint8 = lambda x: ((x + 1) / 2 * 255).to(torch.uint8)
@@ -21,6 +21,18 @@ class BaseModule_AtoB(LightningModule):  # single direction
         super().__init__()
         self.params = params
 
+        if self.params.eval_on_align:
+            self.val_ssim_B, self.val_psnr_B, self.val_lpips_B, self.val_sharpness_B = self.define_metrics()
+            self.test_ssim_B, self.test_psnr_B, self.test_lpips_B, self.test_sharpness_B = self.define_metrics()
+            
+            self.val_metrics = [self.val_ssim_B, self.val_psnr_B, self.val_lpips_B, self.val_sharpness_B]
+            self.test_metrics = [self.test_ssim_B, self.test_psnr_B, self.test_lpips_B, self.test_sharpness_B]
+            
+            self.psnr_values_B = []
+            self.lpips_values_B = []
+
+            return
+
         self.val_gc_B, self.val_nmi_B, self.val_fid_B, self.val_kid_B, self.val_sharpness_B = self.define_metrics()
         self.test_gc_B, self.test_nmi_B, self.test_fid_B, self.test_kid_B, self.test_sharpness_B = self.define_metrics()
 
@@ -29,8 +41,17 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
         self.nmi_scores = []
 
-    @staticmethod
-    def define_metrics():
+    def define_metrics(self):
+        if self.params.eval_on_align:
+            # Following Pytorch lightning metric
+            # PSNR, LPIPS: 'update', 'compute', and 'append' at each step, calculate 'mean and std' at the end of epoch
+            # SSIM: initialize with reduction='none', 'update' at each step, 'compute' at the end of epoch, then calculate 'mean and std'
+            ssim = StructuralSimilarityIndexMeasure(reduction="none")
+            psnr = PeakSignalNoiseRatio()
+            lpips = LearnedPerceptualImagePatchSimilarity()
+            sharpness = SharpnessMetric()
+            return ssim, psnr, lpips, sharpness
+        
         gc = GradientCorrelationMetric()
         nmi = NormalizedMutualInfoScore()
         fid = FrechetInceptionDistance()
@@ -82,6 +103,20 @@ class BaseModule_AtoB(LightningModule):  # single direction
         return super().on_train_epoch_end()
 
     def validation_step(self, batch: Any, batch_idx: int):
+        if self.params.eval_on_align:
+            real_A, real_B, fake_B = self.model_step(batch)
+
+            self.val_ssim_B.update(real_B, fake_B)
+            self.val_psnr_B.update(real_B, fake_B)
+            self.psnr_values_B.append(self.val_psnr_B.compute().item())
+            self.val_psnr_B.reset()
+            # self.val_lpips_B.update(real_B2, fake_B)
+            self.val_lpips_B.update(gray2rgb(real_B), gray2rgb(fake_B))
+            self.lpips_values_B.append(self.val_lpips_B.compute().item())
+            self.val_lpips_B.reset()
+            self.val_sharpness_B.update(norm_to_uint8(fake_B).float())
+            
+            return
         if self.params.use_split_inference:
             half_size = batch[0].shape[2] // 2
             first_half = [x[:, :, :half_size, :] for x in batch]
@@ -106,6 +141,28 @@ class BaseModule_AtoB(LightningModule):  # single direction
         self.val_sharpness_B.update(norm_to_uint8(fake_B))
 
     def on_validation_epoch_end(self):
+        if self.params.eval_on_align:
+            ssim_B = self.val_ssim_B.compute().mean()
+            psnr_B = torch.mean(torch.tensor(self.psnr_values_B))
+            lpips_B = torch.mean(torch.tensor(self.lpips_values_B))
+            sharpness_B = self.val_sharpness_B.compute()
+
+            ssim_B = self.val_ssim_B.compute().mean().to(self.device)
+            psnr_B = torch.mean(torch.tensor(self.psnr_values_B, device=self.device))
+            lpips_B = torch.mean(torch.tensor(self.lpips_values_B, device=self.device))
+            sharpness_B = self.val_sharpness_B.compute().to(self.device)
+
+            self.log("val/ssim_B", ssim_B.detach(), sync_dist=True)
+            self.log("val/psnr_B", psnr_B.detach(), sync_dist=True)
+            self.log("val/lpips_B", lpips_B.detach(), sync_dist=True)
+            self.log("val/sharpness_B", sharpness_B.detach(), sync_dist=True)
+
+            for metrics in self.val_metrics:
+                metrics.reset()
+            self.psnr_values_B = []
+            self.lpips_values_B = []
+            return
+        
         gc = self.val_gc_B.compute()
         nmi = torch.mean(torch.stack(self.nmi_scores))
         fid = self.val_fid_B.compute()
@@ -123,6 +180,21 @@ class BaseModule_AtoB(LightningModule):  # single direction
         self.nmi_scores = []
 
     def test_step(self, batch: Any, batch_idx: int):
+        if self.params.eval_on_align:
+            real_A, real_B, fake_B = self.model_step(batch)
+
+            self.test_ssim_B.update(real_B, fake_B)
+            self.test_psnr_B.update(real_B, fake_B)
+            self.psnr_values_B.append(self.test_psnr_B.compute().item())
+            self.test_psnr_B.reset()
+            # self.test_lpips_B.update(real_B2, fake_B)
+            self.test_lpips_B.update(gray2rgb(real_B), gray2rgb(fake_B))
+            self.lpips_values_B.append(self.test_lpips_B.compute().item())
+            self.test_lpips_B.reset()
+            self.test_sharpness_B.update(norm_to_uint8(fake_B).float())
+
+            return
+        
         if self.params.use_split_inference:
             half_size = batch[0].shape[2] // 2
             first_half = [x[:, :, :half_size, :] for x in batch]
@@ -149,6 +221,34 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
 
     def on_test_epoch_end(self):
+        if self.params.eval_on_align:
+
+            ssim_B = self.test_ssim_B.compute()
+            psnr_B = torch.mean(torch.tensor(self.psnr_values_B))
+            lpips_B = torch.mean(torch.tensor(self.lpips_values_B))
+            sharpness_B = self.test_sharpness_B.compute()
+
+            self.log("test/ssim_B", ssim_B.detach(), sync_dist=True)
+            self.log("test/psnr_B", psnr_B.detach(), sync_dist=True)
+            self.log("test/lpips_B", lpips_B.detach(), sync_dist=True)
+            self.log("test/sharpness_B", sharpness_B.detach(), sync_dist=True)
+
+            ssim_B_std = torch.std(torch.tensor([metric.item() for metric in self.test_ssim_B.similarity]))
+            psnr_B_std = torch.std(torch.tensor(self.psnr_values_B))
+            lpips_B_std = torch.std(torch.tensor(self.lpips_values_B))
+            sharpness_B_std = torch.std(self.test_sharpness_B.scores)
+
+            self.log("test/ssim_B_std", ssim_B_std.detach(), sync_dist=True)
+            self.log("test/psnr_B_std", psnr_B_std.detach(), sync_dist=True)
+            self.log("test/lpips_B_std", lpips_B_std.detach(), sync_dist=True)
+            self.log("test/sharpness_B_std", sharpness_B_std.detach(), sync_dist=True)
+
+            for metrics in self.test_metrics:
+                metrics.reset()
+            self.psnr_values_B = []
+            self.lpips_values_B = []
+            return
+        
         gc = self.test_gc_B.compute()
         nmi = torch.mean(torch.stack(self.nmi_scores))
         fid = self.test_fid_B.compute()
