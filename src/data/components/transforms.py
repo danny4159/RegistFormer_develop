@@ -421,7 +421,7 @@ def download_process_MR_3T_7T(data_dir: str,
     """
 
     with h5py.File(data_dir, "r") as f:
-        data_A = np.array(f["data_x"])
+        data_A = np.array(f["data_x"]) # H, W, S
         data_B = np.array(f["data_y"])
 
     # create torch tensors
@@ -479,6 +479,9 @@ def download_process_MR_3T_7T(data_dir: str,
 
             patient_data_A = patient_data_A.squeeze(1) # num_slices, H, W
             patient_data_B = patient_data_B.squeeze(1)
+
+            patient_data_A = patient_data_A.permute(1, 2, 0) # H, W, num_slices
+            patient_data_B = patient_data_B.permute(1, 2, 0)
 
             data_A_group.create_dataset(str(patient_idx + 1), data=patient_data_A.numpy())
             data_B_group.create_dataset(str(patient_idx + 1), data=patient_data_B.numpy())

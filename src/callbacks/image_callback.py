@@ -501,7 +501,7 @@ class ImageSavingCallback(Callback):
         self.subject_slice_num = []
         self.subject_number = 1
 
-        data_path = os.path.join(self.data_dir, "val", self.test_file)
+        data_path = os.path.join(self.data_dir, "test", self.test_file)
 
         if self.data_type == 'nifti':
             with h5py.File(data_path, "r") as file:

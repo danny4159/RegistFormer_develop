@@ -90,17 +90,28 @@ class MR_3T_7T_DataModule(LightningDataModule):
             
             if phase == 'train': # misalign only for training data
                 mis_x, mis_y, Rot_z, M_prob, D_prob = self.misalign_x, self.misalign_y, self.degree, self.motion_prob, self.deform_prob
-                write_dir = os.path.join(self.data_dir, phase, '3T7T_{}_{}_{}_{}_{}.h5'.format(mis_x,mis_y,Rot_z,M_prob,D_prob)) # save to hdf5
+                if self.train_file:
+                    write_dir = os.path.join(self.data_dir, phase, self.train_file)
+                else:
+                    write_dir = os.path.join(self.data_dir, phase, '3T7T_{}_{}_{}_{}_{}.h5'.format(mis_x,mis_y,Rot_z,M_prob,D_prob)) # save to hdf5
                 self.train_dir = write_dir
 
-            
-            elif phase == 'val' or 'test': # no misalignment for validation and test data
+            # no misalignment for validation and test data
+            elif phase == 'val':
                 mis_x, mis_y, Rot_z, M_prob, D_prob = 0, 0, 0, 0, 0
-                write_dir = os.path.join(self.data_dir, phase, '3T7T_{}_{}_{}_{}_{}.h5'.format(mis_x,mis_y,Rot_z,M_prob,D_prob)) # save to hdf5  
-                if phase == 'val':
-                    self.val_dir = write_dir
-                elif phase == 'test':
-                    self.test_dir = write_dir
+                if self.val_file:
+                    write_dir = os.path.join(self.data_dir, phase, self.val_file)
+                else:
+                    write_dir = os.path.join(self.data_dir, phase, '3T7T_{}_{}_{}_{}_{}.h5'.format(mis_x, mis_y, Rot_z, M_prob, D_prob))
+                self.val_dir = write_dir
+
+            elif phase == 'test':
+                mis_x, mis_y, Rot_z, M_prob, D_prob = 0, 0, 0, 0, 0
+                if self.test_file:
+                    write_dir = os.path.join(self.data_dir, phase, self.test_file)
+                else:
+                    write_dir = os.path.join(self.data_dir, phase, '3T7T_{}_{}_{}_{}_{}.h5'.format(mis_x, mis_y, Rot_z, M_prob, D_prob))
+                self.test_dir = write_dir
                 
             if os.path.exists(write_dir):
                 print('path exists for {}'.format(write_dir))
