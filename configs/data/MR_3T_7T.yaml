@@ -23,7 +23,7 @@ eval_on_align: True
 ## Dataset File Name
 train_file: null #'prepared_data_0_0_0_0_0_ver3_final.h5'
 val_file: null #'prepared_data_0_0_0_0_0_ver3_final.h5'
-test_file: '3T7T_0.0_0.0_0.0_0.0_0.0.h5' # 'prepared_data_0_0_0_0_0_ver3_final.h5' 
+test_file: '3T7T_0_0_0_0_0.h5' # 'prepared_data_0_0_0_0_0_ver3_final.h5' 
 
 ## Preprocessing
 reverse: False # New

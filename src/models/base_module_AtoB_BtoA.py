@@ -76,7 +76,7 @@ class BaseModule_AtoB_BtoA(LightningModule):
             return self.netG_A(a), self.netG_B(b)
 
     def model_step(self, batch: Any):
-        if len(batch) == 4:
+        if len(batch) == 4: # histological dataset
             real_a, real_a2, real_b2, real_b = batch
         else:
             real_a, real_b = batch

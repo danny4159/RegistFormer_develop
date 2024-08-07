@@ -95,7 +95,7 @@ class MR_3T_7T_DataModule(LightningDataModule):
 
             
             elif phase == 'val' or 'test': # no misalignment for validation and test data
-                mis_x, mis_y, Rot_z, M_prob, D_prob = 0.0, 0.0, 0.0, 0.0, 0.0
+                mis_x, mis_y, Rot_z, M_prob, D_prob = 0, 0, 0, 0, 0
                 write_dir = os.path.join(self.data_dir, phase, '3T7T_{}_{}_{}_{}_{}.h5'.format(mis_x,mis_y,Rot_z,M_prob,D_prob)) # save to hdf5  
                 if phase == 'val':
                     self.val_dir = write_dir

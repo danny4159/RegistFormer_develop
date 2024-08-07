@@ -44,10 +44,10 @@ class ImageLoggingCallback(Callback):
         # print("use_split_inference: ", use_split_inference)
 
     def saving_to_grid(self, res):
-        def gray2rgb(tensor):
-            if tensor.size(0) == 1:  # Grayscale image with 1 channel
-                tensor = tensor.repeat(3, 1, 1)  # Repeat the channel 3 times
-            return tensor
+        # def gray2rgb(tensor):
+        #     if tensor.size(0) == 1:  # Grayscale image with 1 channel
+        #         tensor = tensor.repeat(3, 1, 1)  # Repeat the channel 3 times
+        #     return tensor
         
         if not isinstance(res, (list, tuple)):
             print(f"Unexpected input to saving_to_grid: {type(res)}")
@@ -63,16 +63,16 @@ class ImageLoggingCallback(Callback):
                 self.first_image_size = a[0].shape[1:3]
 
             self.img_grid.extend([
-            resize(gray2rgb((a[0] + 1) / 2), self.first_image_size),
-            resize(gray2rgb((a2[0] + 1) / 2), self.first_image_size),
-            resize(gray2rgb((preds_a[0] + 1) / 2), self.first_image_size),
-            resize(gray2rgb((b[0] + 1) / 2), self.first_image_size),
-            resize(gray2rgb((b2[0] + 1) / 2), self.first_image_size),
-            resize(gray2rgb((preds_b[0] + 1) / 2), self.first_image_size),
+            resize(((a[0] + 1) / 2), self.first_image_size),
+            resize(((a2[0] + 1) / 2), self.first_image_size),
+            resize(((preds_a[0] + 1) / 2), self.first_image_size),
+            resize(((b[0] + 1) / 2), self.first_image_size),
+            resize(((b2[0] + 1) / 2), self.first_image_size),
+            resize(((preds_b[0] + 1) / 2), self.first_image_size),
             ])
             self.err_grid.extend([
-                resize(gray2rgb(err_a[0]), self.first_image_size),
-                resize(gray2rgb(err_b[0]), self.first_image_size),
+                resize(err_a[0], self.first_image_size),
+                resize(err_b[0], self.first_image_size),
             ])
 
         elif len(res) == 4:
@@ -85,14 +85,14 @@ class ImageLoggingCallback(Callback):
                 self.first_image_size = a[0].shape[1:3]
 
             self.img_grid.extend([
-                resize(gray2rgb((a[0] + 1) / 2), self.first_image_size),
-                resize(gray2rgb((preds_a[0] + 1) / 2), self.first_image_size),
-                resize(gray2rgb((b[0] + 1) / 2), self.first_image_size),
-                resize(gray2rgb((preds_b[0] + 1) / 2), self.first_image_size),
+                resize(((a[0] + 1) / 2), self.first_image_size),
+                resize(((preds_a[0] + 1) / 2), self.first_image_size),
+                resize(((b[0] + 1) / 2), self.first_image_size),
+                resize(((preds_b[0] + 1) / 2), self.first_image_size),
             ])
             self.err_grid.extend([
-                resize(gray2rgb(err_a[0]), self.first_image_size),
-                resize(gray2rgb(err_b[0]), self.first_image_size),
+                resize(err_a[0], self.first_image_size),
+                resize(err_b[0], self.first_image_size),
             ])
             
         elif len(res) == 3:
@@ -104,12 +104,12 @@ class ImageLoggingCallback(Callback):
                 self.first_image_size = a[0].shape[1:3]
 
             self.img_grid.extend([
-                resize(gray2rgb((a[0] + 1) / 2), self.first_image_size),
-                resize(gray2rgb((preds_b[0] + 1) / 2), self.first_image_size),
-                resize(gray2rgb((b[0] + 1) / 2), self.first_image_size),
+                resize(((a[0] + 1) / 2), self.first_image_size),
+                resize(((preds_b[0] + 1) / 2), self.first_image_size),
+                resize(((b[0] + 1) / 2), self.first_image_size),
             ])
             self.err_grid.extend([
-                resize(gray2rgb(err_b[0]), self.first_image_size),
+                resize(err_b[0], self.first_image_size),
             ])
             
     def on_validation_start(self, trainer, pl_module):
@@ -501,7 +501,7 @@ class ImageSavingCallback(Callback):
         self.subject_slice_num = []
         self.subject_number = 1
 
-        data_path = os.path.join(self.data_dir, "test", self.test_file)
+        data_path = os.path.join(self.data_dir, "val", self.test_file)
 
         if self.data_type == 'nifti':
             with h5py.File(data_path, "r") as file:
