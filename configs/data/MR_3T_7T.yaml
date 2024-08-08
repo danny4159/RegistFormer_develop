@@ -30,7 +30,7 @@ reverse: False # New
 flip_prob: 0 #.5 #0.5
 rot_prob: 0 #.5 #0.5
 padding_size: null # Padding to hegith, width   [256, 256] -> [target_height, target_width]
-crop_size: [128,128] # Random crop to hegith, width  [96, 96] -> [target_height, target_width]
+crop_size: null # Random crop to hegith, width  [96, 96] -> [target_height, target_width]
 
 ## Intenional Misalignment
 misalign_x: 0
