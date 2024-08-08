@@ -129,10 +129,10 @@ class RegGANModule(BaseModule_AtoB_BtoA):
 
     def training_step(self, batch: Any, batch_idx: int):
         optimizer_G, optimizer_D_A, optimizer_D_B = self.optimizers()
-        if self.params.eval_on_align:
-            real_a, real_b, real_a2, real_b2, fake_a, fake_b = self.model_step(batch)
-        else:
-            real_a, real_b, fake_a, fake_b = self.model_step(batch)
+        # if self.params.eval_on_align: # For histolical dataset
+        #     real_a, real_b, real_a2, real_b2, fake_a, fake_b = self.model_step(batch)
+        # else:
+        real_a, real_b, fake_a, fake_b = self.model_step(batch)
 
         with optimizer_D_A.toggle_model():
             loss_D_A = self.backward_D_A(real_b, fake_b)
