@@ -28,13 +28,14 @@ netG_A:
   k_size: 28
   attn_type: 'softmax'
   daca_loc: null
-  flow_type: 'voxelmorph' # 'voxelmorph' 'zero'-> Ablation
+  flow_type: 'voxelmorph' # MR_CT_Pelvis: 'voxelmorph' / 'zero'-> Ablation / 3T7T: 'voxelmorph_lightning'
   # flow_type: 'grad_icon' 
   dam_type: 'synthesis_meta'
   fuse_type: null
   flow_model_path: 'pretrained/registration/Voxelmorph_Loss_MSE_MaskMSE1_0075.pt'
   # flow_model_path: 'pretrained/registration/GradICON/epoch001-fid20.69-gc0.3429-nmi0.3991-sharp64.19.ckpt'
   flow_ft: false
+  flow_size: [384,320] # MRCTPelvis: [384,320] 3T7T: [304,256]
   dam_ft: false
   dam_path: 'pretrained/synthesis/meta_synthesis_epoch_089.ckpt'
   # pretrained/synthesis/proposed_synthesis_epoch37.ckpt
@@ -73,8 +74,10 @@ params: # Other params
   flip_equivariance: False
   batch_size: ${data.batch_size}
   nce_on_vgg: False
+  eval_on_align: ${data.eval_on_align}
 
   #Ablation
   ran_shift: 10 #null # "Put null or Interger" / random shift to ground truth when calculating Contextual Loss
   flag_occlusionCTX: False # Occlusion masked contextual loss
   flow_model_path: ${model.netG_A.flow_model_path}
+  

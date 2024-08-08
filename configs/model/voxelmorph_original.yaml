@@ -30,8 +30,8 @@ netR_A:
   src_feats: 1
   trg_feats: 1
   unet_half_res: False
-  init_type: 'normal'
-  init_gain: 0.02
+  # init_type: 'normal'
+  # init_gain: 0.02
 
 params: # Other params
   lambda_l2: 1

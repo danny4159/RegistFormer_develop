@@ -31,6 +31,7 @@ class RegistFormer(nn.Module):
             self.fuse_type = kwargs['fuse_type']
             self.flow_model_path = kwargs['flow_model_path']
             self.flow_ft = kwargs['flow_ft']
+            self.flow_size = kwargs.get('flow_size', None)
             self.dam_ft = kwargs['dam_ft']
             self.dam_path = kwargs['dam_path']
             self.dam_feat = kwargs['dam_feat']
@@ -49,6 +50,26 @@ class RegistFormer(nn.Module):
         if self.flow_type == "voxelmorph" or self.flow_type == "zero":
             from src.models.components.voxelmorph import VxmDense
             self.flow_estimator = VxmDense.load(path=self.flow_model_path, device='cpu')
+            self.flow_estimator.eval()
+
+        elif self.flow_type == "voxelmorph_lightning":
+            from src.models.components.network_voxelmorph_original import VxmDense
+            self.flow_estimator = VxmDense(inshape=self.flow_size,
+                                           nb_unet_features=[[16, 32, 32, 32], [32, 32, 32, 32, 32, 16, 16]],
+                                           nb_unet_levels=None,
+                                           unet_feat_mult=1,
+                                           nb_unet_conv_per_level=1,
+                                           int_steps=7,
+                                           int_downsize=2,
+                                           bidir=False,
+                                           use_probs=False,
+                                           src_feats=self.src_ch,
+                                           trg_feats=self.ref_ch,
+                                           unet_half_res=False,)
+            checkpoint = torch.load(self.flow_model_path, map_location=lambda storage, loc: storage)
+            model_state_dict = checkpoint["state_dict"]
+            adjusted_state_dict = {k.replace("netR_A.", ""): v for k, v in model_state_dict.items()}
+            self.flow_estimator.load_state_dict(adjusted_state_dict, strict=False)
             self.flow_estimator.eval()
 
         elif self.flow_type == "grad_icon":
@@ -184,7 +205,7 @@ class RegistFormer(nn.Module):
             raise ValueError(
                 "Invalid dam_type provided. Expected 'dam' or 'synthesis_meta'."
             )
-        #TODO: 개발중
+
         if for_nce:
             if for_src:
                 src_lq_concat = torch.cat((src_origin, src), dim=1)
@@ -195,13 +216,13 @@ class RegistFormer(nn.Module):
                 return q_feat
 
 
+        height_multiple = self.flow_size[0] if self.flow_size else 768
+        width_multiple = self.flow_size[1] if self.flow_size else 576
 
-        # with torch.no_grad():
-        #     flow = self.flow_estimator(src, ref).detach()
-        if self.flow_type in ["voxelmorph", "zero"]:
+        if self.flow_type in ["voxelmorph", "zero","voxelmorph_lightning"]:
             if self.dam_type == "synthesis_meta" or self.dam_type == "dam" or self.dam_type == "proposed_synthesis":
-                src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=768, width_multiple=576)
-                ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=768, width_multiple=576)
+                src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=height_multiple, width_multiple=width_multiple)
+                ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=height_multiple, width_multiple=width_multiple)
                 
                 if self.flow_type == "zero":
                     moved, flow = self.flow_estimator(ref, src, registration=True)  # Zeroflow version
@@ -217,9 +238,9 @@ class RegistFormer(nn.Module):
                     moved = self.crop_tensor_to_original(moved, fixed_padding)
 
             elif self.dam_type == "dam_misalign":
-                src_origin, moving_padding = self.pad_tensor_to_multiple(src_origin, height_multiple=768, width_multiple=576)
-                ref_to_src, fixed_padding = self.pad_tensor_to_multiple(ref_to_src, height_multiple=768, width_multiple=576)
-                ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=768, width_multiple=576)
+                src_origin, moving_padding = self.pad_tensor_to_multiple(src_origin, height_multiple=height_multiple, width_multiple=width_multiple)
+                ref_to_src, fixed_padding = self.pad_tensor_to_multiple(ref_to_src, height_multiple=height_multiple, width_multiple=width_multiple)
+                ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=height_multiple, width_multiple=width_multiple)
 
                 _, flow = self.flow_estimator(src_origin, ref_to_src, registration=True)
                 _, flow_mr = self.flow_estimator(ref_to_src, src_origin, registration=True)

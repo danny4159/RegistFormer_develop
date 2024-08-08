@@ -119,6 +119,26 @@ class MR_3T_7T_DataModule(LightningDataModule):
                 download_process_MR_3T_7T(target_file, write_dir, mis_x, mis_y, Rot_z, M_prob, D_prob) # call function
 
     def setup(self, stage: Optional[str] = None):
+        # Declared redundantly to prevent errors in DDP mode.
+        mis_x, mis_y, Rot_z, M_prob, D_prob = self.misalign_x, self.misalign_y, self.degree, self.motion_prob, self.deform_prob
+        if self.train_file:
+            write_dir = os.path.join(self.data_dir, 'train', self.train_file)
+        else:
+            write_dir = os.path.join(self.data_dir, 'train', '3T7T_{}_{}_{}_{}_{}.h5'.format(mis_x,mis_y,Rot_z,M_prob,D_prob)) # save to hdf5
+        self.train_dir = write_dir
+
+        mis_x, mis_y, Rot_z, M_prob, D_prob = 0, 0, 0, 0, 0
+        if self.val_file:
+            write_dir = os.path.join(self.data_dir, 'val', self.val_file)
+        else:
+            write_dir = os.path.join(self.data_dir, 'val', '3T7T_{}_{}_{}_{}_{}.h5'.format(mis_x, mis_y, Rot_z, M_prob, D_prob))
+        self.val_dir = write_dir
+
+        if self.test_file:
+            write_dir = os.path.join(self.data_dir, 'test', self.test_file)
+        else:
+            write_dir = os.path.join(self.data_dir, 'test', '3T7T_{}_{}_{}_{}_{}.h5'.format(mis_x, mis_y, Rot_z, M_prob, D_prob))
+        self.test_dir = write_dir
 
         self.data_train = dataset_SynthRAD(
             self.train_dir,
