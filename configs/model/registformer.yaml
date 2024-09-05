@@ -35,7 +35,7 @@ netG_A:
   flow_model_path: 'pretrained/registration/Voxelmorph_Loss_MSE_MaskMSE1_0075.pt'
   # flow_model_path: 'pretrained/registration/GradICON/epoch001-fid20.69-gc0.3429-nmi0.3991-sharp64.19.ckpt'
   flow_ft: false
-  flow_size: [384,320] # MRCTPelvis: [384,320] 3T7T: [304,256]
+  flow_size: null # MRCTPelvis: [384,320] 3T7T: [304,256]
   dam_ft: false
   dam_path: 'pretrained/synthesis/meta_synthesis_epoch_089.ckpt'
   # pretrained/synthesis/proposed_synthesis_epoch37.ckpt

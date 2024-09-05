@@ -78,45 +78,61 @@ class MunitModule(BaseModule_AtoB_BtoA):
             print(f"Parameter Name: {name}, Parameter Shape: {param.shape}")
     
     def backward_G(self, real_a, real_b, s_a, s_b, c_a, s_a_prime, c_b, s_b_prime, x_a_recon, x_b_recon, x_ba, x_ab, c_b_recon, s_a_recon, c_a_recon, s_b_recon, x_aba, x_bab, lambda_image, lambda_style, lambda_content, lambda_cycle, lambda_perceptual, lambda_contextual):
+        loss_G = 0.0
+
         # loss GAN
         pred_fake = self.netD_A(x_ba)
         loss_G_adv_a = self.criterionGAN(pred_fake, True)
         pred_fake = self.netD_B(x_ab)
         loss_G_adv_b = self.criterionGAN(pred_fake, True)
         loss_GAN = (loss_G_adv_a + loss_G_adv_b)
-        # loss recon
-        loss_gen_recon_x_a = self.criterionRecon(x_a_recon, real_a)
-        loss_gen_recon_x_b = self.criterionRecon(x_b_recon, real_b)
-        loss_image = (loss_gen_recon_x_a + loss_gen_recon_x_b) * lambda_image
+        loss_G += loss_GAN
 
-        loss_gen_recon_s_a = self.criterionRecon(s_a_recon, s_a)
-        loss_gen_recon_s_b = self.criterionRecon(s_b_recon, s_b)
-        loss_style = (loss_gen_recon_s_a + loss_gen_recon_s_b) * lambda_style
+        # loss recon
+        if lambda_image != 0:
+            loss_gen_recon_x_a = self.criterionRecon(x_a_recon, real_a)
+            loss_gen_recon_x_b = self.criterionRecon(x_b_recon, real_b)
+            loss_image = (loss_gen_recon_x_a + loss_gen_recon_x_b) * lambda_image
+            loss_G += loss_image
+
+        if lambda_style != 0:
+            loss_gen_recon_s_a = self.criterionRecon(s_a_recon, s_a)
+            loss_gen_recon_s_b = self.criterionRecon(s_b_recon, s_b)
+            loss_style = (loss_gen_recon_s_a + loss_gen_recon_s_b) * lambda_style
+            loss_G += loss_style
+
         # Non noise
         # loss_gen_recon_s_a = self.criterionRecon(s_a_recon, s_a_prime)
         # loss_gen_recon_s_b = self.criterionRecon(s_b_recon, s_b_prime)
         # loss_style = (loss_gen_recon_s_a + loss_gen_recon_s_b) * lambda_style
 
-        loss_gen_recon_c_a = self.criterionRecon(c_a_recon, c_a)
-        loss_gen_recon_c_b = self.criterionRecon(c_b_recon, c_b)
-        loss_content = (loss_gen_recon_c_a+ loss_gen_recon_c_b) * lambda_content
+        if lambda_content != 0:
+            loss_gen_recon_c_a = self.criterionRecon(c_a_recon, c_a)
+            loss_gen_recon_c_b = self.criterionRecon(c_b_recon, c_b)
+            loss_content = (loss_gen_recon_c_a+ loss_gen_recon_c_b) * lambda_content
+            loss_G += loss_content
 
-        loss_gen_cycrecon_x_a = self.criterionRecon(x_aba, real_a)
-        loss_gen_cycrecon_x_b = self.criterionRecon(x_bab, real_b)
-        loss_cycle = (loss_gen_cycrecon_x_a + loss_gen_cycrecon_x_b) * lambda_cycle
+        if lambda_cycle != 0:
+            loss_gen_cycrecon_x_a = self.criterionRecon(x_aba, real_a)
+            loss_gen_cycrecon_x_b = self.criterionRecon(x_bab, real_b)
+            loss_cycle = (loss_gen_cycrecon_x_a + loss_gen_cycrecon_x_b) * lambda_cycle
+            loss_G += loss_cycle
 
         # domain-invariant perceptual loss
-        loss_G_vgg_b = self.criterionPerceptual(x_ba, real_b)  
-        loss_G_vgg_a = self.criterionPerceptual(x_ab, real_a)  
-        loss_perceptual = (loss_G_vgg_a + loss_G_vgg_b) * lambda_perceptual
+        if lambda_perceptual != 0:
+            loss_G_vgg_b = self.criterionPerceptual(x_ba, real_b)  
+            loss_G_vgg_a = self.criterionPerceptual(x_ab, real_a)  
+            loss_perceptual = (loss_G_vgg_a + loss_G_vgg_b) * lambda_perceptual
+            loss_G += loss_perceptual
         
         # contextual loss (extra)
-        # loss_contextual_a = torch.mean(self.contextual_loss(x_ba, real_a))
-        # loss_contextual_b = torch.mean(self.contextual_loss(x_ab, real_b))
-        # loss_contextual = (loss_contextual_a + loss_contextual_b) * lambda_contextual
+        if lambda_contextual != 0:
+            loss_contextual_a = torch.mean(self.contextual_loss(x_ba, real_a))
+            loss_contextual_b = torch.mean(self.contextual_loss(x_ab, real_b))
+            loss_contextual = (loss_contextual_a + loss_contextual_b) * lambda_contextual
+            loss_G += loss_contextual
 
         # total loss 
-        loss_G = loss_GAN + loss_image + loss_style + loss_content + loss_cycle + loss_perceptual #+ loss_contextual
         return loss_G
 
     def model_step_munit(self, batch: Any):

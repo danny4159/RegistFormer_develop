@@ -507,9 +507,9 @@ def Deformation(A:np.ndarray,
         Tuple[np.ndarray]: A deformed image.
     """
 
-    elastic_transform = tio.transforms.RandomElasticDeformation(
-        num_control_points=9,  # Number of control points along each dimension.
-        max_displacement=5,    # Maximum displacement along each dimension at each control point.
+    elastic_transform = tio.transforms.RandomElasticDeformation( ## Tuning parameters while observing the results
+        num_control_points=6,  # Number of control points along each dimension.
+        max_displacement=(30,30,0),    # Maximum displacement along each dimension at each control point.
     )
 
     elastic_A = elastic_transform(A)
@@ -527,7 +527,7 @@ def Deformation(A:np.ndarray,
 
     return A, B
 
-def JHL_motion_region(raw_img, motion_img, prob):
+def Motion_region(raw_img, motion_img, prob):
     raw_k = fftshift(fftn(raw_img))
     motion_k = fftshift(fftn(motion_img))
     diff = math.ceil(2.56*prob)
@@ -560,9 +560,9 @@ def Motion_artifacts(A:np.ndarray,
     A = np.transpose(A, [0,2,3,1])
     B = np.transpose(B, [0,2,3,1])
     motion_A = random_motion(A)
-    motion_A_prob = JHL_motion_region(A, motion_A, prob=6)
+    motion_A_prob = Motion_region(A, motion_A, prob=6)
     motion_B = random_motion(B)
-    motion_B_prob = JHL_motion_region(B, motion_B, prob=6)
+    motion_B_prob = Motion_region(B, motion_B, prob=6)
 
     num_samples = A.shape[3]
     num_transform_samples = int(num_samples * motion_prob)

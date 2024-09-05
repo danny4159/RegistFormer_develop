@@ -73,12 +73,11 @@ class ProposedSynthesisModule(nn.Module):
         # style_guidance = self.guide_net(ref) # [1, 128, 24, 20]
         # ref = self.guide_net(ref) # [1, 128, 24, 20]
         # 원래는 interpolate 1/16만 했어. ver32
-        style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True) # Original
-        # style_guidance_2 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Original
-        # style_guidance_3 = F.interpolate(ref, scale_factor=1/64, mode='bilinear', align_corners=True) # Original
-        # style_guidance = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True)
-        # style_guidance = F.interpolate(ref, scale_factor=1/4, mode='bilinear', align_corners=True)
-        # style_guidance = F.adaptive_avg_pool2d(ref, (24, 20))
+        style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True) # Final
+        # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
+        # style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Ablation
+        # style_guidance_1 = F.interpolate(ref, scale_factor=1/64, mode='bilinear', align_corners=True) # Ablation
+        # style_guidance_1 = F.interpolate(ref, size=(1, 1), mode='bilinear', align_corners=True) # Ablation
 
         feats = []
         feat0 = self.conv0(x, style_guidance_1) # [1, 64, 384, 320]
