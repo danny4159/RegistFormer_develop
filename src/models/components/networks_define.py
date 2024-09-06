@@ -18,6 +18,7 @@ from src.models.components.network_G_resnet import G_Resnet
 
 from src.models.components.network_grad_icon import GradICON
 from src.models.components.network_voxelmorph_original import VxmDense
+from src.models.components.network_lapIRN import Miccai2020_LDR_laplacian_unit_disp_add_lvl1, Miccai2020_LDR_laplacian_unit_disp_add_lvl2, Miccai2020_LDR_laplacian_unit_disp_add_lvl3
 
 # from src.models.components.networks_spade_danny import SPADEGenerator, ConvEncoder
 
@@ -346,6 +347,12 @@ def define_R(**kwargs):
         net = GradICON(**kwargs)
     elif kwargs.get('netR_type') == 'voxelmorph_original':
         net = VxmDense(**kwargs)
+    elif kwargs.get('netR_type') == 'lapIRN_lv1':
+        net = Miccai2020_LDR_laplacian_unit_disp_add_lvl1(**kwargs)
+    elif kwargs.get('netR_type') == 'lapIRN_lv2':
+        net = Miccai2020_LDR_laplacian_unit_disp_add_lvl2(**kwargs)
+    elif kwargs.get('netR_type') == 'lapIRN_lv3':
+        net = Miccai2020_LDR_laplacian_unit_disp_add_lvl3(**kwargs)
     else:
         raise ValueError('This netR_type is not expected')
     return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)

@@ -1,0 +1,27 @@
+_target_: src.models.lapIRN_lv3_module.LapIRN_Lv3_Module
+
+name: LapIRN_Lv3_Registration
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.0001
+
+netR_3:
+  _target_: src.models.components.networks_define.define_R
+  netR_type: lapIRN_lv3
+  in_channel: 2
+  n_classes: 3
+  start_channel: 7
+  is_train: True
+  imgshape: [384, 320, 128] # lv1: [96, 80, 32] lv2: [192, 160, 64] lv3: [384, 320, 128]
+  range_flow: 0.4
+  model_lvl1: '/SSD5_8TB/Daniel/RegistFormer/logs/Model_LapIRN_Lv1_Registration_Data_SynthRAD_MR_CT_Pelvis/LapIRN_Lv1_CTsynCTPelvis_3D/runs/2024-09-05_23-36-56/checkpoints/epoch024-fid17.70-kid0.02-gc0.4189-nmi0.3565-sharp724.37.ckpt' # ckpt path of pre-trained netR_1
+  model_lvl2: '/SSD5_8TB/Daniel/RegistFormer/logs/Model_LapIRN_Lv2_Registration_Data_SynthRAD_MR_CT_Pelvis/LapIRN_Lv2_CTsynCTPelvis_3D/runs/2024-09-06_14-40-27/checkpoints/epoch024-fid387.54-kid0.47-gcnan-nmi0.0000-sharp0.00.ckpt' # ckpt path of pre-trained netR_2
+
+params: # Other params
+  lambda_smooth: 1
+  reverse: ${data.reverse} # A->B if False, B->A if True
+  use_split_inference: ${data.use_split_inference}
+  is_3d: ${data.is_3d}
+  flag_train_fixed_moving: False # Swap moving and fixed only during training to encourage learning without compromising reference features. (My guess, experimenting)

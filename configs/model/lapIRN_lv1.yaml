@@ -1,0 +1,31 @@
+_target_: src.models.lapIRN_lv1_module.LapIRN_Lv1_Module
+
+name: LapIRN_Lv1_Registration
+
+# lv1에서 25epoch 학습
+# lv2에서 25epcoh 학습
+# lv3에서 50epoch 학습 (메모리 부족으로 bf16-mixed에서 학습)
+# lv1에서 학습한걸 lv2에서 활용하고 그걸 다시 lv3에 활용하는 구조
+# Epoch 2개까지 weight를 freeze해서 쓰고 그뒤는 이전 level의 네트워크도 함께 학습
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.0001
+
+netR_1:
+  _target_: src.models.components.networks_define.define_R
+  netR_type: lapIRN_lv1
+  in_channel: 2
+  n_classes: 3
+  start_channel: 7
+  is_train: True
+  imgshape: [96, 80, 32] # lv1: [96, 80, 32] lv2: [192, 160, 64] lv3: [384, 320, 128]
+  range_flow: 0.4
+
+params: # Other params
+  lambda_smooth: 1
+  reverse: ${data.reverse} # A->B if False, B->A if True
+  use_split_inference: ${data.use_split_inference}
+  is_3d: ${data.is_3d}
+  flag_train_fixed_moving: False # Swap moving and fixed only during training to encourage learning without compromising reference features. (My guess, experimenting)
