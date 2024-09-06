@@ -8,6 +8,8 @@ name: LapIRN_Lv1_Registration
 # lv1에서 학습한걸 lv2에서 활용하고 그걸 다시 lv3에 활용하는 구조
 # Epoch 2개까지 weight를 freeze해서 쓰고 그뒤는 이전 level의 네트워크도 함께 학습
 
+# 특이사항: 바빠서 loss_Jacobian는 구현안함. 
+
 optimizer:
   _target_: torch.optim.Adam
   _partial_: true
