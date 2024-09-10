@@ -723,14 +723,14 @@ class Miccai2020_LDR_laplacian_unit_disp_add_lvl2(nn.Module):
         kwargs_lvl1 = kwargs.copy()
         kwargs_lvl1['imgshape'] = imgshape_lvl1
 
-        checkpoint = torch.load(model_lvl1, map_location=lambda storage, loc: storage)
-        model_state_dict = checkpoint["state_dict"]
-        adjusted_state_dict = {k.replace("netR_1.", ""): v for k, v in model_state_dict.items()}
+        # checkpoint = torch.load(model_lvl1, map_location=lambda storage, loc: storage)
+        # model_state_dict = checkpoint["state_dict"]
+        # adjusted_state_dict = {k.replace("netR_1.", ""): v for k, v in model_state_dict.items()}
         self.model_lvl1 = Miccai2020_LDR_laplacian_unit_disp_add_lvl1(**kwargs_lvl1)
-        self.model_lvl1.load_state_dict(adjusted_state_dict, strict=False)
+        # self.model_lvl1.load_state_dict(adjusted_state_dict, strict=False)
         
-        for param in self.model_lvl1.parameters():
-            param.requires_grad = False
+        # for param in self.model_lvl1.parameters():
+        #     param.requires_grad = False
 
         self.grid_1 = generate_grid_unit(self.imgshape)
         self.grid_1 = torch.from_numpy(np.reshape(self.grid_1, (1,) + self.grid_1.shape)).cuda().float()
@@ -881,11 +881,11 @@ class Miccai2020_LDR_laplacian_unit_disp_add_lvl3(nn.Module):
         kwargs_lvl2['imgshape'] = imgshape_lvl2
         kwargs_lvl2['model_lvl1'] = model_lvl1
 
-        checkpoint = torch.load(model_lvl2, map_location=lambda storage, loc: storage)
-        model_state_dict = checkpoint["state_dict"]
-        adjusted_state_dict = {k.replace("netR_2.", ""): v for k, v in model_state_dict.items()}
+        # checkpoint = torch.load(model_lvl2, map_location=lambda storage, loc: storage)
+        # model_state_dict = checkpoint["state_dict"]
+        # adjusted_state_dict = {k.replace("netR_2.", ""): v for k, v in model_state_dict.items()}
         self.model_lvl2 = Miccai2020_LDR_laplacian_unit_disp_add_lvl2(**kwargs_lvl2)
-        self.model_lvl2.load_state_dict(adjusted_state_dict, strict=False)
+        # self.model_lvl2.load_state_dict(adjusted_state_dict, strict=False)
 
         self.grid_1 = generate_grid_unit(self.imgshape)
         self.grid_1 = torch.from_numpy(np.reshape(self.grid_1, (1,) + self.grid_1.shape)).cuda().float()

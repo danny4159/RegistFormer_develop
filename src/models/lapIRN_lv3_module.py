@@ -38,6 +38,7 @@ class LapIRN_Lv3_Module(BaseModule_Registration):
         self.loss_similarity = NCC(win=3)
         self.loss_similarity_multi_res = multi_resolution_NCC(win=5, scale=2)
         self.loss_similarity_multi_res_lv3 = multi_resolution_NCC(win=7, scale=3)
+        self.loss_MSE = nn.MSELoss()
         self.loss_Jdet = neg_Jdet_loss
         self.loss_smooth = smoothloss
 
@@ -54,7 +55,12 @@ class LapIRN_Lv3_Module(BaseModule_Registration):
         return tensor[..., :original_slices]
     
     def backward_R_lv3(self, displacement_field, warped_img, down_fixed_img): # grid_4 
-        loss_multiNCC = self.loss_similarity_multi_res_lv3(warped_img, down_fixed_img)
+        
+        #TODO: 내가 추가한 코드
+        loss_MSE = self.loss_MSE(down_fixed_img, warped_img)
+        
+        #원래 쓰던 loss
+        # loss_multiNCC = self.loss_similarity_multi_res_lv3(warped_img, down_fixed_img)
         # F_X_Y_norm = transform_unit_flow_to_flow_cuda(displacement_field.permute(0,2,3,4,1).clone())
         # loss_Jacobian = self.loss_Jdet(F_X_Y_norm, grid_4)
 
@@ -65,7 +71,8 @@ class LapIRN_Lv3_Module(BaseModule_Registration):
         displacement_field[:, 2, :, :, :] = displacement_field[:, 2, :, :, :] * (x-1)
         loss_regulation = self.loss_smooth(displacement_field)
 
-        loss_lv3 = loss_multiNCC + self.params.lambda_smooth * loss_regulation
+        # loss_lv3 = loss_multiNCC + self.params.lambda_smooth * loss_regulation
+        loss_lv3 = loss_MSE + 0.01 * loss_regulation
         return loss_lv3
 
     def resize_tensor(self, tensor, size):
@@ -141,7 +148,8 @@ class LapIRN_Lv3_Module(BaseModule_Registration):
         
         return optimizers
     
-    def on_epoch_start(self):
-        current_epoch = self.current_epoch # epoch 2 까지는 netR_1 freeze, 그 후로 unfreeze
-        if current_epoch == 3:
-            self.netR_3.unfreeze_modellvl1()
+    # 이것도 lv1,lv2순차적으로 할때 구현돼있어.
+    # def on_epoch_start(self):
+    #     current_epoch = self.current_epoch # epoch 2 까지는 netR_1 freeze, 그 후로 unfreeze
+    #     if current_epoch == 3:
+    #         self.netR_3.unfreeze_modellvl1()
