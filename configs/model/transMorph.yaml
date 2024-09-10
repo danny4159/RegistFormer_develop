@@ -1,0 +1,49 @@
+_target_: src.models.transMorph_module.TransMorph_Module
+
+name: TransMorph_Registration
+
+# lv1에서 25epoch 학습
+# lv2에서 25epcoh 학습
+# lv3에서 50epoch 학습 (메모리 부족으로 bf16-mixed에서 학습)
+# lv1에서 학습한걸 lv2에서 활용하고 그걸 다시 lv3에 활용하는 구조
+# Epoch 2개까지 weight를 freeze해서 쓰고 그뒤는 이전 level의 네트워크도 함께 학습
+
+# 특이사항: 바빠서 loss_Jacobian는 구현안함. 
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.0001
+
+netR_A:
+  _target_: src.models.components.networks_define.define_R
+  netR_type: transMorph
+  if_convskip: True
+  if_transskip: True
+  patch_size: 4
+  in_chans: 2
+  embed_dim: 96
+  depths: [2, 2, 4, 2]
+  num_heads: [4, 4, 8, 8]
+  window_size: [5, 6, 7]
+  mlp_ratio: 4
+  qkv_bias: False
+  drop_rate: 0
+  drop_path_rate: 0.3
+  ape: False
+  spe: False
+  rpe: True
+  patch_norm: True
+  use_checkpoint: False
+  out_indices: [0, 1, 2, 3]
+  pat_merg_rf: 4
+  reg_head_chan: 16
+  img_size: [320, 256, 128]  # [384, 320, 128] # [268, 224, 96] -> down interpolation 사이즈
+
+
+params: # Other params
+  lambda_grad: 0.02
+  reverse: ${data.reverse} # A->B if False, B->A if True
+  use_split_inference: ${data.use_split_inference}
+  is_3d: ${data.is_3d}
+  flag_train_fixed_moving: False # Swap moving and fixed only during training to encourage learning without compromising reference features. (My guess, experimenting)
