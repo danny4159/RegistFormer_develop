@@ -110,8 +110,26 @@ class RegistFormer(nn.Module):
             checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
             model_state_dict = checkpoint["state_dict"]
             adjusted_state_dict = {k.replace("netG_A.", ""): v for k, v in model_state_dict.items()}
-            self.flow_estimator.load_state_dict(adjusted_state_dict, strict=False)
-            self.flow_estimator.eval()
+            self.DAM.load_state_dict(adjusted_state_dict, strict=False)
+            self.DAM.eval()
+            # self.flow_estimator.load_state_dict(adjusted_state_dict, strict=False) #TODO: 이거 왜 flow_estimator였어..??
+            # self.flow_estimator.eval()
+
+        elif self.dam_type == "stage1":
+            from src.models.components.network_adainGen import AdaINGen
+            self.DAM_A = AdaINGen(input_nc=1, output_nc=1, ngf=64)
+            checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
+            model_state_dict = checkpoint["state_dict"]
+            adjusted_state_dict = {k.replace("netG_A.", ""): v for k, v in model_state_dict.items()}
+            self.DAM_A.load_state_dict(adjusted_state_dict, strict=False)
+            self.DAM_A.eval()
+
+            self.DAM_B = AdaINGen(input_nc=1, output_nc=1, ngf=64)
+            checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
+            model_state_dict = checkpoint["state_dict"]
+            adjusted_state_dict = {k.replace("netG_B.", ""): v for k, v in model_state_dict.items()}
+            self.DAM_B.load_state_dict(adjusted_state_dict, strict=False)
+            self.DAM_B.eval()
 
         # Define feature extractor.
         # self.unet_q = Unet(src_ch, feat_dim, feat_dim)
@@ -201,6 +219,11 @@ class RegistFormer(nn.Module):
             src = self.DAM(src, ref)
         # elif self.dam_type == 'dam_misalign':
         #     src = self.DAM.netG_B(src, ref)
+        elif self.dam_type == "munit":
+            src_origin = src
+            c_a, s_a = self.DAM_A.encode(src)
+            c_b, s_b = self.DAM_B.encode(ref)
+            src = self.DAM_B.decode(c_a, s_b)
         else:
             raise ValueError(
                 "Invalid dam_type provided. Expected 'dam' or 'synthesis_meta'."
@@ -220,7 +243,7 @@ class RegistFormer(nn.Module):
         width_multiple = self.flow_size[1] if self.flow_size else 576
 
         if self.flow_type in ["voxelmorph", "zero","voxelmorph_lightning"]:
-            if self.dam_type == "synthesis_meta" or self.dam_type == "dam" or self.dam_type == "proposed_synthesis":
+            if self.dam_type == "synthesis_meta" or self.dam_type == "dam" or self.dam_type == "proposed_synthesis" or self.dam_type == "munit":
                 src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=height_multiple, width_multiple=width_multiple)
                 ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=height_multiple, width_multiple=width_multiple)
                 
