@@ -30,7 +30,7 @@ netG_A:
   daca_loc: null
   flow_type: 'voxelmorph' # MR_CT_Pelvis: 'voxelmorph' / 'zero'-> Ablation / 3T7T: 'voxelmorph_lightning'
   # flow_type: 'grad_icon' 
-  dam_type: 'synthesis_meta'
+  dam_type: 'synthesis_meta' # 'munit'
   fuse_type: null
   flow_model_path: 'pretrained/registration/Voxelmorph_Loss_MSE_MaskMSE1_0075.pt'
   # flow_model_path: 'pretrained/registration/GradICON/epoch001-fid20.69-gc0.3429-nmi0.3991-sharp64.19.ckpt'

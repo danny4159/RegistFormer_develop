@@ -25,9 +25,9 @@ eval_on_align: False
 # Ver3_AllPatientSameSize_final_2.h5
 # Ver3_OnlyOnePatient.h5
 # Registration_MR_CT_synCT.h5
-train_file: 'prepared_data_0_0_0_0_0_ver3_final.h5'
-val_file: 'prepared_data_0_0_0_0_0_ver3_final.h5'
-test_file: 'prepared_data_0_0_0_0_0_ver3_final.h5' 
+train_file: 'Ver3_AllPatientSameSize_final_2.h5'
+val_file: 'Ver3_AllPatientSameSize_final_2.h5'
+test_file: 'Ver3_AllPatientSameSize_final_2.h5' 
 
 ## Preprocessing
 reverse: False # New

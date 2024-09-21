@@ -150,10 +150,10 @@ class MunitModule(BaseModule_AtoB_BtoA):
         x_a_recon = self.netG_A.decode(c_a, s_a_prime)
         x_b_recon = self.netG_B.decode(c_b, s_b_prime)
         # decode (cross domain)
-        # x_ba = self.netG_A.decode(c_b, s_a)
-        # x_ab = self.netG_B.decode(c_a, s_b)
-        x_ba = self.netG_A.decode(c_b, s_a_prime)
-        x_ab = self.netG_B.decode(c_a, s_b_prime)
+        x_ba = self.netG_A.decode(c_b, s_a)
+        x_ab = self.netG_B.decode(c_a, s_b)
+        # x_ba = self.netG_A.decode(c_b, s_a_prime) #TODO: 내가 수정해본 코드
+        # x_ab = self.netG_B.decode(c_a, s_b_prime)
         # encode again
         c_b_recon, s_a_recon = self.netG_A.encode(x_ba)
         c_a_recon, s_b_recon = self.netG_B.encode(x_ab)

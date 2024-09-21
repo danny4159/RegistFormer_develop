@@ -115,7 +115,7 @@ class RegistFormer(nn.Module):
             # self.flow_estimator.load_state_dict(adjusted_state_dict, strict=False) #TODO: 이거 왜 flow_estimator였어..??
             # self.flow_estimator.eval()
 
-        elif self.dam_type == "stage1":
+        elif self.dam_type == "munit":
             from src.models.components.network_adainGen import AdaINGen
             self.DAM_A = AdaINGen(input_nc=1, output_nc=1, ngf=64)
             checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
