@@ -127,7 +127,7 @@ class UnitModule(BaseModule_AtoB_BtoA):
         return loss_G
 
     def model_step_unit(self, batch: Any):
-        if self.params.eval_on_align:
+        if len(batch) == 4:
             real_a, real_a2, real_b2, real_b = batch
         else:
             real_a, real_b = batch

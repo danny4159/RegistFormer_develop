@@ -137,7 +137,11 @@ class RegistFormerModule(BaseModule_AtoB):
             else:
                 optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
         else:
-            optimizer_G_A = self.optimizers()
+            if self.params.lambda_nce == 0:
+                optimizer_G_A = self.optimizers()
+            else:
+                optimizer_G_A, optimizer_F_A = self.optimizers()
+
         real_a, real_b, fake_b = self.model_step(batch)
 
         # Renew
@@ -191,8 +195,9 @@ class RegistFormerModule(BaseModule_AtoB):
         if self.hparams.scheduler is not None:
                 scheduler_G_A = self.hparams.scheduler(optimizer=optimizer_G_A)
                 schedulers.append(scheduler_G_A)
-                scheduler_D_B = self.hparams.scheduler(optimizer=optimizer_D_A)
-                schedulers.append(scheduler_D_B)
+                if self.params.lambda_gan != 0:
+                    scheduler_D_B = self.hparams.scheduler(optimizer=optimizer_D_A)
+                    schedulers.append(scheduler_D_B)
                 if self.params.lambda_nce != 0:
                     scheduler_F_A = self.hparams.scheduler(optimizer=optimizer_F_A)
                     schedulers.append(scheduler_F_A)
