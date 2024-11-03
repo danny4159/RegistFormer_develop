@@ -459,7 +459,17 @@ class Unet(nn.Module):
                 x = self.upsampling[level](x)
                 # print(x.shape) #TODO:
                 # print(x_history.pop().shape)
-                x = torch.cat([x, x_history.pop()], dim=1)
+                # 크기 불일치 시 패딩 추가
+                skip_x = x_history.pop()
+                if x.shape != skip_x.shape:
+                    diff_h = skip_x.shape[2] - x.shape[2]
+                    diff_w = skip_x.shape[3] - x.shape[3]
+                    
+                    # 패딩 추가 (가장자리에 맞춰서 패딩)
+                    x = torch.nn.functional.pad(x, (0, diff_w, 0, diff_h))
+                    
+                x = torch.cat([x, skip_x], dim=1)
+                # x = torch.cat([x, x_history.pop()], dim=1)
 
         # remaining convs at full resolution
         for conv in self.remaining:
