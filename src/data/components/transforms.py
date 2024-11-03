@@ -24,7 +24,7 @@ def padding_height_width(tensorA, tensorB, tensorC=None, tensorD=None, target_si
     if len(tensorA.shape) == 3:
         # 2D case
         _, h, w = tensorA.shape
-        assert h >= target_size[0] and w >= target_size[1], "Input tensor size must be larger than min_size"
+        assert h < target_size[0] and w < target_size[1], "Input tensor size must be larger than min_size"
         assert len(tensorB.shape) == 3, "Input tensor B must have 3 dimensions (C, H, W)"
         if tensorC is not None:
             assert len(tensorC.shape) == 3, "Input tensor C must have 3 dimensions (C, H, W)"
@@ -33,7 +33,7 @@ def padding_height_width(tensorA, tensorB, tensorC=None, tensorD=None, target_si
     elif len(tensorA.shape) == 4:
         # 3D case
         _, h, w, d = tensorA.shape
-        assert h >= target_size[0] and w >= target_size[1], "Input tensor size must be larger than min_size"
+        assert h < target_size[0] and w < target_size[1], "Input tensor size must be larger than min_size"
         assert len(tensorB.shape) == 4, "Input tensor B must have 4 dimensions (C, H, W, D)"
         if tensorC is not None:
             assert len(tensorC.shape) == 4, "Input tensor C must have 4 dimensions (C, H, W, D)"
@@ -41,7 +41,6 @@ def padding_height_width(tensorA, tensorB, tensorC=None, tensorD=None, target_si
             assert len(tensorD.shape) == 4, "Input tensor D must have 4 dimensions (C, H, W, D)"
     else:
         raise ValueError("Input tensors must have 3 or 4 dimensions")
-
     # 기존 코드와 동일
     # Calculate padding
     pad_top = (target_size[0] - h + 1) // 2 if h < target_size[0] else 0
