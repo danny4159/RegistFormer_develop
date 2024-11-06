@@ -18,7 +18,7 @@ batch_size: 4 #5 #10 #4 #30 #16 #12 #2 #1
 num_workers: 6 # 3
 pin_memory: False
 use_split_inference: False # Inference for valid and test is divided into half from the original image (for memory issue)
-eval_on_align: False
+eval_on_align: True
 
 ## Dataset File Name
 # prepared_data_0_0_0_0_0_ver3_final.h5
