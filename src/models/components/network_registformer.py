@@ -10,6 +10,8 @@ import math
 import pdb
 import os
 from flash_attn import flash_attn_func
+from src.models.components.network_voxelmorph_original import VecInt
+from src.models.components.performer import CrossAttention
 
 
 class RegistFormer(nn.Module):
@@ -40,19 +42,19 @@ class RegistFormer(nn.Module):
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
-
+        
         current_dir = os.path.dirname(__file__)
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
 
         self.flow_model_path = os.path.join(project_root, self.flow_model_path)
         self.dam_path = os.path.join(project_root, self.dam_path)
 
-        if self.flow_type == "voxelmorph" or self.flow_type == "zero":
+        if self.flow_type == "voxelmorph":
             from src.models.components.voxelmorph import VxmDense
             self.flow_estimator = VxmDense.load(path=self.flow_model_path, device='cpu')
             self.flow_estimator.eval()
 
-        elif self.flow_type == "voxelmorph_lightning":
+        elif self.flow_type == "voxelmorph_lightning" or self.flow_type == "zero":
             from src.models.components.network_voxelmorph_original import VxmDense
             self.flow_estimator = VxmDense(inshape=self.flow_size,
                                            nb_unet_features=[[16, 32, 32, 32], [32, 32, 32, 32, 32, 16, 16]],
@@ -190,6 +192,11 @@ class RegistFormer(nn.Module):
                 if "flow_estimator" not in key and "DAM" not in key:
                     param.requires_grad = True
 
+        # VecInt initial
+        self.int_steps = kwargs.get('int_steps', 7)  # 적분 단계 수 (기본값 7)
+        self.vecint = VecInt(self.flow_size, self.int_steps)
+
+
     def forward(self, src, ref, mask=None, for_nce=False, for_src=False):
         assert (
             src.shape == ref.shape
@@ -251,6 +258,8 @@ class RegistFormer(nn.Module):
                     moved, flow = self.flow_estimator(ref, src, registration=True)  # Zeroflow version
                 else:
                     _, flow = self.flow_estimator(src, ref, registration=True)  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
+
+                    flow = self.vecint(flow) #TODO: modified
 
                 src = self.crop_tensor_to_original(src, fixed_padding)
                 ref = self.crop_tensor_to_original(ref, fixed_padding)
@@ -494,6 +503,38 @@ def dotproduct_attention(q, k, v):
     output = output.view(*output.shape[:-1], h, w)
 
     return output, attn
+
+def performer_attention(q, k, v, performer_cross_attn = None, nb_features=None, projection_matrix=None, eps=1e-6):
+    # n x 1(k^2) x nhead x d x h x w
+    n, _, nhead, d, h, w = q.shape
+    _, kk, _, _, _, _ = k.shape
+
+    q = q.permute(0, 2, 4, 5, 1, 3)  # n x nhead x h x w x 1 x d
+    k = k.permute(0, 2, 4, 5, 3, 1)  # n x nhead x h x w x d x k^2
+    v = v.permute(0, 2, 4, 5, 3, 1)  # n x nhead x h x w x d x k^2
+
+    # q = q.reshape(n * nhead * h * w, 1, d)
+    # k = k.reshape(n * nhead * h * w, d, kk)
+    # v = v.reshape(n * nhead * h * w, d, kk)
+    
+    #두번째
+    q = q.reshape(n, h * w * 1, nhead * d)
+    k = k.reshape(n,  h * w * kk, nhead * d)
+    v = v.reshape(n,  h * w * kk, nhead * d)
+
+    # print("q ", q.shape) # n x nhead x h x w, 1, d (7680, 1, 7)
+    # print("k ", k.shape) # n x nhead x h x w, d, k^2 (7680, 7, 784) -> 7680, 7, 7
+    # print("v ", v.shape) # n x nhead x h x w, d, k^2 (7680, 7, 784) -> 7680, 7, 7 test위해
+
+    # q = torch.randn(1, 1024, 512).cuda() # n, h*w*1, nhead*d
+    # k = torch.randn(1, 512, 512).cuda() # => n, h*w*k^2, nhead*d
+    # v = torch.randn(1, 512, 512).cuda()
+
+    output = performer_cross_attn(q, k, v, context=k) #QQ 1,1024,512
+
+    output = output.reshape(n, 1, nhead, d, h, w)
+
+    return output
 
 def flash_attention(q, k, v):
     # k = k.to(torch.bfloat16)
@@ -764,7 +805,7 @@ class Unet(nn.Module):
 
 
 class MultiheadAttention(nn.Module):
-    def __init__(self, feat_dim, n_head, k_size=5, d_k=None, d_v=None):
+    def __init__(self, feat_dim, n_head, k_size=5, d_k=None, d_v=None, attn=None):
         super().__init__()
         if d_k is None:
             d_k = feat_dim // n_head
@@ -784,6 +825,9 @@ class MultiheadAttention(nn.Module):
         # after-attention combine heads
         self.fc = nn.Conv2d(n_head * d_v, feat_dim, 1, bias=False)
 
+        # Performer
+        self.performer_cross_attn = CrossAttention(dim = 14, heads = 2) #(dim = 512, heads = 8) #(dim = 14, heads = 7)
+
     def forward(self, q, k, v, flow, attn_type="softmax"):
         # input: n x c x h x w
         # flow: n x 2 x h x w
@@ -798,24 +842,19 @@ class MultiheadAttention(nn.Module):
         n, c, h, w = q.shape
 
         # ------ Sampling K and V features ---------
-        sampling_grid = flow_to_grid(
-            flow, self.k_size
-        )  # return: src에서 각 local grid가 어떻게 움직여야 ref local grid가 되는지 # n x k**2, h, w, 2  # # [100, 48, 48, 2]
+        sampling_grid = flow_to_grid(flow, self.k_size)  # return: src에서 각 local grid가 어떻게 움직여야 ref local grid가 되는지 # n x k**2, h, w, 2  # # [100, 48, 48, 2]
         # sampled feature
         # n x k^2 x c x h x w
-        sample_k_feat = flow_guide_sampler(
-            k, sampling_grid, k_size=self.k_size
-        )  # [4, 25, 64, 48, 48] # ref에서 feature map의 local grid
+        sample_k_feat = flow_guide_sampler(k, sampling_grid, k_size=self.k_size)  # [4, 25, 64, 48, 48] # ref에서 feature map의 local grid
         sample_v_feat = flow_guide_sampler(v, sampling_grid, k_size=self.k_size)
 
         # Reshape for multi-head attention.
         # q: n x 1 x nhead x dk x h x w
         # k,v: n x k^2 x nhead x dk x h x w
         q = q.view(n, 1, n_head, d_k, h, w)  # [2, 1, 2, 7, 24, 24]
-        k = sample_k_feat.view(
-            n, self.k_size**2, n_head, d_k, h, w
-        )  # [2, 784, 2, 7, 24, 24]
+        k = sample_k_feat.view(n, self.k_size**2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
         v = sample_v_feat.view(n, self.k_size**2, n_head, d_v, h, w)
+
 
         # -------------- Attention -----------------
         if attn_type == "softmax":
@@ -823,6 +862,9 @@ class MultiheadAttention(nn.Module):
             q, attn = softmax_attention(q, k, v)
         elif attn_type == "dot":
             q, attn = dotproduct_attention(q, k, v)
+        elif attn_type == "performer":
+            q = performer_attention(q, k, v, performer_cross_attn=self.performer_cross_attn)
+            attn = None
         elif attn_type == "flash":
             q = flash_attention(q, k, v)
             attn = None
