@@ -259,7 +259,7 @@ class RegistFormer(nn.Module):
                 else:
                     _, flow = self.flow_estimator(src, ref, registration=True)  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
 
-                    flow = self.vecint(flow) #TODO: modified
+                    # flow = self.vecint(flow) #TODO: modified
 
                 src = self.crop_tensor_to_original(src, fixed_padding)
                 ref = self.crop_tensor_to_original(ref, fixed_padding)
@@ -828,6 +828,9 @@ class MultiheadAttention(nn.Module):
         # Performer
         self.performer_cross_attn = CrossAttention(dim = 14, heads = 2) #(dim = 512, heads = 8) #(dim = 14, heads = 7)
 
+        self.linear_k_reduce = nn.Linear(self.k_size**2, self.k_size**2 // 8, bias=False)
+        self.linear_v_reduce = nn.Linear(self.k_size**2, self.k_size**2 // 8, bias=False)
+
     def forward(self, q, k, v, flow, attn_type="softmax"):
         # input: n x c x h x w
         # flow: n x 2 x h x w
@@ -855,6 +858,14 @@ class MultiheadAttention(nn.Module):
         k = sample_k_feat.view(n, self.k_size**2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
         v = sample_v_feat.view(n, self.k_size**2, n_head, d_v, h, w)
 
+        # TODO: 여기수정
+        # k 차원 축소
+        k = self.linear_k_reduce(k.permute(0, 2, 3, 4, 5, 1))  # [n, h, w, n_head, d_k, 392]
+        k = k.permute(0, 5, 1, 2, 3, 4)  # [n, 392, n_head, d_k, h, w]
+
+        # v 차원 축소
+        v = self.linear_v_reduce(v.permute(0, 2, 3, 4, 5, 1))  # [n, h, w, n_head, d_v, 392]
+        v = v.permute(0, 5, 1, 2, 3, 4)  # [n, 392, n_head, d_v, h, w]
 
         # -------------- Attention -----------------
         if attn_type == "softmax":
