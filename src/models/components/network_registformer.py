@@ -92,7 +92,7 @@ class RegistFormer(nn.Module):
         # Define DAM.
         if self.dam_ft:
             assert self.dam_path != None
-
+        
         if self.dam_type == "synthesis_meta":
             from src.models.components.meta_synthesis import (
                 SynthesisMetaModule,
@@ -114,8 +114,8 @@ class RegistFormer(nn.Module):
             adjusted_state_dict = {k.replace("netG_A.", ""): v for k, v in model_state_dict.items()}
             self.DAM.load_state_dict(adjusted_state_dict, strict=False)
             self.DAM.eval()
-            # self.flow_estimator.load_state_dict(adjusted_state_dict, strict=False) #TODO: 이거 왜 flow_estimator였어..??
-            # self.flow_estimator.eval()
+            for param in self.DAM.parameters():
+                param.requires_grad = self.dam_ft
 
         elif self.dam_type == "munit":
             from src.models.components.network_adainGen import AdaINGen
@@ -125,6 +125,8 @@ class RegistFormer(nn.Module):
             adjusted_state_dict = {k.replace("netG_A.", ""): v for k, v in model_state_dict.items()}
             self.DAM_A.load_state_dict(adjusted_state_dict, strict=False)
             self.DAM_A.eval()
+            for param in self.DAM_A.parameters():
+                param.requires_grad = self.dam_ft
 
             self.DAM_B = AdaINGen(input_nc=1, output_nc=1, ngf=64)
             checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
@@ -132,6 +134,8 @@ class RegistFormer(nn.Module):
             adjusted_state_dict = {k.replace("netG_B.", ""): v for k, v in model_state_dict.items()}
             self.DAM_B.load_state_dict(adjusted_state_dict, strict=False)
             self.DAM_B.eval()
+            for param in self.DAM_B.parameters():
+                param.requires_grad = self.dam_ft
 
         # Define feature extractor.
         # self.unet_q = Unet(src_ch, feat_dim, feat_dim)
@@ -468,19 +472,19 @@ def softmax_attention(q, k, v):
     # n x 1(k^2) x nhead x d x h x w
     h, w = q.shape[-2], q.shape[-1]
 
-    q = q.permute(0, 2, 4, 5, 1, 3)  # n x nhead x h x w x 1 x d
-    k = k.permute(0, 2, 4, 5, 3, 1)  # n x nhead x h x w x d x k^2
-    v = v.permute(0, 2, 4, 5, 1, 3)  # n x nhead x h x w x k^2 x d
+    q = q.permute(0, 2, 4, 5, 1, 3)  # n, nhead, h, w, 1, d # 지금 보면 n,head,h,w가 다 보존되고 있는거야. 그에 독립적으로 d차원 벡터가 있는거.
+    k = k.permute(0, 2, 4, 5, 3, 1)  # n, nhead, h, w, d, k^2
+    v = v.permute(0, 2, 4, 5, 1, 3)  # n, nhead, h, w, k^2, d
 
     N = q.shape[-1]  # scaled attention
     attn = torch.matmul(
         q / N**0.5, k
-    )  # TODO: 이때 validation 튄다 [2, 2, 24, 24, 1, 784]
+    )  # TODO: 이때 validation 튄다
     attn = F.softmax(attn, dim=-1)
-    output = torch.matmul(attn, v)
+    output = torch.matmul(attn, v) # n, nhead, h, w, 1, d
 
-    output = output.permute(0, 4, 1, 5, 2, 3).squeeze(1)  # [4, 4, 16, 48, 48]
-    attn = attn.permute(0, 4, 1, 5, 2, 3).squeeze(1)  # [4, 4, 25, 48, 48]
+    output = output.permute(0, 4, 1, 5, 2, 3).squeeze(1) # n, nhead, d, h, w
+    attn = attn.permute(0, 4, 1, 5, 2, 3).squeeze(1) 
 
     return output, attn
 
@@ -509,30 +513,17 @@ def performer_attention(q, k, v, performer_cross_attn = None, nb_features=None, 
     n, _, nhead, d, h, w = q.shape
     _, kk, _, _, _, _ = k.shape
 
-    q = q.permute(0, 2, 4, 5, 1, 3)  # n x nhead x h x w x 1 x d
-    k = k.permute(0, 2, 4, 5, 3, 1)  # n x nhead x h x w x d x k^2
-    v = v.permute(0, 2, 4, 5, 3, 1)  # n x nhead x h x w x d x k^2
-
-    # q = q.reshape(n * nhead * h * w, 1, d)
-    # k = k.reshape(n * nhead * h * w, d, kk)
-    # v = v.reshape(n * nhead * h * w, d, kk)
+    q = q.permute(0, 2, 4, 5, 1, 3)  # n, nhead, h, w, 1, d
+    k = k.permute(0, 2, 4, 5, 1, 3)  # n, nhead, h, w, k^2, d
+    v = v.permute(0, 2, 4, 5, 1, 3)  # n, nhead, h, w, k^2, d
     
-    #두번째
-    q = q.reshape(n, h * w * 1, nhead * d)
-    k = k.reshape(n,  h * w * kk, nhead * d)
-    v = v.reshape(n,  h * w * kk, nhead * d)
+    # q = q.reshape(n, h * w * 1, nhead * d) # n, h * w * 1, nhead * d
+    # k = k.reshape(n,  h * w * kk, nhead * d) # n, h * w * k^2, nhead * d
+    # v = v.reshape(n,  h * w * kk, nhead * d) # n, h * w * k^2, nhead * d
 
-    # print("q ", q.shape) # n x nhead x h x w, 1, d (7680, 1, 7)
-    # print("k ", k.shape) # n x nhead x h x w, d, k^2 (7680, 7, 784) -> 7680, 7, 7
-    # print("v ", v.shape) # n x nhead x h x w, d, k^2 (7680, 7, 784) -> 7680, 7, 7 test위해
+    output = performer_cross_attn(q, k, v, context=k) # n, h * w * 1, nhead * d  /New: n, nhead, h, w, 1, d
 
-    # q = torch.randn(1, 1024, 512).cuda() # n, h*w*1, nhead*d
-    # k = torch.randn(1, 512, 512).cuda() # => n, h*w*k^2, nhead*d
-    # v = torch.randn(1, 512, 512).cuda()
-
-    output = performer_cross_attn(q, k, v, context=k) #QQ 1,1024,512
-
-    output = output.reshape(n, 1, nhead, d, h, w)
+    output = output.permute(0, 1, 5, 2, 3, 4).squeeze(-1) # n, nhead, d, h, w
 
     return output
 
@@ -826,10 +817,27 @@ class MultiheadAttention(nn.Module):
         self.fc = nn.Conv2d(n_head * d_v, feat_dim, 1, bias=False)
 
         # Performer
-        self.performer_cross_attn = CrossAttention(dim = 14, heads = 2) #(dim = 512, heads = 8) #(dim = 14, heads = 7)
+        self.performer_cross_attn = CrossAttention(dim = 8, heads = 2) #(dim = 14, heads = 2)
 
-        self.linear_k_reduce = nn.Linear(self.k_size**2, self.k_size**2 // 8, bias=False)
-        self.linear_v_reduce = nn.Linear(self.k_size**2, self.k_size**2 // 8, bias=False)
+        # self.linear_k_reduce = nn.Linear(self.k_size**2, self.k_size**2 // 8, bias=False)
+        # self.linear_v_reduce = nn.Linear(self.k_size**2, self.k_size**2 // 8, bias=False)
+
+        self.k_reduce_conv = nn.Conv2d(
+            in_channels=k_size**2,  # Input channels: grid size
+            out_channels=k_size**2 // 4,  # Output channels (adjust as needed)
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,  # Ensure learnability
+        )
+        self.v_reduce_conv = nn.Conv2d(
+            in_channels=k_size**2,
+            out_channels=k_size**2 // 4,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,
+        )
 
     def forward(self, q, k, v, flow, attn_type="softmax"):
         # input: n x c x h x w
@@ -858,16 +866,32 @@ class MultiheadAttention(nn.Module):
         k = sample_k_feat.view(n, self.k_size**2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
         v = sample_v_feat.view(n, self.k_size**2, n_head, d_v, h, w)
 
-        # TODO: 여기수정
-        # k 차원 축소
-        k = self.linear_k_reduce(k.permute(0, 2, 3, 4, 5, 1))  # [n, h, w, n_head, d_k, 392]
-        k = k.permute(0, 5, 1, 2, 3, 4)  # [n, 392, n_head, d_k, h, w]
+    
+        #############################################################################################
+        # TODO: Ver1. linear
+        # # k 차원 축소
+        # k = self.linear_k_reduce(k.permute(0, 2, 3, 4, 5, 1))  # [n, h, w, n_head, d_k, 392]
+        # k = k.permute(0, 5, 1, 2, 3, 4)  # [n, 392, n_head, d_k, h, w]
 
-        # v 차원 축소
-        v = self.linear_v_reduce(v.permute(0, 2, 3, 4, 5, 1))  # [n, h, w, n_head, d_v, 392]
-        v = v.permute(0, 5, 1, 2, 3, 4)  # [n, 392, n_head, d_v, h, w]
+        # # v 차원 축소
+        # v = self.linear_v_reduce(v.permute(0, 2, 3, 4, 5, 1))  # [n, h, w, n_head, d_v, 392]
+        # v = v.permute(0, 5, 1, 2, 3, 4)  # [n, 392, n_head, d_v, h, w]
+        #############################################################################################
+        # TODO: Ver2. conv -> 이거하면 그냥 ref를 그대로 복제하는거같은데. 이걸 줄이는게 왜 원본 복제를 하게할까
+        # k = k.permute(0, 2, 3, 1, 4, 5).reshape(n * n_head * d_k, self.k_size**2, h, w)
+        # v = v.permute(0, 2, 3, 1, 4, 5).reshape(n * n_head * d_k, self.k_size**2, h, w)
 
-        # -------------- Attention -----------------
+        # # Apply independent reductions
+        # # n * nhead * dk, k^2/?, h, w
+        # k = self.k_reduce_conv(k)
+        # v = self.v_reduce_conv(v)
+
+        # # Restore original batch structure
+        # k = k.reshape(n, n_head, d_k, self.k_size**2 // 4, h, w).permute(0, 3, 1, 2, 4, 5)
+        # v = v.reshape(n, n_head, d_k, self.k_size**2 // 4, h, w).permute(0, 3, 1, 2, 4, 5)
+        #############################################################################################
+
+        # -------------- Attention ----------------- (여기서 10GB 정도나 먹어) 나머지에서 이미 12GB를 먹는다는 얘기. 나머지에서도 메모리 소비가 이미 크다.
         if attn_type == "softmax":
             # n x 1 x nhead x dk x h x w --> n x nhead x dv x h x w
             q, attn = softmax_attention(q, k, v)
