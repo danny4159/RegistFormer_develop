@@ -152,11 +152,11 @@ class RegistFormerModule(BaseModule_AtoB):
             loss_G = self.backward_G(real_a, real_b, fake_b)
             self.manual_backward(loss_G)
             self.clip_gradients(
-                optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+                optimizer_G_A, gradient_clip_val=0.1, gradient_clip_algorithm="norm"
             )
             if self.params.lambda_nce != 0:
                 self.clip_gradients(
-                        optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+                        optimizer_F_A, gradient_clip_val=0.1, gradient_clip_algorithm="norm"
                 )
             optimizer_G_A.step()
             if self.params.lambda_nce != 0:
@@ -170,7 +170,7 @@ class RegistFormerModule(BaseModule_AtoB):
                 loss_D_A = self.backward_D_A(real_b, fake_b)
                 self.manual_backward(loss_D_A)
                 self.clip_gradients(
-                    optimizer_D_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
+                    optimizer_D_A, gradient_clip_val=0.1, gradient_clip_algorithm="norm"
                 )
                 optimizer_D_A.step()
 

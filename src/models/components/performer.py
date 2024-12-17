@@ -96,32 +96,52 @@ class PreShiftTokens(nn.Module):
 # transcribed from jax to pytorch from
 # https://github.com/google-research/google-research/blob/master/performer/fast_attention/jax/fast_attention.py
 
-def softmax_kernel(data, *, projection_matrix, is_query, normalize_data=True, eps=1e-4, device = None):
-    b, h, *_ = data.shape # [7680, 7, 1, 1]
-    # print("softmax kernel, data: ", data.shape)
-    data_normalizer = (data.shape[-1] ** -0.25) if normalize_data else 1.
-
-    ratio = (projection_matrix.shape[0] ** -0.5) 
-
-    projection = repeat(projection_matrix, 'j d -> b h j d', b = b, h = h) # [36, 7] -> [7680, 7, 36, 7]
-    projection = projection.type_as(data)
+def softmax_kernel(data, *, projection_matrix, is_query, normalize_data=True, eps=1e-12, device = None): # eps=1e-4
+    # q: n, nhead, h * w * 1, d
+    # k: n, nhead, h * w * k^2, d
+    # v: n, nhead, h * w * k^2, d
     
-    data_dash = torch.einsum('...id,...jd->...ij', (data_normalizer * data), projection) # [7680, 7, 1, 1], [7680, 7, 36, 7] = [7680, 7, 1, 36]
-    # [7680, 7, 7, 112], [7680, 7, 36, 7] = 에러   #QQ. [1,8,1024,64], [1,8,266,64]
-    diag_data = data ** 2
-    diag_data = torch.sum(diag_data, dim=-1)
+    # n, nhead, h, w, 1, d
+    # n, nhead, h, w, k^2, d 
+    # n, nhead, h, w, k^2, d 
+    
+    # b, h, *_ = data.shape # [7680, 7, 1, 1]
+    n, nhead, h, w, kk, d = data.shape # q: kk=1, k: kk=1
+    # print("softmax kernel, data: ", data.shape)
+    data_normalizer = (data.shape[-1] ** -0.25) if normalize_data else 1. # d ^ -0.25 == 0.614 (if d=7)
+
+    ratio = (projection_matrix.shape[0] ** -0.5) # project_size ^ -0.5 = 0.577
+
+    projection = repeat(projection_matrix, 'j d -> n nhead h w j d', n=n, nhead=nhead, h=h, w=w) # [project_size, d] -> [n, nhead, project_size, d] (n, head 차원 만들어줘서 shape 맞춰주는 복제 작업)
+    projection = projection.type_as(data)                                                   # n, head, h, w, project_size, d
+    #TODO: 왜 normalize 해야하나? 꼭 해야하나?
+    data_dash = torch.einsum('...id,...jd->...ij', (data_normalizer * data), projection) # n, nhead, h * w * 1, d -> n, nhead, h * w * 1, project_size
+                                                                                    # New: n, nhead, h, w, 1, d  @  n, head, h, w, project_size, d => n, nhead, h, w, 1, project_size  
+    diag_data = data ** 2 # diag_data란? data의 d차원에 대해 값을 sum해서 norm (각 token의 대표값을 응축했어)
+    diag_data = torch.sum(diag_data, dim=-1) # 각 token의 d 차원을 그냥 합해. n, nhead, h, w, 1
     diag_data = (diag_data / 2.0) * (data_normalizer ** 2)
-    diag_data = diag_data.unsqueeze(dim=-1)
-
+    diag_data = diag_data.unsqueeze(dim=-1) # n, nhead, h, w, 1, 1
+    # TODO: data_dash란? data를 norm해서 d를 다른 차원으로 projection시킨거. (norm을 꼭 해줘야하는건가.) 
+    ####################################################################################################
+    # 원래코드
     if is_query:
-        data_dash = ratio * (
+        data_dash = ratio * ( # data_dash를 대표값으로 빼주고 projection시킨것의 max값도 빼줘 (최대한 각 token의 d를 )
             torch.exp(data_dash - diag_data -
-                    torch.amax(data_dash, dim=-1, keepdim=True).detach()) + eps)
-    else:
+                    torch.amax(data_dash, dim=-1, keepdim=True).detach()) + eps) # FIXME: 문제찾았다. 각 token의 d에서 나오는 값이 현저히 작은데, eps은 너무 크고, 거기에 ratio를 곱하니, d차원에 해당하는 값들이 그냥 똑같은 값으로 도배된다. 학습이 안됨.
+    else:                                                                        # FIXME: 어떻게 해결할까. 최소한 0.0001보다는 큰값이 나와야해
         data_dash = ratio * (
-            torch.exp(data_dash - diag_data - torch.amax(data_dash, dim=(-1, -2), keepdim=True).detach()) + eps)
+            torch.exp(data_dash - diag_data - torch.amax(data_dash, dim=(-1, -2), keepdim=True).detach()) + eps) # TODO: Memory issue
+    ####################################################################################################
+    # 내가 바꾼 코드
+    # if is_query:
+    #     data_dash = ratio * ( # data_dash를 대표값으로 빼주고 projection시킨것의 max값도 빼줘 (최대한 각 token의 d를 )
+    #         torch.exp(data_dash - diag_data) + eps) # FIXME: 문제찾았다. 각 token의 d에서 나오는 값이 현저히 작은데, eps은 너무 크고, 거기에 ratio를 곱하니, d차원에 해당하는 값들이 그냥 똑같은 값으로 도배된다. 학습이 안됨.
+    # else:                                                                        # FIXME: 어떻게 해결할까. 최소한 0.0001보다는 큰값이 나와야해
+    #     data_dash = ratio * (
+    #         torch.exp(data_dash - diag_data) + eps) # TODO: Memory issue
+    ####################################################################################################
 
-    return data_dash.type_as(data)
+    return data_dash.type_as(data) 
 
 def generalized_kernel(data, *, projection_matrix, kernel_fn = nn.ReLU(), kernel_epsilon = 0.001, normalize_data = True, device = None):
     b, h, *_ = data.shape
@@ -177,7 +197,7 @@ def gaussian_orthogonal_random_matrix(nb_rows, nb_columns, scaling = 0, device =
 
 # non-causal linear attention
 def linear_attention(q, k, v):
-    k_cumsum = k.sum(dim = -2)
+    k_cumsum = k.sum(dim = -2) # k의 token별로 sum
     D_inv = 1. / torch.einsum('...nd,...d->...n', q, k_cumsum.type_as(q))
     context = torch.einsum('...nd,...ne->...de', k, v)
     out = torch.einsum('...de,...nd,...n->...ne', context, q, D_inv)
@@ -231,6 +251,7 @@ class FastAttention(nn.Module):
     def __init__(self, dim_heads, nb_features = None, ortho_scaling = 0, causal = False, generalized_attention = False, kernel_fn = nn.ReLU(), no_projection = False):
         super().__init__()
         nb_features = default(nb_features, int(dim_heads * math.log(dim_heads))) # 여기서 각 head의 dim을 고차원으로 보내도록 결정
+        # nb_features = 4
         # nb_features = 2 #TODO: 메모리 이슈로 일부러
         # print("dim_heads :",dim_heads)
         # print("nb_features :",nb_features)
@@ -268,6 +289,14 @@ class FastAttention(nn.Module):
         del projections
 
     def forward(self, q, k, v): #TODO:두번째
+        # q: n, nhead, h * w * 1, d
+        # k: n, nhead, h * w * k^2, d
+        # v: n, nhead, h * w * k^2, d
+
+        # n, nhead, h, w, 1, d
+        # n, nhead, h, w, k^2, d 
+        # n, nhead, h, w, k^2, d 
+
         device = q.device
 
         if self.no_projection:
@@ -279,13 +308,13 @@ class FastAttention(nn.Module):
             q, k = map(create_kernel, (q, k))
 
         else:
-            create_kernel = partial(softmax_kernel, projection_matrix = self.projection_matrix, device = device) # [36, 7]
-            q = create_kernel(q, is_query = True) # [7680, 7, 1, 1] -> [7680, 7, 1, 36]  # QQ 1,8,1024,64 -> 1,8,1024,266
-            k = create_kernel(k, is_query = False) # QQ. 1,8,512,64 -> 1,8,512,266
+            create_kernel = partial(softmax_kernel, projection_matrix = self.projection_matrix, device = device) # [project_size, d] # project_size: init에서 계산
+            q = create_kernel(q, is_query = True) # q: n, nhead, h * w * 1, project_size    / New: n, nhead, h, w, 1, d
+            k = create_kernel(k, is_query = False) # k: n, nhead, h * w * k^2, project_size    / New: n, nhead, h, w, k^2, d 
 
         attn_fn = linear_attention if not self.causal else self.causal_linear_fn
-        out = attn_fn(q, k, v)
-        return out
+        out = attn_fn(q, k, v) # q(kv)연산이 이뤄져. 이때 v의 마지막 dim은 그대로 d 이므로 project_size가 아니라 d가 나온다.
+        return out # q: n, nhead, h * w * 1, d  / New: n, nhead, h, w, 1, d
 
 # a module for keeping track of when to update the projections
 
@@ -393,7 +422,7 @@ class Attention(nn.Module):
         dim,
         causal = False,
         heads = 2, #8,
-        dim_head = 7, #14, #64, # attn_dim/head에 맞춰서 해줘야하는듯
+        dim_head = 4, #14, #64, # attn_dim/head에 맞춰서 해줘야하는듯
         local_heads = 0,
         local_window_size = 256,
         nb_features = None,
@@ -423,7 +452,15 @@ class Attention(nn.Module):
 
     # def forward(self, x, pos_emb = None, context = None, mask = None, context_mask = None, **kwargs):
     def forward(self, q, k = None, v = None, pos_emb = None, mask = None, context_mask = None, **kwargs): #TODO:첫번째
-        b, n, _, h, gh = *q.shape, self.heads, self.global_heads
+        # q: n, h * w * 1, nhead * d
+        # k: n, h * w * k^2, nhead * d
+        # v: n, h * w * k^2, nhead * d
+
+        # n, nhead, h, w, 1, d
+        # n, nhead, h, w, k^2, d 
+        # n, nhead, h, w, k^2, d 
+
+        # b, n, _, h, gh = *q.shape, self.heads, self.global_heads
 
         cross_attend = exists(k)
 
@@ -433,9 +470,9 @@ class Attention(nn.Module):
         # q, k, v = self.to_q(x), self.to_k(context), self.to_v(context) # 내가 수정
         # q, k, v = self.to_q(q), self.to_k(k), self.to_v(v) # TODO: 이건빼라
         
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v)) # 7680,1,7 -> 7680,7,1,1 / # 7680,7,784 -> 7680,7,7,112
-        (q, lq), (k, lk), (v, lv) = map(lambda t: (t[:, :gh], t[:, gh:]), (q, k, v))
-        ## QQ. 1,1024,512 -> 1,8,1024,64 #b,h,n,d    
+        # q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v)) # k: n, nhead, h * w * k^2, d (nhead와 d를 쪼개)
+        # (q, lq), (k, lk), (v, lv) = map(lambda t: (t[:, :gh], t[:, gh:]), (q, k, v)) # TODO 없애도 될듯?
+
         attn_outs = []
 
         if not empty(q):
@@ -446,18 +483,18 @@ class Attention(nn.Module):
             if exists(pos_emb) and not cross_attend:
                 q, k = apply_rotary_pos_emb(q, k, pos_emb)
 
-            out = self.fast_attention(q, k, v) # 7680,7,1,1 # QQ. 1,8,1024,64 / 1,8,512,64
+            out = self.fast_attention(q, k, v) # n, nhead, h * w * 1, project_size  # n, nhead, h, w, 1, d
             attn_outs.append(out)
 
-        if not empty(lq):
-            assert not cross_attend, 'local attention is not compatible with cross attention'
-            out = self.local_attn(lq, lk, lv, input_mask = mask)
-            attn_outs.append(out)
+        # if not empty(lq):
+        #     assert not cross_attend, 'local attention is not compatible with cross attention'
+        #     out = self.local_attn(lq, lk, lv, input_mask = mask)
+        #     attn_outs.append(out)
 
-        out = torch.cat(attn_outs, dim = 1)
-        out = rearrange(out, 'b h n d -> b n (h d)') # # 7680,1,7
+        out = torch.cat(attn_outs, dim = 1) # q: n, nhead, h * w * 1, d
+        # out = rearrange(out, 'b h n d -> b n (h d)') # q: n, h * w * 1, nhead * d     // n, nhead, h, w, 1, d 이게 돼야해
         # out =  self.to_out(out) # TODO: 이건빼라
-        return self.dropout(out)
+        return self.dropout(out) # n, h * w * 1, nhead * d  / New: n, nhead, h, w, 1, d
 
 class SelfAttention(Attention):
     def forward(self, *args, context = None, **kwargs):
