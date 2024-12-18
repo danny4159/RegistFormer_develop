@@ -201,7 +201,13 @@ class RegistFormer(nn.Module):
         self.vecint = VecInt(self.flow_size, self.int_steps)
 
 
-    def forward(self, src, ref, mask=None, for_nce=False, for_src=False):
+    # def forward(self, src, ref, mask=None, for_nce=False, for_src=False):
+    def forward(self, merged_input, mask=None, for_nce=False, for_src=False):
+
+        channels = merged_input.shape[1] // 2
+        src = merged_input[:, :channels, :, :]
+        ref = merged_input[:, channels:, :, :]
+        
         assert (
             src.shape == ref.shape
         ), "Shapes of source and reference images \
@@ -712,7 +718,7 @@ class TransformerUnit(nn.Module):
         self.pos_en_flag = pos_en_flag
 
         self.pos_en = PosEnSine(self.feat_dim // 2)
-        self.attn = MultiheadAttention(feat_dim, n_head, k_size=k_size)
+        self.attn = MultiheadAttention(feat_dim, n_head, k_size=k_size, attn_type=self.attn_type)
 
         mlp_hidden_dim = int(feat_dim * mlp_ratio)
         self.mlp = MLP(in_features=feat_dim, hidden_features=mlp_hidden_dim)
@@ -796,7 +802,7 @@ class Unet(nn.Module):
 
 
 class MultiheadAttention(nn.Module):
-    def __init__(self, feat_dim, n_head, k_size=5, d_k=None, d_v=None, attn=None):
+    def __init__(self, feat_dim, n_head, k_size=5, d_k=None, d_v=None, attn=None, attn_type="softmax"):
         super().__init__()
         if d_k is None:
             d_k = feat_dim // n_head
@@ -817,27 +823,28 @@ class MultiheadAttention(nn.Module):
         self.fc = nn.Conv2d(n_head * d_v, feat_dim, 1, bias=False)
 
         # Performer
-        self.performer_cross_attn = CrossAttention(dim = 8, heads = 2) #(dim = 14, heads = 2)
+        if attn_type == "performer":
+            self.performer_cross_attn = CrossAttention(dim = 8, heads = 2) #(dim = 14, heads = 2)
 
         # self.linear_k_reduce = nn.Linear(self.k_size**2, self.k_size**2 // 8, bias=False)
         # self.linear_v_reduce = nn.Linear(self.k_size**2, self.k_size**2 // 8, bias=False)
 
-        self.k_reduce_conv = nn.Conv2d(
-            in_channels=k_size**2,  # Input channels: grid size
-            out_channels=k_size**2 // 4,  # Output channels (adjust as needed)
-            kernel_size=1,
-            stride=1,
-            padding=0,
-            bias=True,  # Ensure learnability
-        )
-        self.v_reduce_conv = nn.Conv2d(
-            in_channels=k_size**2,
-            out_channels=k_size**2 // 4,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-            bias=True,
-        )
+        # self.k_reduce_conv = nn.Conv2d(
+        #     in_channels=k_size**2,  # Input channels: grid size
+        #     out_channels=k_size**2 // 4,  # Output channels (adjust as needed)
+        #     kernel_size=1,
+        #     stride=1,
+        #     padding=0,
+        #     bias=True,  # Ensure learnability
+        # )
+        # self.v_reduce_conv = nn.Conv2d(
+        #     in_channels=k_size**2,
+        #     out_channels=k_size**2 // 4,
+        #     kernel_size=1,
+        #     stride=1,
+        #     padding=0,
+        #     bias=True,
+        # )
 
     def forward(self, q, k, v, flow, attn_type="softmax"):
         # input: n x c x h x w
@@ -877,7 +884,7 @@ class MultiheadAttention(nn.Module):
         # v = self.linear_v_reduce(v.permute(0, 2, 3, 4, 5, 1))  # [n, h, w, n_head, d_v, 392]
         # v = v.permute(0, 5, 1, 2, 3, 4)  # [n, 392, n_head, d_v, h, w]
         #############################################################################################
-        # TODO: Ver2. conv -> 이거하면 그냥 ref를 그대로 복제하는거같은데. 이걸 줄이는게 왜 원본 복제를 하게할까
+        # TODO: Ver2. conv -> 이거하면 그냥 ref를 그대로 복제한다. NCE를 안만 높여도. 이걸 줄이는게 왜 원본 복제를 하게할까
         # k = k.permute(0, 2, 3, 1, 4, 5).reshape(n * n_head * d_k, self.k_size**2, h, w)
         # v = v.permute(0, 2, 3, 1, 4, 5).reshape(n * n_head * d_k, self.k_size**2, h, w)
 

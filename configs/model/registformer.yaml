@@ -30,7 +30,7 @@ netG_A:
   daca_loc: null
   flow_type: 'voxelmorph' # MR_CT_Pelvis: 'voxelmorph' / 'zero'-> Ablation / 3T7T: 'voxelmorph_lightning'
   # flow_type: 'grad_icon' 
-  dam_type: 'synthesis_meta' # 'munit'
+  dam_type: 'proposed_synthesis' # 'synthesis_meta', 'munit', 'proposed_synthesis'
   fuse_type: null
   flow_model_path: 'pretrained/registration/Voxelmorph_Loss_MSE_MaskMSE1_0075.pt'
   # flow_model_path: 'pretrained/registration/GradICON/epoch001-fid20.69-gc0.3429-nmi0.3991-sharp64.19.ckpt'
@@ -66,8 +66,8 @@ netF_A: # For PatchNCELoss
 params: # Other params
   lambda_ctx: 1
   lambda_gan: 0.1 #0 # 0.1 
-  lambda_mind: 1 
-  lambda_nce: 0
+  lambda_mind: 0 # 1 
+  lambda_nce: 0.1
   lambda_l1: 0
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
@@ -75,6 +75,7 @@ params: # Other params
   batch_size: ${data.batch_size}
   nce_on_vgg: False
   eval_on_align: ${data.eval_on_align}
+  use_sliding_inference: ${data.use_sliding_inference}
 
   #Ablation
   ran_shift: 10 #null # "Put null or Interger" / random shift to ground truth when calculating Contextual Loss

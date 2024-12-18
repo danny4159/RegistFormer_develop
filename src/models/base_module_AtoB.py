@@ -10,6 +10,7 @@ from torchmetrics.image.kid import KernelInceptionDistance
 from src.metrics.sharpness import SharpnessMetric
 from torchmetrics.image import StructuralSimilarityIndexMeasure, PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from monai.inferers import SlidingWindowInferer
 
 gray2rgb = lambda x: torch.cat((x, x, x), dim=1) if x.shape[1] == 1 else x
 # norm_0_to_1 = lambda x: (x + 1) / 2
@@ -61,7 +62,14 @@ class BaseModule_AtoB(LightningModule):  # single direction
         return gc, nmi, fid, kid, sharpness
 
     def forward(self, a: torch.Tensor, b: torch.Tensor):
-        return self.netG_A(a, b)
+        merged_input = torch.cat((a, b), dim=1)
+        
+        if self.params.use_sliding_inference:
+            inferer = SlidingWindowInferer(roi_size=(96, 96))
+            pred = inferer(inputs=merged_input, network=self.netG_A) #inputs 손봐야해
+            return pred
+        
+        return self.netG_A(merged_input)
 
     def model_step(self, batch: Any):
         real_a, real_b = batch
