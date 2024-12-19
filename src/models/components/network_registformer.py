@@ -197,8 +197,8 @@ class RegistFormer(nn.Module):
                     param.requires_grad = True
 
         # VecInt initial
-        self.int_steps = kwargs.get('int_steps', 7)  # 적분 단계 수 (기본값 7)
-        self.vecint = VecInt(self.flow_size, self.int_steps)
+        # self.int_steps = kwargs.get('int_steps', 7)  # 적분 단계 수 (기본값 7)
+        # self.vecint = VecInt(self.flow_size, self.int_steps)
 
 
     # def forward(self, src, ref, mask=None, for_nce=False, for_src=False):
@@ -210,8 +210,7 @@ class RegistFormer(nn.Module):
         
         assert (
             src.shape == ref.shape
-        ), "Shapes of source and reference images \
-                                        mismatch."
+        ), "Shapes of source and reference images mismatch. Source shape: {src.shape}, Reference shape: {ref.shape}"
         device = src.device
         self.flow_estimator.to(device)
         moved = None
