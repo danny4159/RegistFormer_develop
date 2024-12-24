@@ -63,7 +63,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
     def forward(self, a: torch.Tensor, b: torch.Tensor):
                     
-        if type(self.netG_A).__name__ not in ["RegistFormer", "ProposedSynthesisModule"]:
+        if type(self.netG_A).__name__ in ["RegistFormer", "ProposedSynthesisModule"]:
             merged_input = torch.cat((a, b), dim=1)
             
             if self.params.use_sliding_inference:
