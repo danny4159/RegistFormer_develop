@@ -75,6 +75,27 @@ class ImageLoggingCallback(Callback):
                 resize(err_b[0], self.first_image_size),
             ])
 
+        elif len(res) == 5:
+            self.ngrid = 5
+            a, b, c, preds_b, preds_c = res
+            err_a = torch.abs(b - preds_b)
+            err_b = torch.abs(c - preds_c)
+
+            if len(self.img_grid) == 0:
+                self.first_image_size = a[0].shape[1:3]
+
+            self.img_grid.extend([
+                resize(((a[0] + 1) / 2), self.first_image_size),
+                resize(((preds_b[0] + 1) / 2), self.first_image_size),
+                resize(((b[0] + 1) / 2), self.first_image_size),
+                resize(((preds_c[0] + 1) / 2), self.first_image_size),
+                resize(((c[0] + 1) / 2), self.first_image_size),
+            ])
+            self.err_grid.extend([
+                resize(err_a[0], self.first_image_size),
+                resize(err_b[0], self.first_image_size),
+            ])
+
         elif len(res) == 4:
             self.ngrid = 4
             a, b, preds_a, preds_b = res
@@ -300,26 +321,28 @@ class ImageSavingCallback(Callback):
         return a_np, b_np, c_np, d_np, e_np, f_np
 
     @staticmethod
-    def change_numpy_nii(a, b, c, d, flag_normalize=True):
+    def change_numpy_nii(a, b, c, d, e=None, flag_normalize=True):
         assert (
             a.ndim == b.ndim == c.ndim == d.ndim == 3
         ), "All input arrays must have the same number of dimensions (3)"
 
         if flag_normalize:
             # scale to [0, 1] and [0, 255]
-            a, b, c, d = (
+            a, b, c, d, e = (
                 ((a + 1) / 2) * 255,
                 ((b + 1) / 2) * 255,
                 ((c + 1) / 2) * 255,
                 ((d + 1) / 2) * 255,
+                ((e + 1) / 2) * 255,
             )
 
             # type to np.int16
-            a, b, c, d = (
+            a, b, c, d, e= (
                 a.astype(np.int16),
                 b.astype(np.int16),
                 c.astype(np.int16),
                 d.astype(np.int16),
+                e.astype(np.int16),
             )
 
         # transpose 1, 2 dim (for viewing on ITK-SNAP)
@@ -331,22 +354,24 @@ class ImageSavingCallback(Callback):
         # )
 
         # flip rows and columns (행과 열 반전) -> Align with original image
-        a, b, c, d = (
+        a, b, c, d, e = (
             a[::-1, ::-1, :],
             b[::-1, ::-1, :],
             c[::-1, ::-1, :],
             d[::-1, ::-1, :] if d is not None else None,
+            e[::-1, ::-1, :] if e is not None else None,
         )
 
         # Create Nifti1Image for each
-        a_nii, b_nii, c_nii, d_nii = (
+        a_nii, b_nii, c_nii, d_nii, e_nii = (
             nib.Nifti1Image(a, np.eye(4)),
             nib.Nifti1Image(b, np.eye(4)),
             nib.Nifti1Image(c, np.eye(4)),
             nib.Nifti1Image(d, np.eye(4)),
+            nib.Nifti1Image(e, np.eye(4)),
         )
 
-        return a_nii, b_nii, c_nii, d_nii
+        return a_nii, b_nii, c_nii, d_nii, e_nii
     
     @staticmethod
     def change_numpy_tif(a, b, a2, b2, preds_a, preds_b):
@@ -397,19 +422,23 @@ class ImageSavingCallback(Callback):
         preds_b_tif.save(os.path.join(folder_path, f"{subject_number}_preds_b.tif"))
         return
     
-    def saving_to_nii(self, a, b, preds_a, preds_b=None):
+    def saving_to_nii(self, a, b, preds_a, preds_b=None, preds_c=None):
         if preds_a is None:
             preds_a = torch.zeros_like(a)
         if preds_b is None:
-            preds_b = torch.zeros_like(b)
+            preds_b = torch.zeros_like(a)
+        if preds_c is None:
+            preds_c = torch.zeros_like(a)
             
-        a, b, preds_a, preds_b, _, _= self.change_torch_numpy(a, b, preds_a, preds_b)
+        a, b, preds_a, preds_b, preds_c, _= self.change_torch_numpy(a, b, preds_a, preds_b, preds_c)
         if a.ndim == 2: # 2D image
             self.img_a.append(a)
             self.img_b.append(b)
             self.img_preds_a.append(preds_a)
             if preds_b is not None:
                 self.img_preds_b.append(preds_b)
+            if preds_c is not None:
+                self.img_preds_c.append(preds_c)
 
             if len(self.img_a) == self.subject_slice_num[0]:
                 a_nii = np.stack(self.img_a, -1)
@@ -419,10 +448,15 @@ class ImageSavingCallback(Callback):
                     preds_b_nii = np.stack(self.img_preds_b, -1)
                 else:
                     preds_b_nii = a_nii * 0  # Placeholder if preds_b is None
+                if preds_c is not None:
+                    preds_c_nii = np.stack(self.img_preds_c, -1)
+                else:
+                    preds_c_nii = a_nii * 0
+
 
                 # convert numpy to nii
-                a_nii, b_nii, preds_a_nii, preds_b_nii = self.change_numpy_nii(
-                    a_nii, b_nii, preds_a_nii, preds_b_nii, flag_normalize=self.flag_normalize
+                a_nii, b_nii, preds_a_nii, preds_b_nii, preds_c_nii = self.change_numpy_nii(
+                    a_nii, b_nii, preds_a_nii, preds_b_nii, preds_c_nii, flag_normalize=self.flag_normalize
                 )
                 # save nii image to (.nii) file
                 self.save_nii(
@@ -497,6 +531,7 @@ class ImageSavingCallback(Callback):
         self.img_b = []
         self.img_preds_a = []
         self.img_preds_b = []
+        self.img_preds_c = []
         self.i = 0
         self.subject_slice_num = []
         self.subject_number = 1
@@ -569,13 +604,20 @@ class ImageSavingCallback(Callback):
                     self.saving_to_nii(a, b, a2, b2, preds_a, preds_b)
                 elif self.data_type == 'photo':
                     self.saving_to_tif(a, b, a2, b2, preds_a, preds_b)
-                
-            if len(res) == 4:
+            
+            elif len(res) == 5:
+                a, b, c, preds_b, preds_c = res
+                if self.data_type == 'nifti':
+                    self.saving_to_nii(a, b, c, preds_b, preds_c)
+                elif self.data_type == 'photo':
+                    self.saving_to_tif(a, b, preds_a, preds_b)
+
+            elif len(res) == 4:
                 a, b, preds_a, preds_b = res
                 if self.data_type == 'nifti':
                     self.saving_to_nii(a, b, preds_a, preds_b)
-                elif self.data_type == 'photo':
-                    self.saving_to_tif(a, b, preds_a, preds_b)
+                # elif self.data_type == 'photo':
+                #     self.saving_to_tif(a, b, preds_a, preds_b)
 
             elif len(res) == 3:
                 a, b, preds_b = res

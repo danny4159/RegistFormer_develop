@@ -40,6 +40,7 @@ class ResnetGenerator(nn.Module):
         """
         assert(n_blocks >= 0)
         super(ResnetGenerator, self).__init__()
+        self.output_nc = output_nc
         self.opt = opt
 
         norm_layer = get_norm_layer(norm_type=norm_layer)
@@ -118,6 +119,12 @@ class ResnetGenerator(nn.Module):
         else:
             """Standard forward"""
             fake = self.model(input)
+            
+            if self.output_nc == 2:
+                fake_0 = fake[:, 0, :, :].unsqueeze(1)
+                fake_1 = fake[:, 1, :, :].unsqueeze(1) 
+                return fake_0, fake_1
+            
             return fake
 
 

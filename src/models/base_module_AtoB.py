@@ -62,7 +62,8 @@ class BaseModule_AtoB(LightningModule):  # single direction
         return gc, nmi, fid, kid, sharpness
 
     def forward(self, a: torch.Tensor, b: torch.Tensor):
-                    
+        
+        # Refernece guided generation
         if type(self.netG_A).__name__ in ["RegistFormer", "ProposedSynthesisModule"]:
             merged_input = torch.cat((a, b), dim=1)
             
@@ -72,10 +73,15 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 return pred
         
             return self.netG_A(merged_input)
-        
+        # Normal generation
         return self.netG_A(a)
 
     def model_step(self, batch: Any):
+        if self.params.use_multicontrast:
+            real_a, real_b, real_c = batch
+            fake_b, fake_c = self.forward(real_a, real_a)
+            return real_a, real_b, real_c, fake_b, fake_c
+
         real_a, real_b = batch
         fake_b = self.forward(real_a, real_b)
         return real_a, real_b, fake_b
@@ -94,6 +100,10 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
     def backward_D_A(self, real_b, fake_b):
         loss_D_A = self.backward_D_basic(self.netD_A, real_b, fake_b)
+        return loss_D_A
+    
+    def backward_D_B(self, real_b, fake_b):
+        loss_D_A = self.backward_D_basic(self.netD_B, real_b, fake_b)
         return loss_D_A
 
     def backward_D_basic(self, netD, real, fake):
@@ -127,7 +137,10 @@ class BaseModule_AtoB(LightningModule):  # single direction
             real_B = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
             fake_B = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
         else: 
-            real_A, real_B, fake_B = self.model_step(batch)
+            if self.params.use_multicontrast:
+                real_A, real_B, real_C, fake_B, fake_C = self.model_step(batch)
+            else:
+                real_A, real_B, fake_B = self.model_step(batch)
 
         if self.params.eval_on_align:
             self.val_ssim_B.update(real_B, fake_B)
@@ -195,7 +208,10 @@ class BaseModule_AtoB(LightningModule):  # single direction
             real_B = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
             fake_B = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
         else: 
-            real_A, real_B, fake_B = self.model_step(batch)
+            if self.params.use_multicontrast:
+                real_A, real_B, real_C, fake_B, fake_C = self.model_step(batch)
+            else:
+                real_A, real_B, fake_B = self.model_step(batch)
 
         if self.params.eval_on_align:
             self.test_ssim_B.update(real_B, fake_B)
