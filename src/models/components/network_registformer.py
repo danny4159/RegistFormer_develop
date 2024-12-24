@@ -851,7 +851,7 @@ class MultiheadAttention(nn.Module):
         d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
 
         # Pass through the pre-attention projection:
-        # n x c x h x w   ---->   n x (nhead*dk) x h x w
+        # n x c x h x w   ---->   n x (nhead*dk) x h x w  (c = nhead*dk)
         q = self.w_qs(q)  # [2, 14, 24, 24]
         k = self.w_ks(k)
         v = self.w_vs(v)  # [2, 14, 24, 24]
@@ -928,15 +928,15 @@ def flow_to_grid(flow, k_size=5):
     n, _, h, w = flow.size()  # [4, 2, 48, 48]
     padding = (k_size - 1) // 2
 
-    grid_y, grid_x = torch.meshgrid(
+    grid_y, grid_x = torch.meshgrid( # grid_x, grid_y = h, w
         torch.arange(0, h), torch.arange(0, w)
     )  # [48, 48] , [48, 48]
-    grid_y = grid_y[None, ...].expand(k_size**2, -1, -1).type_as(flow)  # [25, 48, 48]
-    grid_x = grid_x[None, ...].expand(k_size**2, -1, -1).type_as(flow)
+    grid_y = grid_y[None, ...].expand(k_size**2, -1, -1).type_as(flow) # [k^2, 48, 48] # 복제하여 grid를 확장
+    grid_x = grid_x[None, ...].expand(k_size**2, -1, -1).type_as(flow) # [k^2, 48, 48]
 
-    shift = torch.arange(0, k_size).type_as(flow) - padding  # [5] -> -2,-1,0,1,2
-    shift_y, shift_x = torch.meshgrid(shift, shift)  # [5,5]
-    shift_y = shift_y.reshape(-1, 1, 1).expand(-1, h, w)  # k^2, h, w  # [25, 48, 48]
+    shift = torch.arange(0, k_size).type_as(flow) - padding  # [k] -> -2,-1,0,1,2 (if k=5)
+    shift_y, shift_x = torch.meshgrid(shift, shift)  # [k, k]
+    shift_y = shift_y.reshape(-1, 1, 1).expand(-1, h, w)  # k^2, h, w  # [25, 48, 48] # 첫번째 차원의 값에 따라 x,y방향으로 얼만큼씩 이동해야하는지. 일괄적으로 -2~2만큼 이동
     shift_x = shift_x.reshape(-1, 1, 1).expand(-1, h, w)  # k^2, h, w
 
     samples_y = grid_y + shift_y  # k^2, h, w  # [25, 48, 48]
