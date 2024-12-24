@@ -62,14 +62,18 @@ class BaseModule_AtoB(LightningModule):  # single direction
         return gc, nmi, fid, kid, sharpness
 
     def forward(self, a: torch.Tensor, b: torch.Tensor):
-        merged_input = torch.cat((a, b), dim=1)
+                    
+        if type(self.netG_A).__name__ not in ["RegistFormer", "ProposedSynthesisModule"]:
+            merged_input = torch.cat((a, b), dim=1)
+            
+            if self.params.use_sliding_inference:
+                inferer = SlidingWindowInferer(roi_size=(96, 96))
+                pred = inferer(inputs=merged_input, network=self.netG_A) #inputs 손봐야해
+                return pred
         
-        if self.params.use_sliding_inference:
-            inferer = SlidingWindowInferer(roi_size=(96, 96))
-            pred = inferer(inputs=merged_input, network=self.netG_A) #inputs 손봐야해
-            return pred
+            return self.netG_A(merged_input)
         
-        return self.netG_A(merged_input)
+        return self.netG_A(a)
 
     def model_step(self, batch: Any):
         real_a, real_b = batch
