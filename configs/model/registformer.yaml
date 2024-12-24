@@ -28,16 +28,16 @@ netG_A:
   k_size: 28
   attn_type: 'softmax'
   daca_loc: null
-  flow_type: 'voxelmorph' # MR_CT_Pelvis: 'voxelmorph' / 'zero'-> Ablation / 3T7T: 'voxelmorph_lightning'
+  flow_type: 'voxelmorph_lightning' # MR_CT_Pelvis: 'voxelmorph' / 'zero'-> Ablation / 3T7T: 'voxelmorph_lightning'
   # flow_type: 'grad_icon' 
   dam_type: 'proposed_synthesis' # 'synthesis_meta', 'munit', 'proposed_synthesis'
   fuse_type: null
-  flow_model_path: 'pretrained/registration/Voxelmorph_Loss_MSE_MaskMSE1_0075.pt'
+  flow_model_path: 'pretrained/registration/Voxelmorph_Original_CTProposedsynCTPelvis_2D_SmoothLoss0_5/epoch085-fid9.59-kid0.01-gc0.4036-nmi0.3997-sharp65.10.ckpt'
   # flow_model_path: 'pretrained/registration/GradICON/epoch001-fid20.69-gc0.3429-nmi0.3991-sharp64.19.ckpt'
   flow_ft: false
   flow_size: null # MRCTPelvis: [384,320] 3T7T: [304,256]
   dam_ft: false
-  dam_path: 'pretrained/synthesis/meta_synthesis_epoch_089.ckpt'
+  dam_path: 'pretrained/synthesis/proposed_synthesis_epoch37.ckpt'
   # pretrained/synthesis/proposed_synthesis_epoch37.ckpt
   # pretrained/synthesis/meta_synthesis_epoch_089.ckpt
   dam_feat: 64
@@ -73,7 +73,7 @@ params: # Other params
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
   batch_size: ${data.batch_size}
-  nce_on_vgg: False
+  nce_on_vgg: True
   eval_on_align: ${data.eval_on_align}
   use_sliding_inference: ${data.use_sliding_inference}
 
