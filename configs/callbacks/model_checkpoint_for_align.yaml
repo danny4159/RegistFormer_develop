@@ -6,7 +6,7 @@ model_checkpoint:
   dirpath: ${paths.output_dir}/checkpoints
   filename: "epoch{epoch:03d}-ssim{val/ssim_B:.4f}-psnr{val/psnr_B:.4f}-lpips{val/lpips_B:.4f}-sharp{val/sharpness_B:.2f}"
   monitor: "val/ssim_B" # modified to look for best fid
-  save_top_k: 10 # 매 epoch마다 저장할거 아니면 이거 다시 resume
+  save_top_k: 5 # 매 epoch마다 저장할거 아니면 이거 다시 resume
   mode: "max" # max, min
   save_last: True
   auto_insert_metric_name: False #True
