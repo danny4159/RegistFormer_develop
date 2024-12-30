@@ -69,7 +69,12 @@ class ProposedSynthesisModule(nn.Module):
 
         self.conv_final = nn.Conv2d(self.feat_ch, self.output_nc, kernel_size=3, padding=1)
 
-    def forward(self, x, ref, layers=[], encode_only=False):
+    def forward(self, merged_input, layers=[], encode_only=False):
+
+        channels = merged_input.shape[1] // 2
+        x = merged_input[:, :channels, :, :]
+        ref = merged_input[:, channels:, :, :]
+        
         # style_guidance = self.guide_net(ref) # [1, 128, 24, 20]
         # ref = self.guide_net(ref) # [1, 128, 24, 20]
         # 원래는 interpolate 1/16만 했어. ver32
