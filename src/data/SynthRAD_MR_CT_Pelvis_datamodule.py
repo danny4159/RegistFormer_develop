@@ -20,6 +20,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         data_group_1: str,
         data_group_2: str,
         data_group_3: str,
+        data_group_4: str,
         is_3d: bool,
         batch_size: int,
         num_workers: int,
@@ -45,6 +46,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         self.data_group_1 = data_group_1
         self.data_group_2 = data_group_2
         self.data_group_3 = data_group_3
+        self.data_group_4 = data_group_4
         self.is_3d = is_3d
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -73,6 +75,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             data_group_1=self.data_group_1,
             data_group_2=self.data_group_2,
             data_group_3=self.data_group_3,
+            data_group_4=self.data_group_4,
             is_3d=self.is_3d,
             padding_size=self.padding_size,
             flip_prob=self.flip_prob,
@@ -85,6 +88,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             data_group_1=self.data_group_1,
             data_group_2=self.data_group_2,
             data_group_3=self.data_group_3,
+            data_group_4=self.data_group_4,
             is_3d=self.is_3d,
             # padding_size=self.padding_size,
             # flip_prob=0.0,
@@ -97,6 +101,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             data_group_1=self.data_group_1,
             data_group_2=self.data_group_2,
             data_group_3=self.data_group_3,
+            data_group_4=self.data_group_4,
             is_3d=self.is_3d,
             # padding_size=self.padding_size,
             # flip_prob=0.0,

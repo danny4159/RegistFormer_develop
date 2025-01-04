@@ -204,7 +204,7 @@ class RegistFormer(nn.Module):
     # def forward(self, src, ref, mask=None, for_nce=False, for_src=False):
     def forward(self, merged_input, mask=None, for_nce=False, for_src=False):
 
-        channels = merged_input.shape[1] // 2
+        channels = merged_input.shape[1] // 2 # FIXME: 이거 ref 채널에 따라 맞게 2,3 다를수있어
         src = merged_input[:, :channels, :, :]
         ref = merged_input[:, channels:, :, :]
         

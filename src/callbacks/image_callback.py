@@ -53,7 +53,29 @@ class ImageLoggingCallback(Callback):
             print(f"Unexpected input to saving_to_grid: {type(res)}")
             print(f"Input content: {res}")
             return
-        if len(res) == 6:
+        
+        if len(res) == 7: # multi-contrast generation
+            self.ngrid = 5
+            a, b, c, d, preds_b, preds_c, preds_d = res
+            err_b = torch.abs(b - preds_b)
+            err_c = torch.abs(c - preds_c)
+
+            if len(self.img_grid) == 0:
+                self.first_image_size = a[0].shape[1:3]
+
+            self.img_grid.extend([
+                resize(((a[0] + 1) / 2), self.first_image_size),
+                resize(((b[0] + 1) / 2), self.first_image_size),
+                resize(((preds_b[0] + 1) / 2), self.first_image_size),
+                resize(((c[0] + 1) / 2), self.first_image_size),
+                resize(((preds_c[0] + 1) / 2), self.first_image_size),
+            ])
+            self.err_grid.extend([
+                resize(err_b[0], self.first_image_size),
+                resize(err_c[0], self.first_image_size)
+            ])
+
+        elif len(res) == 6:
             self.ngrid = 6
             a, b, a2, b2, preds_a, preds_b = res
             err_a = torch.abs(a2 - preds_a)
@@ -598,7 +620,12 @@ class ImageSavingCallback(Callback):
             elif len(batch[0].size()) == 4:
                 res = pl_module.model_step(batch)
             
-            if len(res) == 6:
+            if len(res) == 7: # Multi-contrast generation
+                a, b, c, d, preds_b, preds_c, preds_d = res
+                if self.data_type == 'nifti':
+                    self.saving_to_nii(a, b, c, preds_b, preds_c)
+
+            elif len(res) == 6:
                 a, b, a2, b2, preds_a, preds_b = res
                 if self.data_type == 'nifti':
                     self.saving_to_nii(a, b, a2, b2, preds_a, preds_b)

@@ -19,7 +19,7 @@ class GradientCorrelationMetric(Metric):
             
             # Canny edge detection
             edges1 = cv2.Canny(img1, 170, 190)
-            edges2 = cv2.Canny(img2, 30, 50)
+            edges2 = cv2.Canny(img2, 170, 190) # FIXME: mr-ct: 30, 50
             
             # Sobel gradients
             grad_x1, grad_y1 = cv2.Sobel(edges1, cv2.CV_64F, 1, 0, ksize=3), cv2.Sobel(edges1, cv2.CV_64F, 0, 1, ksize=3)

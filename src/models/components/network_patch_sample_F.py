@@ -30,14 +30,14 @@ class PatchSampleF(nn.Module):
             # init_net(self.mlp, self.init_type, self.init_gain)
             # self.mlp_init = True
 
-    def forward(self, feats, num_patches=64, patch_ids=None):
+    def forward(self, feats, num_patches=64, patch_ids=None): # B, C, H, W
         return_ids = []
         return_feats = []
         # if self.use_mlp and not self.mlp_init:
         #     self.create_mlp(feats)
         for feat_id, feat in enumerate(feats):
             B, H, W = feat.shape[0], feat.shape[2], feat.shape[3]
-            feat_reshape = feat.permute(0, 2, 3, 1).flatten(1, 2)
+            feat_reshape = feat.permute(0, 2, 3, 1).flatten(1, 2) # B, H*W, C
             if num_patches > 0:
                 if patch_ids is not None:
                     patch_id = patch_ids[feat_id]
@@ -47,13 +47,13 @@ class PatchSampleF(nn.Module):
                     patch_id = np.random.permutation(feat_reshape.shape[1])
                     patch_id = patch_id[:int(min(num_patches, patch_id.shape[0]))]  # .to(patch_ids.device)
                 patch_id = torch.tensor(patch_id, dtype=torch.long)
-                x_sample = feat_reshape[:, patch_id, :].flatten(0, 1)  # reshape(-1, x.shape[1])
+                x_sample = feat_reshape[:, patch_id, :].flatten(0, 1)  # reshape(-1, x.shape[1]) # B*H*W, C
             else:
                 x_sample = feat_reshape
                 patch_id = []
             if self.use_mlp:
                 # mlp = getattr(self, 'mlp_%d' % feat_id)
-                x_sample = self.mlp(x_sample)
+                x_sample = self.mlp(x_sample) # 2048, 512
             return_ids.append(patch_id)
             x_sample = self.l2norm(x_sample)
 

@@ -190,6 +190,7 @@ class dataset_SynthRAD(Dataset):
         data_group_1: str,
         data_group_2: str,
         data_group_3: Optional[str] = None,
+        data_group_4: Optional[str] = None,
         is_3d: bool = False,
         padding_size: Optional[Tuple[int, int]] = None,
         flip_prob: float = 0.0,
@@ -204,6 +205,7 @@ class dataset_SynthRAD(Dataset):
         self.data_group_1 = data_group_1
         self.data_group_2 = data_group_2
         self.data_group_3 = data_group_3
+        self.data_group_4 = data_group_4
         self.is_3d = is_3d
         self.padding_size = padding_size
         self.crop_size = crop_size
@@ -219,8 +221,8 @@ class dataset_SynthRAD(Dataset):
 
             self.aug_func = Compose(
                 [
-                    RandFlipd(keys=["A", "B"] if not self.data_group_3 else ["A", "B", "C"], prob=flip_prob, spatial_axis=[0, 1]),
-                    RandRotate90d(keys=["A", "B"] if not self.data_group_3 else ["A", "B", "C"], prob=rot_prob, spatial_axes=[0, 1]),
+                    RandFlipd(keys=["A", "B", "C", "D"] if self.data_group_4 else ["A", "B", "C"] if self.data_group_3 else ["A", "B"], prob=flip_prob, spatial_axis=[0, 1]),
+                    RandRotate90d(keys=["A", "B", "C", "D"] if self.data_group_4 else ["A", "B", "C"] if self.data_group_3 else ["A", "B"], prob=rot_prob, spatial_axes=[0, 1]),
                 ]
             )
         else:
@@ -231,8 +233,8 @@ class dataset_SynthRAD(Dataset):
 
             self.aug_func = Compose(
                 [
-                    RandFlipd(keys=["A", "B"] if not self.data_group_3 else ["A", "B", "C"], prob=flip_prob, spatial_axis=[0, 1]),
-                    RandRotate90d(keys=["A", "B"] if not self.data_group_3 else ["A", "B", "C"], prob=rot_prob, spatial_axes=[0, 1]),
+                    RandFlipd(keys=["A", "B", "C", "D"] if self.data_group_4 else ["A", "B", "C"] if self.data_group_3 else ["A", "B"], prob=flip_prob, spatial_axis=[0, 1]),
+                    RandRotate90d(keys=["A", "B", "C", "D"] if self.data_group_4 else ["A", "B", "C"] if self.data_group_3 else ["A", "B"], prob=rot_prob, spatial_axes=[0, 1]),
                 ]
             )
 
@@ -250,6 +252,9 @@ class dataset_SynthRAD(Dataset):
                 B = file[self.data_group_2][patient_key][...]
                 if self.data_group_3:
                     C = file[self.data_group_3][patient_key][...]
+                if self.data_group_4:
+                    D = file[self.data_group_4][patient_key][...]
+                
         else:
             patient_idx = np.searchsorted(self.cumulative_slice_counts, idx + 1) - 1
             slice_idx = idx - self.cumulative_slice_counts[patient_idx]
@@ -259,24 +264,34 @@ class dataset_SynthRAD(Dataset):
                 B = file[self.data_group_2][patient_key][..., slice_idx]
                 if self.data_group_3:
                     C = file[self.data_group_3][patient_key][..., slice_idx]
+                if self.data_group_4:
+                    D = file[self.data_group_4][patient_key][..., slice_idx]
 
         A = torch.from_numpy(A).unsqueeze(0).float()
         B = torch.from_numpy(B).unsqueeze(0).float()
         if self.data_group_3:
             C = torch.from_numpy(C).unsqueeze(0).float()
+        if self.data_group_4:
+            D = torch.from_numpy(D).unsqueeze(0).float()
 
         # Create a dictionary for the data
         data_dict = {"A": A, "B": B}
         if self.data_group_3:
             data_dict["C"] = C
+        if self.data_group_4:
+            data_dict["D"] = D
 
         A = data_dict["A"]
         B = data_dict["B"]
         if self.data_group_3:
             C = data_dict["C"]
+        if self.data_group_4:
+            D = data_dict["D"]
 
         if self.padding_size:
-            if self.data_group_3:
+            if self.data_group_4:
+                A, B, C, D = padding_height_width(A, B, C, D, target_size=self.padding_size)
+            elif self.data_group_3:
                 A, B, C = padding_height_width(A, B, C, target_size=self.padding_size)
             else:
                 A, B = padding_height_width(A, B, target_size=self.padding_size)
@@ -284,23 +299,31 @@ class dataset_SynthRAD(Dataset):
         data_dict = self.aug_func(data_dict)
 
         if self.crop_size:
-            if self.data_group_3:
+            if self.data_group_4:
+                A, B, C, D = random_crop_height_width(A, B, C, D, target_size=self.crop_size) 
+            elif self.data_group_3:
                 A, B, C = random_crop_height_width(A, B, C, target_size=self.crop_size) 
             else:
                 A, B = random_crop_height_width(A, B, target_size=self.crop_size) 
         else:
-            if self.data_group_3:
+            if self.data_group_4:
+                A, B, C, D = even_crop_height_width(A, B, C, D, multiple=(16, 16)) # 16의 배수로 Crop
+            elif self.data_group_3:
                 A, B, C = even_crop_height_width(A, B, C, multiple=(16, 16)) # 16의 배수로 Crop
             else:
                 A, B = even_crop_height_width(A, B, multiple=(16, 16)) # 16의 배수로 Crop
                 
         if self.reverse:
-            if self.data_group_3:
+            if self.data_group_4:
+                return D, C, B, A
+            elif self.data_group_3:
                 return C, B, A
             else:
                 return B, A
         else:
-            if self.data_group_3:
+            if self.data_group_4:
+                return A, B, C, D
+            elif self.data_group_3:
                 return A, B, C
             else:
                 return A, B

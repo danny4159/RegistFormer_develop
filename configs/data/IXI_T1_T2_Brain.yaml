@@ -13,6 +13,7 @@ data_dir: ${paths.root_dir}/data/IXI
 data_group_1: "T1"
 data_group_2: "T2"
 data_group_3: null # If exist put it, or null # Regist:syn_CT
+data_group_4: null
 is_3d: False # True: 3D processing, False: 2D processing
 batch_size: 4 #5 #10 #4 #30 #16 #12 #2 #1
 num_workers: 6 # 3
@@ -20,7 +21,7 @@ pin_memory: False
 use_split_inference: False # Inference for valid and test is divided into half from the original image (for memory issue)
 eval_on_align: True
 use_sliding_inference: False
-use_multicontrast: False
+use_multiple_outputs: False
 
 ## Dataset File Name
 # prepared_data_0_0_0_0_0_ver3_final.h5
