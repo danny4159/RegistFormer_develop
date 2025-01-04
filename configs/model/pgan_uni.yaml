@@ -52,4 +52,4 @@ params: # Other params
   nce_on_vgg: True
   eval_on_align: ${data.eval_on_align}
   use_sliding_inference: ${data.use_sliding_inference}
-  use_multicontrast: ${data.use_multicontrast} # Set True if data_group_3 is exist
+  use_multiple_outputs: ${data.use_multiple_outputs} # Set True if data_group_3 is exist

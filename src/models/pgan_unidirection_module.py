@@ -57,7 +57,7 @@ class PixelGANModule(BaseModule_AtoB):
 
     def backward_G(self, real_a, real_b, real_c, fake_b, fake_c, lambda_l1, lambda_percept):
         
-        if self.params.use_multicontrast:
+        if self.params.use_multiple_outputs:
             ## GAN loss
             pred_fake_b = self.netD_A(fake_b.detach())
             loss_gan_b = self.criterionGAN(pred_fake_b, True)
@@ -127,7 +127,7 @@ class PixelGANModule(BaseModule_AtoB):
     def training_step(self, batch: Any, batch_idx: int):
         optimizer_G_A, optimizer_D_A, optimizer_D_B = self.optimizers()
 
-        if self.params.use_multicontrast:
+        if self.params.use_multiple_outputs:
             real_a, real_b, real_c, fake_b, fake_c = self.model_step(batch)
             
             with optimizer_G_A.toggle_model():
@@ -206,7 +206,7 @@ class PixelGANModule(BaseModule_AtoB):
         optimizers.append(optimizer_G_A)
         optimizer_D_A = self.hparams.optimizer(params=self.netD_A.parameters())
         optimizers.append(optimizer_D_A)
-        if self.params.use_multicontrast:
+        if self.params.use_multiple_outputs:
             optimizer_D_B = self.hparams.optimizer(params=self.netD_B.parameters())
             optimizers.append(optimizer_D_B)
 
@@ -215,7 +215,7 @@ class PixelGANModule(BaseModule_AtoB):
             schedulers.append(scheduler_G_A)
             scheduler_D_A = self.hparams.scheduler(optimizer=optimizer_D_A)
             schedulers.append(scheduler_D_A)
-            if self.params.use_multicontrast:
+            if self.params.use_multiple_outputs:
                 scheduler_D_B = self.hparams.scheduler(optimizer=optimizer_D_B)
                 schedulers.append(scheduler_D_B)
             return optimizers, schedulers
