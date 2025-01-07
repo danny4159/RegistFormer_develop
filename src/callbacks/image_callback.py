@@ -406,13 +406,17 @@ class ImageSavingCallback(Callback):
         return a, b, a2, b2, preds_a, preds_b
 
     @staticmethod
-    def save_nii(a_nii, b_nii, c_nii, d_nii, subject_number, folder_path):
+    def save_nii(a_nii, b_nii, c_nii, d_nii, e_nii, subject_number, folder_path):
         nib.save(a_nii, os.path.join(folder_path, f"a_{subject_number}.nii.gz"))
         nib.save(b_nii, os.path.join(folder_path, f"b_{subject_number}.nii.gz"))
         nib.save(c_nii, os.path.join(folder_path, f"preds_a_{subject_number}.nii.gz"))
         if d_nii is not None:
             nib.save(
                 d_nii, os.path.join(folder_path, f"preds_b_{subject_number}.nii.gz")
+            )
+        if e_nii is not None:
+            nib.save(
+                e_nii, os.path.join(folder_path, f"preds_c_{subject_number}.nii.gz")
             )
         return
     
@@ -486,6 +490,7 @@ class ImageSavingCallback(Callback):
                     b_nii,
                     preds_a_nii,
                     preds_b_nii if preds_b is not None else None,
+                    preds_c_nii if preds_c is not None else None,
                     subject_number=self.dataset_list[0], # 환자이름으로저장
                     folder_path=self.save_folder_name,
                 )

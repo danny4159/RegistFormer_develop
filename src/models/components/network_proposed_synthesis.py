@@ -147,7 +147,6 @@ class StyleConv(nn.Module):
         self.kernel_size = kernel_size
         self.padding = kernel_size // 2
         self.style_denorm = style_denorm
-        self.ch = ch
 
         if self.upsample:
             factor = 2
@@ -180,7 +179,7 @@ class StyleConv(nn.Module):
         self.mlp_shared = nn.Sequential( # TODO: nhidden이 ref의 ch개수만큼 배가 되게
             # nn.Conv2d(feat_ch, nhidden, kernel_size=3, padding=1),
             # nn.Conv2d(int(self.feat_ch/8), nhidden, kernel_size=3, padding=1),
-            nn.Conv2d(1 * 2, nhidden, kernel_size=3, padding=1),
+            nn.Conv2d(1 * ch, nhidden, kernel_size=3, padding=1),
             nn.ReLU()
         )
         self.mlp_gamma = nn.Conv2d(nhidden, feat_ch, kernel_size=3, padding=1) #TODO: feat_ch도 마찬가지
