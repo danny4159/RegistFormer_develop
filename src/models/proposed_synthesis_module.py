@@ -109,7 +109,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             if fake_d is not None:
                 fake_rgb = torch.cat((fake_b, fake_c, fake_d), dim=1)
             else:
-                fake_rgb = torch.cat((fake_b, fake_c, (fake_b + fake_c) / 2), dim=1) # Last channel is average
+                fake_rgb = torch.cat((fake_b, fake_c, torch.zeros_like(fake_b)), dim=1) # Last channel is average -> zero (For checkerboard artifact but not sure)
             self.vgg.to(real_a.device)
 
             feat_b = self.vgg(fake_rgb)
