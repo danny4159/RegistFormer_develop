@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.ops.upfirdn2d import upfirdn2d
 
 class ProposedSynthesisModule(nn.Module):
     def __init__(self, **kwargs):
@@ -20,29 +19,6 @@ class ProposedSynthesisModule(nn.Module):
             ch = 2
         else:
             ch = 1
-        # self.guide_net = nn.Sequential( # 이 conv들은 image의 style정보를 잘 대표하는 통계값이 나오도록 학습
-        #     # 이것도 없었어 ver32는
-        #     nn.Conv2d(self.input_nc, int(self.feat_ch/8), kernel_size=3, stride=1, padding=1),
-        #     nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        #     # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=2, padding=1),
-        #     # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        #     nn.Conv2d(int(self.feat_ch/8), int(self.feat_ch/8), kernel_size=3, stride=1, padding=1),
-        #     nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        #     # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=2, padding=1),
-        #     # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        #     nn.Conv2d(int(self.feat_ch/8), int(self.feat_ch/8), kernel_size=3, stride=1, padding=1), # 원래 여기까지
-        #     nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        #     # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=2, padding=1),
-        #     # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        #     # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=1, padding=1),
-        #     # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        #     # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=2, padding=1),
-        #     # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        #     # nn.Conv2d(self.feat_ch, self.feat_ch, kernel_size=3, stride=1, padding=1),
-            
-        #     # nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        #     # nn.AdaptiveAvgPool2d(1), # style transfer에서 많이 쓰이는 개념.
-        # )
         
         # 일부분에만 style_denorm -> 21, 22, 31, 32에만 적용 #TODO: feat_ch에 ref ch만큼 배수로
         self.conv0 = StyleConv(self.input_nc, self.feat_ch * ch, kernel_size=3,
@@ -79,10 +55,6 @@ class ProposedSynthesisModule(nn.Module):
         x = merged_input[:, :1, :, :]
         ref = merged_input[:, 1:, :, :]
         
-        # style_guidance = self.guide_net(ref) # [1, 128, 24, 20]
-        # ref = self.guide_net(ref) # [1, 128, 24, 20]
-        # 원래는 interpolate 1/16만 했어. ver32
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True) # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯 
         if self.training: # H,W = 128,128
             style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True)
         else: # H,W = 256,256
@@ -132,9 +104,6 @@ class StyleConv(nn.Module):
                  upsample=False,
                  downsample=False,
                  activate=False,
-                 blur_kernel=[1, 1.5, 1.5, 1],
-                #  blur_kernel=[1, 2, 2, 1],
-                #  blur_kernel=[1, 3, 3, 1],
                  demodulate=True,
                  style_denorm=True,
                  eps=1e-8,
@@ -152,22 +121,12 @@ class StyleConv(nn.Module):
         self.style_denorm = style_denorm
 
         if self.upsample:
-            factor = 2
-            p = (len(blur_kernel) - factor) - (kernel_size - 1)
-            pad0 = (p + 1) // 2 + factor - 1
-            pad1 = p // 2 + 1
-            self.blur = Blur(blur_kernel, (pad0, pad1), upsample_factor=factor)
             self.up = nn.Sequential(
                 nn.Upsample(scale_factor=2),
                 nn.Conv2d(input_nc, feat_ch, kernel_size=3, padding=1)
             )
         
         elif self.downsample:
-            factor = 2
-            p = (len(blur_kernel) - factor) + (kernel_size - 1)
-            pad0 = (p + 1) // 2
-            pad1 = p // 2
-            self.blur = Blur(blur_kernel, (pad0, pad1))
             self.down = nn.Sequential(
                 nn.Conv2d(input_nc, feat_ch, stride=2, kernel_size=1, padding=0)
             )
@@ -179,16 +138,26 @@ class StyleConv(nn.Module):
         # self.batch_norm = nn.SyncBatchNorm(feat_ch, affine=False)
 
         nhidden = 512
-        self.mlp_shared = nn.Sequential( # TODO: nhidden이 ref의 ch개수만큼 배가 되게
-            # nn.Conv2d(feat_ch, nhidden, kernel_size=3, padding=1),
-            # nn.Conv2d(int(self.feat_ch/8), nhidden, kernel_size=3, padding=1),
-            nn.Conv2d(1 * ch, nhidden, kernel_size=3, padding=1),
-            nn.ReLU()
-        )
-        self.mlp_gamma = nn.Conv2d(nhidden, feat_ch, kernel_size=3, padding=1) #TODO: feat_ch도 마찬가지
-        self.mlp_beta = nn.Conv2d(nhidden, feat_ch, kernel_size=3, padding=1)
+        if ch == 1:
+            self.mlp_shared = nn.Sequential( 
+                nn.Conv2d(1, nhidden, kernel_size=3, padding=1),
+                nn.ReLU())
+            self.mlp_gamma = nn.Conv2d(nhidden, feat_ch, kernel_size=3, padding=1)
+            self.mlp_beta = nn.Conv2d(nhidden, feat_ch, kernel_size=3, padding=1)
+        elif ch == 2:
+            self.mlp_shared = nn.Sequential( 
+                nn.Conv2d(1, nhidden, kernel_size=3, padding=1),
+                nn.ReLU())
+            self.mlp_gamma = nn.Conv2d(nhidden, feat_ch//2, kernel_size=3, padding=1)
+            self.mlp_beta = nn.Conv2d(nhidden, feat_ch//2, kernel_size=3, padding=1)
 
-        self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True) # inplace=True 원래 이거로 JBHI 했는데, multi-cont로 하니까 에러뜨네? 이래도 해결안돼. 그냥 원래대로
+            self.mlp_shared_2 = nn.Sequential(
+                nn.Conv2d(1, nhidden, kernel_size=3, padding=1),
+                nn.ReLU())
+            self.mlp_gamma_2 = nn.Conv2d(nhidden, feat_ch//2, kernel_size=3, padding=1)
+            self.mlp_beta_2 = nn.Conv2d(nhidden, feat_ch//2, kernel_size=3, padding=1)
+
+        self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
         self.randomize_noise = True
         self.noise_strength = nn.Parameter(torch.zeros(1), requires_grad=True)
@@ -197,14 +166,12 @@ class StyleConv(nn.Module):
         
         if self.downsample:
             original_size = x.size()
-            # x = self.blur(x)
             if x.size()[2:] != original_size[2:]:  # If the size has changed
                 x = F.interpolate(x, size=original_size[2:], mode='bilinear', align_corners=True)
             x = self.down(x)
         elif self.upsample:
             x = self.up(x)
             original_size = x.size()
-            # x = self.blur(x)
             if x.size()[2:] != original_size[2:]:  # If the size has changed
                 x = F.interpolate(x, size=original_size[2:], mode='bilinear', align_corners=True)
         else:
@@ -223,9 +190,19 @@ class StyleConv(nn.Module):
             # 1. style을 x의 크기와 맞게 interpolation 
             style = F.interpolate(style, size=x.size()[2:], mode='nearest') # TODO: bilinear 도 시도
             # 2. style을 x의 C과 맞게 mlp
-            actv = self.mlp_shared(style)
-            gamma = self.mlp_gamma(actv)
-            beta = self.mlp_beta(actv)
+            if style.shape[1] == 1:
+                actv = self.mlp_shared(style)
+                gamma = self.mlp_gamma(actv)
+                beta = self.mlp_beta(actv)
+            elif style.shape[1] == 2:
+                actv1 = self.mlp_shared(style[:, :1, :, :])
+                gamma = self.mlp_gamma(actv1)
+                beta = self.mlp_beta(actv1)
+                actv_2 = self.mlp_shared_2(style[:, 1:, :, :])
+                gamma_2 = self.mlp_gamma_2(actv_2)
+                beta_2 = self.mlp_beta_2(actv_2)
+                gamma = torch.cat((gamma, gamma_2), dim=1)
+                beta = torch.cat((beta, beta_2), dim=1)
 
             # 3. 거기서 감마 베타 나눠서 denorm
             x = x * gamma + beta
@@ -235,23 +212,7 @@ class StyleConv(nn.Module):
             x = self.activation(x)
         return x
     
-    
-class Blur(nn.Module):
-    def __init__(self, kernel, pad, upsample_factor=1):
-        super(Blur, self).__init__()
-        kernel = _make_kernel(kernel)
-        if upsample_factor > 1:
-            kernel = kernel * (upsample_factor**2)
-
-        self.register_buffer('kernel', kernel)
-        self.pad = pad
-
-    def forward(self, x):
-        orig_dtype = x.dtype
-        x = x.float()
-        out = upfirdn2d(x, self.kernel, padding=self.pad)
-        return out.to(orig_dtype)
-
+  
 def _make_kernel(k):
     k = torch.tensor(k, dtype=torch.float32)
     if k.ndim == 1:
