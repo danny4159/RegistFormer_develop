@@ -108,8 +108,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             real_rgb = real_a.repeat(1, 3, 1, 1)
             if fake_d is not None:
                 fake_rgb = torch.cat((fake_b, fake_c, fake_d), dim=1)
-            else:
+            elif fake_c is not None:
                 fake_rgb = torch.cat((fake_b, fake_c, torch.zeros_like(fake_b)), dim=1) # Last channel is average -> zero (For checkerboard artifact but not sure)
+            else:
+                fake_rgb = torch.cat((fake_b, fake_b, fake_b), dim=1) # Last channel is average -> zero (For checkerboard artifact but not sure)
             self.vgg.to(real_a.device)
 
             feat_b = self.vgg(fake_rgb)
@@ -158,11 +160,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # assert not torch.isnan(loss_G).any(), "Total Loss is NaN"
 
     def training_step(self, batch: Any, batch_idx: int):
-        optimizer_G_A, optimizer_D_A, optimizer_D_B, optimizer_F_A = self.optimizers()
         
         if self.params.use_multiple_outputs:
+            optimizer_G_A, optimizer_D_A, optimizer_D_B, optimizer_F_A = self.optimizers()
             real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d = self.model_step(batch)
         else:
+            optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
             real_a, real_b, fake_b = self.model_step(batch)
 
         
@@ -170,7 +173,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             if self.params.use_multiple_outputs:
                 loss_G, loss_gan_b, loss_gan_c, loss_style_b, loss_style_c, loss_nce_b = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, self.params.lambda_style, self.params.lambda_nce)
             else:
-                loss_G, loss_gan_b, loss_style_b, loss_nce_b = self.backward_G(real_a, real_b, fake_b, self.params.lambda_style, self.params.lambda_nce)
+                loss_G, loss_gan_b, loss_style_b, loss_nce_b = self.backward_G(real_a, real_b, None, None, fake_b, None, None, self.params.lambda_style, self.params.lambda_nce)
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"

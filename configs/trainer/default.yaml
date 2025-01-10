@@ -8,7 +8,11 @@ max_epochs: 100
 accelerator: auto # automatically choose between CPU, GPU, TPU
 devices: 1
 
-strategy: ddp_find_unused_parameters_true # ddp_find_unused_parameters_true #deepspeed_stage_1  #auto #deepspeed_stage_2 # deepspeed
+strategy: ddp_find_unused_parameters_true # Only one gpu
+# strategy: # TODO: only for sumin env (more than one gpu)
+#   _target_: lightning.pytorch.strategies.DDPStrategy
+#   find_unused_parameters: true
+#   process_group_backend: gloo  # gloo 백엔드 설정
 
 benchmark: True # use torch.backends.cudnn.benchmark
 

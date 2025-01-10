@@ -88,7 +88,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             
             # Sliding window on inference
             if self.params.use_sliding_inference and not self.training:
-                inferer = SlidingWindowInferer(roi_size=(128, 128)) # 96, 96
+                inferer = SlidingWindowInferer(roi_size=(256,256), mode='gaussian') # 128,128
                 pred = inferer(inputs=merged_input, network=self.netG_A) #inputs 손봐야해
                 return pred
         

@@ -501,6 +501,8 @@ class ImageSavingCallback(Callback):
                 self.img_preds_a = []
                 if preds_b is not None:
                     self.img_preds_b = []
+                if preds_c is not None:
+                    self.img_preds_c = []
                 self.dataset_list.pop(0)
                 self.subject_slice_num.pop(0)
 
