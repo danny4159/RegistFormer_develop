@@ -46,9 +46,25 @@ class ProposedSynthesisModule(nn.Module):
         self.conv6 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 activate=True, demodulate=self.demodulate, ch=ch) # 이걸 빠트렸었어.
                                 # activate=False, demodulate=self.demodulate)
+        
+        # Added for checkerboard artifact
+        if self.use_multiple_outputs:
+            self.conv7_1 = nn.Conv2d(self.feat_ch * ch // 2, self.feat_ch * ch // 4, kernel_size=3, padding=1)
+            self.conv7_2 = nn.Conv2d(self.feat_ch * ch // 2, self.feat_ch * ch // 4, kernel_size=3, padding=1)
+        else:
+            self.conv7 = nn.Conv2d(self.feat_ch * ch, self.feat_ch * ch // 2, kernel_size=3, padding=1)
 
-
-        self.conv_final = nn.Conv2d(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
+        if self.use_multiple_outputs:
+            self.conv8_1 = nn.Conv2d(self.feat_ch * ch // 4, self.feat_ch * ch // 8, kernel_size=3, padding=1)
+            self.conv8_2 = nn.Conv2d(self.feat_ch * ch // 4, self.feat_ch * ch // 8, kernel_size=3, padding=1)
+        else:
+            self.conv8 = nn.Conv2d(self.feat_ch * ch // 2, self.feat_ch * ch // 4, kernel_size=3, padding=1)
+                                       
+        if self.use_multiple_outputs:
+            self.conv_final_1 = nn.Conv2d(self.feat_ch * ch // 8, self.output_nc // 2, kernel_size=3, padding=1)
+            self.conv_final_2 = nn.Conv2d(self.feat_ch * ch // 8, self.output_nc // 2, kernel_size=3, padding=1)
+        else:
+            self.conv_final = nn.Conv2d(self.feat_ch * ch // 4, self.output_nc, kernel_size=3, padding=1)
 
     def forward(self, merged_input, layers=[], encode_only=False):
 
@@ -56,9 +72,9 @@ class ProposedSynthesisModule(nn.Module):
         ref = merged_input[:, 1:, :, :]
         
         if self.training: # H,W = 128,128
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True)
+            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True)
         else: # H,W = 256,256
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True) # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯 
+            style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯 
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/64, mode='bilinear', align_corners=True) # Ablation
@@ -76,8 +92,26 @@ class ProposedSynthesisModule(nn.Module):
         feat5 = self.conv51(feat4 + feat1, style_guidance_1)# [1, feat_ch, H, W]
         feat5 = self.conv52(feat5, style_guidance_1)        # [1, feat_ch, H, W]
         feat6 = self.conv6(feat5 + feat0, style_guidance_1) # [1, feat_ch, H, W]
-        out = self.conv_final(feat6)    # [1, 1, H, W]
-        out = torch.tanh(out)           # [1, 1, H, W]
+
+        if self.use_multiple_outputs:
+            feat6_1, feat6_2 = torch.chunk(feat6, chunks=2, dim=1)
+            feat7_1 = self.conv7_1(feat6_1)
+            feat8_1 = self.conv8_1(feat7_1)
+            out_1 = self.conv_final_1(feat8_1)
+            out_1 = torch.tanh(out_1)
+
+            feat7_2 = self.conv7_2(feat6_2)
+            feat8_2 = self.conv8_2(feat7_2)
+            out_2 = self.conv_final_2(feat8_2)
+            out_2 = torch.tanh(out_2)
+
+            out = torch.cat((out_1, out_2), dim=1)
+        else:
+            feat7 = self.conv7(feat6)
+            feat8 = self.conv8(feat7)
+            out = self.conv_final(feat8)
+            out = torch.tanh(out)
+
         if encode_only:
             # Collect intermediate features based on specified layers
             layers_dict = {
