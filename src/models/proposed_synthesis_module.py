@@ -106,7 +106,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         ## 3. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
         if self.params.nce_on_vgg:
             real_rgb = real_a.repeat(1, 3, 1, 1)
-            if fake_d is not None:
+            if self.params.nce_independent:
+                fake_rgb_b = fake_b.repeat(1, 3, 1, 1)
+                fake_rgb_c = fake_c.repeat(1, 3, 1, 1)
+            elif fake_d is not None:
                 fake_rgb = torch.cat((fake_b, fake_c, fake_d), dim=1)
             elif fake_c is not None:
                 fake_rgb = torch.cat((fake_b, fake_c, torch.zeros_like(fake_b)), dim=1) # Last channel is average -> zero (For checkerboard artifact but not sure)
@@ -114,21 +117,43 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 fake_rgb = torch.cat((fake_b, fake_b, fake_b), dim=1) # Last channel is average -> zero (For checkerboard artifact but not sure)
             self.vgg.to(real_a.device)
 
-            feat_b = self.vgg(fake_rgb)
-            feat_b = list(feat_b.values()) # [0]:8,512,16,16 [1]:8,512,8,8
+            if self.params.nce_independent:
+                feat_a = self.vgg(real_rgb)
+                feat_a = list(feat_a.values())
 
-            feat_a = self.vgg(real_rgb)
-            feat_a = list(feat_a.values())
+                feat_b = self.vgg(fake_rgb_b)
+                feat_b = list(feat_b.values())
 
-            feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-            feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+                feat_c = self.vgg(fake_rgb_c)
+                feat_c = list(feat_c.values())
 
-            total_nce_loss = 0.0
+                feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+                feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+                feat_c_pool, _ = self.netF_A(feat_c, 256, sample_ids)
 
-            for f_a, f_b in zip(feat_b_pool, feat_a_pool):
-                loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce
-                total_nce_loss = total_nce_loss + loss.mean()
-            loss_nce_b = total_nce_loss / len(feat_b)
+                total_nce_loss = 0.0
+
+                for f_a, f_b, f_c in zip(feat_a_pool, feat_b_pool, feat_c_pool):
+                    loss = (self.criterionNCE(f_a, f_b) + self.criterionNCE(f_a, f_c)) * self.params.lambda_nce
+                    total_nce_loss = total_nce_loss + loss.mean()
+                loss_nce_b = total_nce_loss / (len(feat_b) + len(feat_c))
+
+            else:
+                feat_b = self.vgg(fake_rgb)
+                feat_b = list(feat_b.values()) # [0]:8,512,16,16 [1]:8,512,8,8
+
+                feat_a = self.vgg(real_rgb)
+                feat_a = list(feat_a.values())
+
+                feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+                feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+
+                total_nce_loss = 0.0
+
+                for f_a, f_b in zip(feat_a_pool,feat_b_pool):
+                    loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce
+                    total_nce_loss = total_nce_loss + loss.mean()
+                loss_nce_b = total_nce_loss / len(feat_b)
 
         else: # 이건 구현 덜됨. 나중에 필요할때 구현.
             n_layers = len(self.params.nce_layers)

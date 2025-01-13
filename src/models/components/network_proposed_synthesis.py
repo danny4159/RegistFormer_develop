@@ -196,12 +196,12 @@ class StyleConv(nn.Module):
                 beta = self.mlp_beta(actv)
             elif style.shape[1] == 2:
                 actv1 = self.mlp_shared(style[:, :1, :, :])
-                gamma = self.mlp_gamma(actv1)
-                beta = self.mlp_beta(actv1)
+                gamma = self.mlp_gamma(actv1) # B, 256, f_H, f_W
+                beta = self.mlp_beta(actv1) # B, 256, f_H, f_W
                 actv_2 = self.mlp_shared_2(style[:, 1:, :, :])
-                gamma_2 = self.mlp_gamma_2(actv_2)
-                beta_2 = self.mlp_beta_2(actv_2)
-                gamma = torch.cat((gamma, gamma_2), dim=1)
+                gamma_2 = self.mlp_gamma_2(actv_2) 
+                beta_2 = self.mlp_beta_2(actv_2) 
+                gamma = torch.cat((gamma, gamma_2), dim=1) # B, 512, f_H, f_W
                 beta = torch.cat((beta, beta_2), dim=1)
 
             # 3. 거기서 감마 베타 나눠서 denorm
@@ -212,12 +212,3 @@ class StyleConv(nn.Module):
             x = self.activation(x)
         return x
     
-  
-def _make_kernel(k):
-    k = torch.tensor(k, dtype=torch.float32)
-    if k.ndim == 1:
-        k = k[None, :] * k[:, None]
-
-    k /= k.sum()
-
-    return k

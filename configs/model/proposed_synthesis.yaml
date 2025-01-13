@@ -75,3 +75,4 @@ params: # Other params
   use_sliding_inference: ${data.use_sliding_inference}
   use_multiple_outputs: ${data.use_multiple_outputs} # Set True if data_group_3 is exist
   nce_on_vgg: True
+  nce_independent: false
