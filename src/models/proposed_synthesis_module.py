@@ -156,25 +156,52 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_nce_b = total_nce_loss / len(feat_b)
 
         else: # 이건 구현 덜됨. 나중에 필요할때 구현.
-            n_layers = len(self.params.nce_layers)
-            merged_input_1 = torch.cat((fake_b, real_a, real_a), dim=1)
-            feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
+            if self.params.use_multiple_outputs:
+                n_layers = len(self.params.nce_layers)
+                merged_input_1 = torch.cat((fake_b, real_a, real_a), dim=1)
+                feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
+                
+                merged_input_2 = torch.cat((fake_c, real_a, real_a), dim=1) 
+                feat_c = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
 
-            flipped_for_equivariance = np.random.random() < 0.5
-            if self.params.flip_equivariance and flipped_for_equivariance:
-                feat_b = [torch.flip(fb, [3]) for fb in feat_b]
+                flipped_for_equivariance = np.random.random() < 0.5
+                if self.params.flip_equivariance and flipped_for_equivariance:
+                    feat_b = [torch.flip(fb, [3]) for fb in feat_b]
+                    feat_c = [torch.flip(fc, [3]) for fc in feat_c]
 
-            merged_input_2 = torch.cat((real_a, real_b, real_c), dim=1)
-            feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
-            feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-            feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+                merged_input_2 = torch.cat((real_a, real_b, real_c), dim=1)
+                feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+                feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+                feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+                feat_c_pool, _ = self.netF_A(feat_c, 256, sample_ids)
 
-            total_nce_loss = 0.0
-            for f_a, f_b in zip(feat_b_pool, feat_a_pool):
-                loss = self.criterionNCE(f_a, f_b) * lambda_nce
-                total_nce_loss = total_nce_loss + loss.mean()
-            loss_nce_b = total_nce_loss / n_layers
-            assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
+                total_nce_loss = 0.0
+                for f_a, f_b, f_c in zip(feat_a_pool, feat_b_pool, feat_c_pool):
+                    loss = (self.criterionNCE(f_a, f_b) + self.criterionNCE(f_a, f_c)) * lambda_nce
+                    total_nce_loss = total_nce_loss + loss.mean()
+                loss_nce_b = total_nce_loss / n_layers
+                assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
+            else:
+                n_layers = len(self.params.nce_layers)
+                merged_input_1 = torch.cat((fake_b, real_a, real_a), dim=1)
+                feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
+
+                flipped_for_equivariance = np.random.random() < 0.5
+                if self.params.flip_equivariance and flipped_for_equivariance:
+                    feat_b = [torch.flip(fb, [3]) for fb in feat_b]
+
+                merged_input_2 = torch.cat((real_a, real_b, real_c), dim=1)
+                feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+                feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+                feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+
+                total_nce_loss = 0.0
+                for f_a, f_b in zip(feat_a_pool, feat_b_pool):
+                    loss = self.criterionNCE(f_a, f_b) * lambda_nce
+                    total_nce_loss = total_nce_loss + loss.mean()
+                loss_nce_b = total_nce_loss / n_layers
+                assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
+
 
         if self.params.use_multiple_outputs:
             loss_G = loss_gan_b + loss_gan_c + loss_style_b + loss_style_c + loss_nce_b # fake_d에 대한 loss는 추가안함. 필요할때.

@@ -45,15 +45,15 @@ class PatchSampleF(nn.Module):
                     # torch.randperm produces cudaErrorIllegalAddress for newer versions of PyTorch. https://github.com/taesungp/contrastive-unpaired-translation/issues/83
                     #patch_id = torch.randperm(feat_reshape.shape[1], device=feats[0].device)
                     patch_id = np.random.permutation(feat_reshape.shape[1])
-                    patch_id = patch_id[:int(min(num_patches, patch_id.shape[0]))]  # .to(patch_ids.device)
+                    patch_id = patch_id[:int(min(num_patches, patch_id.shape[0]))]  # max가 H*W인 난수 num_patches개
                 patch_id = torch.tensor(patch_id, dtype=torch.long)
-                x_sample = feat_reshape[:, patch_id, :].flatten(0, 1)  # reshape(-1, x.shape[1]) # B*H*W, C
+                x_sample = feat_reshape[:, patch_id, :].flatten(0, 1)  # reshape(-1, x.shape[1]) # B*num_patches, C
             else:
                 x_sample = feat_reshape
                 patch_id = []
             if self.use_mlp:
                 # mlp = getattr(self, 'mlp_%d' % feat_id)
-                x_sample = self.mlp(x_sample) # 2048, 512
+                x_sample = self.mlp(x_sample) # B*num_patches, C -> B*num_patches, self.nc
             return_ids.append(patch_id)
             x_sample = self.l2norm(x_sample)
 
