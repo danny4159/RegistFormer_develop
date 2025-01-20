@@ -25,7 +25,6 @@ class ImageLoggingCallback(Callback):
         center_crop: int = 256,
         every_epoch=5,
         log_test: bool = False,
-        use_split_inference: bool = False,
     ):
         """_summary_
 
@@ -40,8 +39,6 @@ class ImageLoggingCallback(Callback):
         self.every_epoch = every_epoch
         self.log_test = log_test  # log images on the testing stage as well
         self.center_crop = center_crop  # center crop the images to this size
-        self.use_split_inference = use_split_inference
-        # print("use_split_inference: ", use_split_inference)
 
     def saving_to_grid(self, res):
         # def gray2rgb(tensor):
@@ -178,36 +175,8 @@ class ImageLoggingCallback(Callback):
                 warped_img = warped_img[:, :, :, :, d_index].squeeze(-1)
                 self.saving_to_grid([evaluation_img, moving_img, fixed_img, warped_img])
             elif len(batch[0].size()) == 4:
-                if self.use_split_inference:
-                    half_size = batch[0].shape[2] // 2
-                    first_half = [x[:, :, :half_size, :] for x in batch]
-                    second_half = [x[:, :, half_size:, :] for x in batch]
-
-                    res_first_half = pl_module.model_step(first_half)
-                    res_second_half = pl_module.model_step(second_half)
-
-                    if len(res_first_half) == 6 and len(res_second_half) == 6:
-                        a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
-                        b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
-                        a2 = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
-                        b2 = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
-                        preds_a = torch.cat([res_first_half[4], res_second_half[4]], dim=2)
-                        preds_b = torch.cat([res_first_half[5], res_second_half[5]], dim=2)
-                        self.saving_to_grid([a, b, a2, b2, preds_a, preds_b])
-                    elif len(res_first_half) == 4 and len(res_second_half) == 4:
-                        a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
-                        b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
-                        preds_a = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
-                        preds_b = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
-                        self.saving_to_grid([a, b, preds_a, preds_b])
-                    elif len(res_first_half) == 3 and len(res_second_half) == 3:
-                        a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
-                        b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
-                        preds_b = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
-                        self.saving_to_grid([a, b, preds_b])
-                else:
-                    res = pl_module.model_step(batch)
-                    self.saving_to_grid(res)
+                res = pl_module.model_step(batch)
+                self.saving_to_grid(res)
             
 
     def on_validation_epoch_end(self, trainer, pl_module) -> None:
@@ -249,38 +218,8 @@ class ImageLoggingCallback(Callback):
                 warped_img = warped_img[:, :, :, :, d_index].squeeze(-1)
                 self.saving_to_grid([evaluation_img, moving_img, fixed_img, warped_img])
             elif len(batch[0].size()) == 4:
-                if self.use_split_inference:
-                    half_size = batch[0].shape[2] // 2
-                    first_half = [x[:, :, :half_size, :] for x in batch]
-                    second_half = [x[:, :, half_size:, :] for x in batch]
-
-                    res_first_half = pl_module.model_step(first_half)
-                    res_second_half = pl_module.model_step(second_half)
-
-                    if len(res_first_half) == 6 and len(res_second_half) == 6:
-                        a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
-                        b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
-                        a2 = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
-                        b2 = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
-                        preds_a = torch.cat([res_first_half[4], res_second_half[4]], dim=2)
-                        preds_b = torch.cat([res_first_half[5], res_second_half[5]], dim=2)
-                        self.saving_to_grid([a, b, a2, b2, preds_a, preds_b])
-                    elif len(res_first_half) == 4 and len(res_second_half) == 4:
-                        a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
-                        b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
-                        preds_a = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
-                        preds_b = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
-                        self.saving_to_grid([a, b, preds_a, preds_b])
-                    elif len(res_first_half) == 3 and len(res_second_half) == 3:
-                        a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
-                        b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
-                        preds_b = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
-                        self.saving_to_grid([a, b, preds_b])
-                    else:
-                        res = None
-                else:
-                    res = pl_module.model_step(batch)
-                    self.saving_to_grid(res)
+                res = pl_module.model_step(batch)
+                self.saving_to_grid(res)
 
     def on_test_end(self, trainer, pl_module):
         log.info(f"Saving test img_grid shape: <{len(self.img_grid)}>")
@@ -301,7 +240,6 @@ class ImageSavingCallback(Callback):
                  center_crop: int = 256, 
                  subject_number_length: int = 3, 
                  test_file: str = None,
-                 use_split_inference: bool = False,
                  flag_normalize: bool = True,
                  data_dir: str = None,
                  data_type:str = None,
@@ -314,7 +252,6 @@ class ImageSavingCallback(Callback):
         self.center_crop = center_crop  # center crop the images to this size
         self.subject_number_length = subject_number_length
         self.test_file = test_file
-        self.use_split_inference = use_split_inference
         self.flag_normalize = flag_normalize
         self.data_dir = data_dir
         self.data_type = data_type
@@ -343,7 +280,7 @@ class ImageSavingCallback(Callback):
         return a_np, b_np, c_np, d_np, e_np, f_np
 
     @staticmethod
-    def change_numpy_nii(a, b, c, d, e=None, flag_normalize=True):
+    def change_numpy_nii(a, b, c, d, e, flag_normalize=True):
         assert (
             a.ndim == b.ndim == c.ndim == d.ndim == 3
         ), "All input arrays must have the same number of dimensions (3)"
@@ -510,9 +447,11 @@ class ImageSavingCallback(Callback):
                 log.info(f"Saving test images up to {self.subject_number_length}")
                 return
             
-        elif a.ndim == 3: # 3D image
-            a_nii, b_nii, preds_a_nii, preds_b_nii = self.change_numpy_nii(
-                a, b, preds_a, preds_b if preds_b is not None else None,
+        elif a.ndim == 3: # 3D image            
+            preds_b = a * 0 if preds_b is None else preds_b
+            preds_c = a * 0 if preds_c is None else preds_c
+            a_nii, b_nii, preds_a_nii, preds_b_nii, preds_c_nii = self.change_numpy_nii(
+                a, b, preds_a, preds_b, preds_c,
                 flag_normalize=self.flag_normalize
             )
             
@@ -585,83 +524,46 @@ class ImageSavingCallback(Callback):
                 ]
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if self.use_split_inference:
-            half_size = batch[0].shape[2] // 2
-            first_half = [x[:, :, :half_size, :] for x in batch]
-            second_half = [x[:, :, half_size:, :] for x in batch]
-
-            res_first_half = pl_module.model_step(first_half)
-            res_second_half = pl_module.model_step(second_half)
-
-            if len(res_first_half) == 6 and len(res_second_half) == 6:
-                a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
-                b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
-                a2 = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
-                b2 = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
-                preds_a = torch.cat([res_first_half[4], res_second_half[4]], dim=2)
-                preds_b = torch.cat([res_first_half[5], res_second_half[5]], dim=2)
-                if self.data_type == 'nifti':
-                    self.saving_to_nii(a, b, a2, b2, preds_a, preds_b)
-                elif self.data_type == 'photo':
-                    self.saving_to_tif(a, b, a2, b2, preds_a, preds_b)
-            elif len(res_first_half) == 4 and len(res_second_half) == 4:
-                a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
-                b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
-                preds_a = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
-                preds_b = torch.cat([res_first_half[3], res_second_half[3]], dim=2)
-                if self.data_type == 'nifti':
-                    self.saving_to_nii(a, b, preds_a, preds_b)
-                elif self.data_type == 'photo':
-                    self.saving_to_tif(a, b, preds_a, preds_b)
-            elif len(res_first_half) == 3 and len(res_second_half) == 3:
-                a = torch.cat([res_first_half[0], res_second_half[0]], dim=2)
-                b = torch.cat([res_first_half[1], res_second_half[1]], dim=2)
-                preds_b = torch.cat([res_first_half[2], res_second_half[2]], dim=2)
-                if self.data_type == 'nifti':
-                    self.saving_to_nii(a, b, preds_b)
-                elif self.data_type == 'photo':
-                    self.saving_to_tif(a, b, preds_b)
-        else:
-            if len(batch[0].size()) == 5:
-                res = pl_module.model_step(batch, is_3d=True)
-            elif len(batch[0].size()) == 4:
-                res = pl_module.model_step(batch)
-            
-            if len(res) == 7: # Multi-contrast generation
-                a, b, c, d, preds_b, preds_c, preds_d = res
-                if self.data_type == 'nifti':
-                    self.saving_to_nii(a, b, c, preds_b, preds_c)
-
-            elif len(res) == 6:
-                a, b, a2, b2, preds_a, preds_b = res
-                if self.data_type == 'nifti':
-                    self.saving_to_nii(a, b, a2, b2, preds_a, preds_b)
-                elif self.data_type == 'photo':
-                    self.saving_to_tif(a, b, a2, b2, preds_a, preds_b)
-            
-            elif len(res) == 5:
-                a, b, c, preds_b, preds_c = res
-                if self.data_type == 'nifti':
-                    self.saving_to_nii(a, b, c, preds_b, preds_c)
-                elif self.data_type == 'photo':
-                    self.saving_to_tif(a, b, preds_a, preds_b)
-
-            elif len(res) == 4:
-                a, b, preds_a, preds_b = res
-                if self.data_type == 'nifti':
-                    self.saving_to_nii(a, b, preds_a, preds_b)
-                # elif self.data_type == 'photo':
-                #     self.saving_to_tif(a, b, preds_a, preds_b)
-
-            elif len(res) == 3:
-                a, b, preds_b = res
-                if self.data_type == 'nifti':
-                    self.saving_to_nii(a, b, preds_b)
-                elif self.data_type == 'photo':
-                    self.saving_to_tif(a, b, preds_b)
-
-            else:
-                log.error(f"Unexpected res length: {len(res)}. This case has not been implemented.")
-                raise NotImplementedError("This function has not been implemented yet.")
-            return
+        if len(batch[0].size()) == 5:
+            res = pl_module.model_step(batch, is_3d=True)
+        elif len(batch[0].size()) == 4:
+            res = pl_module.model_step(batch)
         
+        if len(res) == 7: # Multi-contrast generation
+            a, b, c, d, preds_b, preds_c, preds_d = res
+            if self.data_type == 'nifti':
+                self.saving_to_nii(a, b, c, preds_b, preds_c)
+
+        elif len(res) == 6:
+            a, b, a2, b2, preds_a, preds_b = res
+            if self.data_type == 'nifti':
+                self.saving_to_nii(a, b, a2, b2, preds_a, preds_b)
+            elif self.data_type == 'photo':
+                self.saving_to_tif(a, b, a2, b2, preds_a, preds_b)
+        
+        elif len(res) == 5:
+            a, b, c, preds_b, preds_c = res
+            if self.data_type == 'nifti':
+                self.saving_to_nii(a, b, c, preds_b, preds_c)
+            elif self.data_type == 'photo':
+                self.saving_to_tif(a, b, preds_a, preds_b)
+
+        elif len(res) == 4:
+            a, b, preds_a, preds_b = res
+            if self.data_type == 'nifti':
+                self.saving_to_nii(a, b, preds_a, preds_b)
+            # elif self.data_type == 'photo':
+            #     self.saving_to_tif(a, b, preds_a, preds_b)
+
+        elif len(res) == 3:
+            a, b, preds_b = res
+            if self.data_type == 'nifti':
+                self.saving_to_nii(a, b, preds_b)
+            elif self.data_type == 'photo':
+                self.saving_to_tif(a, b, preds_b)
+
+        else:
+            log.error(f"Unexpected res length: {len(res)}. This case has not been implemented.")
+            raise NotImplementedError("This function has not been implemented yet.")
+        return
+    
