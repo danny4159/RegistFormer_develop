@@ -183,14 +183,14 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
             else:
                 n_layers = len(self.params.nce_layers)
-                merged_input_1 = torch.cat((fake_b, real_a, real_a), dim=1)
+                merged_input_1 = torch.cat((fake_b, real_a), dim=1)
                 feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
 
                 flipped_for_equivariance = np.random.random() < 0.5
                 if self.params.flip_equivariance and flipped_for_equivariance:
                     feat_b = [torch.flip(fb, [3]) for fb in feat_b]
 
-                merged_input_2 = torch.cat((real_a, real_b, real_c), dim=1)
+                merged_input_2 = torch.cat((real_a, real_b), dim=1)
                 feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
                 feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
                 feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
