@@ -33,11 +33,13 @@ netG_A:
   dam_type: 'proposed_synthesis' # 'synthesis_meta', 'munit', 'proposed_synthesis'
   fuse_type: null
   flow_model_path: 'pretrained/registration/Voxelmorph_Original_CTProposedsynCTPelvis_2D_SmoothLoss0_5/epoch085-fid9.59-kid0.01-gc0.4036-nmi0.3997-sharp65.10.ckpt'
+  flow_model_path_2: 'pretrained/registration/Voxelmorph_Original_CTProposedsynCTPelvis_2D_SmoothLoss0_5/epoch085-fid9.59-kid0.01-gc0.4036-nmi0.3997-sharp65.10.ckpt'
   # flow_model_path: 'pretrained/registration/GradICON/epoch001-fid20.69-gc0.3429-nmi0.3991-sharp64.19.ckpt'
   flow_ft: false
   flow_size: null # MRCTPelvis: [384,320] 3T7T: [304,256]
   dam_ft: false
   dam_path: 'pretrained/synthesis/proposed_synthesis_epoch37.ckpt'
+  dam_path_2: 'pretrained/synthesis/proposed_synthesis_epoch37.ckpt'
   # pretrained/synthesis/proposed_synthesis_epoch37.ckpt
   # pretrained/synthesis/meta_synthesis_epoch_089.ckpt
   dam_feat: 64
@@ -45,8 +47,17 @@ netG_A:
   init_type: 'normal'
   init_gain: 0.02
   is_moved_feat: false
+  params: ${model.params}
 
 netD_A:
+  _target_: src.models.components.networks_define.define_D
+  input_nc: 1
+  ndf: 64
+  # norm: 'instance'
+  # n_layers_D: 3
+  init_type: 'normal'
+
+netD_B:
   _target_: src.models.components.networks_define.define_D
   input_nc: 1
   ndf: 64
@@ -76,6 +87,8 @@ params: # Other params
   nce_on_vgg: True
   eval_on_align: ${data.eval_on_align}
   use_sliding_inference: ${data.use_sliding_inference}
+  use_multiple_outputs: ${data.use_multiple_outputs} # Set True if data_group_3 is exist
+
 
   #Ablation
   ran_shift: 10 #null # "Put null or Interger" / random shift to ground truth when calculating Contextual Loss

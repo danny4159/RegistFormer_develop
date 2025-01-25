@@ -1,10 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import init
-import functools
-from torch.optim import lr_scheduler
-import numpy as np
 from torch.autograd import Variable
 import math
 import pdb
@@ -32,13 +28,17 @@ class RegistFormer(nn.Module):
             self.dam_type = kwargs['dam_type']
             self.fuse_type = kwargs['fuse_type']
             self.flow_model_path = kwargs['flow_model_path']
+            self.flow_model_path_2 = kwargs['flow_model_path_2']
             self.flow_ft = kwargs['flow_ft']
             self.flow_size = kwargs.get('flow_size', None)
             self.dam_ft = kwargs['dam_ft']
             self.dam_path = kwargs['dam_path']
+            self.dam_path_2 = kwargs['dam_path_2']
             self.dam_feat = kwargs['dam_feat']
             self.main_ft = kwargs['main_ft']
             self.is_moved_feat = kwargs['is_moved_feat']
+            # Store params from kwargs
+            self.params = kwargs.get('params', None)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -48,6 +48,9 @@ class RegistFormer(nn.Module):
 
         self.flow_model_path = os.path.join(project_root, self.flow_model_path)
         self.dam_path = os.path.join(project_root, self.dam_path)
+        if self.params.use_multiple_outputs:
+            self.flow_model_path_2 = os.path.join(project_root, self.flow_model_path_2)
+            self.dam_path_2 = os.path.join(project_root, self.dam_path_2)
 
         if self.flow_type == "voxelmorph":
             from src.models.components.voxelmorph import VxmDense
@@ -73,6 +76,26 @@ class RegistFormer(nn.Module):
             adjusted_state_dict = {k.replace("netR_A.", ""): v for k, v in model_state_dict.items()}
             self.flow_estimator.load_state_dict(adjusted_state_dict, strict=False)
             self.flow_estimator.eval()
+
+            if self.params.use_multiple_outputs: # FIXME: 나중에 수정
+                self.flow_estimator_2 = VxmDense(inshape=self.flow_size,
+                                                nb_unet_features=[[16, 32, 32, 32], [32, 32, 32, 32, 32, 16, 16]],
+                                                nb_unet_levels=None,
+                                                unet_feat_mult=1,
+                                                nb_unet_conv_per_level=1,
+                                                int_steps=7,
+                                                int_downsize=2,
+                                                bidir=False,
+                                                use_probs=False,
+                                                src_feats=self.src_ch,
+                                                trg_feats=self.ref_ch,
+                                                unet_half_res=False)
+                checkpoint = torch.load(self.flow_model_path_2, map_location=lambda storage, loc: storage) 
+                model_state_dict = checkpoint["state_dict"]
+                adjusted_state_dict = {k.replace("netR_A.", ""): v for k, v in model_state_dict.items()}
+                self.flow_estimator_2.load_state_dict(adjusted_state_dict, strict=False)
+                self.flow_estimator_2.eval()
+
 
         elif self.flow_type == "grad_icon":
             from src.models.components.network_grad_icon import GradICON
@@ -117,6 +140,16 @@ class RegistFormer(nn.Module):
             for param in self.DAM.parameters():
                 param.requires_grad = self.dam_ft
 
+            if self.params.use_multiple_outputs: # FIXME: 나중에 수정
+                self.DAM_2 = ProposedSynthesisModule(input_nc=1, feat_ch=256, output_nc=1, demodulate=True)
+                checkpoint = torch.load(self.dam_path_2, map_location=lambda storage, loc: storage)
+                model_state_dict = checkpoint["state_dict"]
+                adjusted_state_dict = {k.replace("netG_B.", ""): v for k, v in model_state_dict.items()}
+                self.DAM_2.load_state_dict(adjusted_state_dict, strict=False)
+                self.DAM_2.eval()
+                for param in self.DAM_2.parameters():
+                    param.requires_grad = self.dam_ft
+
         elif self.dam_type == "munit":
             from src.models.components.network_adainGen import AdaINGen
             self.DAM_A = AdaINGen(input_nc=1, output_nc=1, ngf=64)
@@ -139,8 +172,14 @@ class RegistFormer(nn.Module):
 
         # Define feature extractor.
         # self.unet_q = Unet(src_ch, feat_dim, feat_dim)
-        self.unet_q = Unet(self.src_ch * 2, self.feat_dim, self.feat_dim)
+        if self.params.use_multiple_outputs:
+            self.unet_q = Unet(self.src_ch * 3, self.feat_dim, self.feat_dim)
+        else:
+            self.unet_q = Unet(self.src_ch * 2, self.feat_dim, self.feat_dim)
+
         self.unet_k = Unet(self.ref_ch, self.feat_dim, self.feat_dim)
+        if self.params.use_multiple_outputs:
+            self.unet_k_2 = Unet(self.ref_ch, self.feat_dim, self.feat_dim)
 
         # Define GAM.
         self.trans_unit = nn.ModuleList(
@@ -204,10 +243,13 @@ class RegistFormer(nn.Module):
     # def forward(self, src, ref, mask=None, for_nce=False, for_src=False):
     def forward(self, merged_input, mask=None, for_nce=False, for_src=False):
 
-        channels = merged_input.shape[1] // 2 # FIXME: 이거 ref 채널에 따라 맞게 2,3 다를수있어
-        src = merged_input[:, :channels, :, :]
-        ref = merged_input[:, channels:, :, :]
-        
+        src = merged_input[:, :1, :, :]
+        if self.params.use_multiple_outputs:
+            ref = merged_input[:, 1:2, :, :]
+            ref_2 = merged_input[:, 2:3, :, :]
+        else:
+            ref = merged_input[:, 1:, :, :]
+
         assert (
             src.shape == ref.shape
         ), "Shapes of source and reference images mismatch. Source shape: {src.shape}, Reference shape: {ref.shape}"
@@ -215,17 +257,13 @@ class RegistFormer(nn.Module):
         self.flow_estimator.to(device)
         moved = None
 
-        # if not self.training:
-        #     N, C, H, W = src.shape
-        #     mod_size = 4
-        #     H_pad = mod_size - H % mod_size if not H % mod_size == 0 else 0
-        #     W_pad = mod_size - W % mod_size if not W % mod_size == 0 else 0
-        #     src = F.pad(src, (0, W_pad, 0, H_pad), "replicate")
-        #     ref = F.pad(ref, (0, W_pad, 0, H_pad), "replicate")
-
         if self.dam_type == "dam" or self.dam_type == "proposed_synthesis":
             src_origin = src
-            src = self.DAM(src, ref)  # [4, 3, 256, 256]
+            merged_input = torch.cat((src, ref), dim=1)
+            src = self.DAM(merged_input)  # [4, 3, 256, 256] #FIXME: 나중에 수정
+            if self.params.use_multiple_outputs:
+                merged_input_2 = torch.cat((src, ref_2), dim=1)
+                src_2 = self.DAM_2(merged_input_2)
         elif self.dam_type == "synthesis_meta":
             src_origin = src
             src = self.DAM(src)
@@ -245,7 +283,7 @@ class RegistFormer(nn.Module):
                 "Invalid dam_type provided. Expected 'dam' or 'synthesis_meta'."
             )
 
-        if for_nce:
+        if for_nce: # NetG를 NCE에 사용할 때 쓰이는 부분
             if for_src:
                 src_lq_concat = torch.cat((src_origin, src), dim=1)
                 q_feat = self.unet_q(src_lq_concat, for_nce=True)
@@ -255,24 +293,31 @@ class RegistFormer(nn.Module):
                 return q_feat
 
 
-        height_multiple = self.flow_size[0] if self.flow_size else 768
+        height_multiple = self.flow_size[0] if self.flow_size else 768 # FIXME: 나중에 수정
         width_multiple = self.flow_size[1] if self.flow_size else 576
 
         if self.flow_type in ["voxelmorph", "zero","voxelmorph_lightning"]:
             if self.dam_type == "synthesis_meta" or self.dam_type == "dam" or self.dam_type == "proposed_synthesis" or self.dam_type == "munit":
                 src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=height_multiple, width_multiple=width_multiple)
                 ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=height_multiple, width_multiple=width_multiple)
-                
+                if self.params.use_multiple_outputs:
+                    src_2, moving_padding_2 = self.pad_tensor_to_multiple(src_2, height_multiple=height_multiple, width_multiple=width_multiple)
+                    ref_2, fixed_padding_2 = self.pad_tensor_to_multiple(ref_2, height_multiple=height_multiple, width_multiple=width_multiple)
                 if self.flow_type == "zero":
                     moved, flow = self.flow_estimator(ref, src, registration=True)  # Zeroflow version
                 else:
                     _, flow = self.flow_estimator(src, ref, registration=True)  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
-
+                    if self.params.use_multiple_outputs:
+                        _, flow_2 = self.flow_estimator(src_2, ref_2, registration=True)
                     # flow = self.vecint(flow) #TODO: modified
 
                 src = self.crop_tensor_to_original(src, fixed_padding)
                 ref = self.crop_tensor_to_original(ref, fixed_padding)
                 flow = self.crop_tensor_to_original(flow, fixed_padding)
+                if self.params.use_multiple_outputs:
+                    src_2 = self.crop_tensor_to_original(src_2, fixed_padding)
+                    ref_2 = self.crop_tensor_to_original(ref_2, fixed_padding)
+                    flow_2 = self.crop_tensor_to_original(flow_2, fixed_padding)
                 if self.flow_type == "zero":
                     flow = torch.zeros_like(flow)  # Zeroflow version
                 if self.is_moved_feat: # Comparison
@@ -312,14 +357,21 @@ class RegistFormer(nn.Module):
         else:
             flow = self.flow_estimator(src, ref)  # src가 이동 ref가 고정
 
-        src_lq_concat = torch.cat((src_origin, src), dim=1)
+        if self.params.use_multiple_outputs:
+            src_lq_concat = torch.cat((src_origin, src, src_2), dim=1)
+        else:
+            src_lq_concat = torch.cat((src_origin, src), dim=1)
         # q_feat = self.unet_q(src)
         q_feat = self.unet_q(src_lq_concat)  # 발전시킨것
 
         if self.is_moved_feat:
             k_feat = self.unet_k(moved) # 이건 zeroflow와 함께. moved를 key,value로 쓰기위해. 결과 꽤 좋더라?
         else:
-            k_feat = self.unet_k(ref)
+            if self.params.use_multiple_outputs:
+                k_feat = self.unet_k(ref)
+                k_feat_2 = self.unet_k_2(ref_2)
+            else:
+                k_feat = self.unet_k(ref)
 
         outputs = []
         for i in range(3):
@@ -337,11 +389,18 @@ class RegistFormer(nn.Module):
                     )
                 )
             else:
-                outputs.append(
-                    self.trans_unit[i](
-                        q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow
+                if self.params.use_multiple_outputs:
+                    outputs.append(
+                        self.trans_unit[i](
+                            q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow, None, k_feat_2[i + 3], k_feat_2[i + 3], flow_2
+                        )
                     )
-                )
+                else:
+                    outputs.append(
+                        self.trans_unit[i](
+                            q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow
+                        )
+                    )
 
         if self.daca_loc == "end":
             f0 = self.conv0(outputs[0])  # H, W
@@ -729,10 +788,12 @@ class TransformerUnit(nn.Module):
             elif fuse_type == "mask":
                 self.fuse_conv = double_conv(in_ch=feat_dim, out_ch=feat_dim)
 
-    def forward(self, q, k, v, flow, mask=None):
+    def forward(self, q, k, v, flow, mask=None, k_2=None, v_2=None, flow_2=None):
         if q.shape[-2:] != flow.shape[-2:]:
             # pdb.set_trace()
             flow = resize_flow(flow, "shape", q.shape[-2:])
+            if flow_2 is not None:                              # FIXME: 나중에 필요하면 수정
+                flow_2 = resize_flow(flow_2, "shape", q.shape[-2:])
         if mask != None and q.shape[-2:] != mask.shape[-2:]:
             # pdb.set_trace()
             mask = F.interpolate(mask, size=q.shape[-2:], mode="nearest")
@@ -746,13 +807,25 @@ class TransformerUnit(nn.Module):
         # print(flow)
         # cross-multi-head attention
         # out, attn = checkpoint(self._attn_forward, q + q_pos_embed, k + k_pos_embed, v, flow)
-        out, attn = self.attn(
-            q=q + q_pos_embed,
-            k=k + k_pos_embed,
-            v=v,
-            flow=flow,
-            attn_type=self.attn_type,
-        )
+        if k_2 is not None:  # FIXME: 나중에 필요하면 수정
+            out, attn = self.attn(
+                q=q + q_pos_embed,
+                k=k + k_pos_embed,
+                v=v,
+                flow=flow,
+                attn_type=self.attn_type,
+                k_2=k_2,
+                v_2=v_2,
+                flow_2=flow_2,
+            )
+        else:
+            out, attn = self.attn(
+                q=q + q_pos_embed,
+                k=k + k_pos_embed,
+                v=v,
+                flow=flow,
+                attn_type=self.attn_type,
+            )
         # print(attn.shape)
 
         if self.fuse_type:
@@ -817,6 +890,8 @@ class MultiheadAttention(nn.Module):
         self.w_qs = nn.Conv2d(feat_dim, n_head * d_k, 1, bias=False)
         self.w_ks = nn.Conv2d(feat_dim, n_head * d_k, 1, bias=False)
         self.w_vs = nn.Conv2d(feat_dim, n_head * d_v, 1, bias=False)
+        self.w_ks_2 = nn.Conv2d(feat_dim, n_head * d_k, 1, bias=False)
+        self.w_vs_2 = nn.Conv2d(feat_dim, n_head * d_v, 1, bias=False)
 
         # after-attention combine heads
         self.fc = nn.Conv2d(n_head * d_v, feat_dim, 1, bias=False)
@@ -845,7 +920,7 @@ class MultiheadAttention(nn.Module):
         #     bias=True,
         # )
 
-    def forward(self, q, k, v, flow, attn_type="softmax"):
+    def forward(self, q, k, v, flow, attn_type="softmax", k_2=None, v_2=None, flow_2=None):
         # input: n x c x h x w
         # flow: n x 2 x h x w
         d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
@@ -855,6 +930,9 @@ class MultiheadAttention(nn.Module):
         q = self.w_qs(q)  # [2, 14, 24, 24]
         k = self.w_ks(k)
         v = self.w_vs(v)  # [2, 14, 24, 24]
+        if k_2 is not None:
+            k_2 = self.w_ks_2(k_2)
+            v_2 = self.w_vs_2(v_2)
 
         n, c, h, w = q.shape
 
@@ -864,13 +942,24 @@ class MultiheadAttention(nn.Module):
         # n x k^2 x c x h x w
         sample_k_feat = flow_guide_sampler(k, sampling_grid, k_size=self.k_size)  # [4, 25, 64, 48, 48] # ref에서 feature map의 local grid
         sample_v_feat = flow_guide_sampler(v, sampling_grid, k_size=self.k_size)
+        if k_2 is not None:
+            sampling_grid_2 = flow_to_grid(flow_2, self.k_size)
+            sample_k_feat_2 = flow_guide_sampler(k_2, sampling_grid_2, k_size=self.k_size)
+            sample_v_feat_2 = flow_guide_sampler(v_2, sampling_grid_2, k_size=self.k_size)
+
+            sample_k_feat = torch.cat([sample_k_feat, sample_k_feat_2], dim=1)
+            sample_v_feat = torch.cat([sample_v_feat, sample_v_feat_2], dim=1)
 
         # Reshape for multi-head attention.
         # q: n x 1 x nhead x dk x h x w
         # k,v: n x k^2 x nhead x dk x h x w
         q = q.view(n, 1, n_head, d_k, h, w)  # [2, 1, 2, 7, 24, 24]
-        k = sample_k_feat.view(n, self.k_size**2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
-        v = sample_v_feat.view(n, self.k_size**2, n_head, d_v, h, w)
+        if k_2 is not None:
+            k = sample_k_feat.view(n, self.k_size**2*2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
+            v = sample_v_feat.view(n, self.k_size**2*2, n_head, d_v, h, w)
+        else:
+            k = sample_k_feat.view(n, self.k_size**2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
+            v = sample_v_feat.view(n, self.k_size**2, n_head, d_v, h, w)
 
     
         #############################################################################################
