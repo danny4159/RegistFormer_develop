@@ -2,11 +2,10 @@ import cv2
 import numpy as np
 import torch
 from torchmetrics.metric import Metric
-
 class GradientCorrelationMetric(Metric):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.add_state("correlations", default=torch.tensor([]), dist_reduce_fx="cat")
+        self.add_state("correlations", default=torch.empty(0, device=self.device), dist_reduce_fx="cat")
 
     def update(self, imgs1: torch.Tensor, imgs2: torch.Tensor):
         assert imgs1.ndim == 4 and imgs2.ndim == 4, "Inputs must be 4D tensors"
@@ -34,8 +33,11 @@ class GradientCorrelationMetric(Metric):
             
             # Compute correlation
             correlation = np.corrcoef(magnitude1.flatten(), magnitude2.flatten())[0, 1]
-            correlation = torch.tensor(correlation, device=self.device)
+            correlation = torch.tensor(correlation, device=imgs1.device)  # 명시적으로 GPU 디바이스에 할당
             self.correlations = torch.cat([self.correlations, correlation.unsqueeze(0)])
 
     def compute(self):
-        return self.correlations.mean() if self.correlations.numel() > 0 else torch.tensor(float('nan'), device=self.device)
+        if self.correlations.numel() > 0:
+            return self.correlations.mean()
+        else:
+            return torch.tensor(float('nan'), device=self.device)  # NaN 처리
