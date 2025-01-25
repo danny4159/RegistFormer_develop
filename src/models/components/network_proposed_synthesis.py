@@ -10,7 +10,7 @@ class ProposedSynthesisModule(nn.Module):
             self.feat_ch = kwargs['feat_ch']
             self.output_nc = kwargs['output_nc']
             self.demodulate = kwargs['demodulate']
-            self.use_multiple_outputs = kwargs['use_multiple_outputs']
+            self.use_multiple_outputs = kwargs.get('use_multiple_outputs', None)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -142,6 +142,7 @@ class StyleConv(nn.Module):
                  upsample=False,
                  downsample=False,
                  activate=False,
+                #  blur_kernel=[1, 1.5, 1.5, 1],
                  demodulate=True,
                  style_denorm=True,
                  eps=1e-8,
@@ -159,12 +160,22 @@ class StyleConv(nn.Module):
         self.style_denorm = style_denorm
 
         if self.upsample:
+            # factor = 2
+            # p = (len(blur_kernel) - factor) - (kernel_size - 1)
+            # pad0 = (p + 1) // 2 + factor - 1
+            # pad1 = p // 2 + 1
+            # self.blur = Blur(blur_kernel, (pad0, pad1), upsample_factor=factor)
             self.up = nn.Sequential(
                 nn.Upsample(scale_factor=2),
                 nn.Conv2d(input_nc, feat_ch, kernel_size=3, padding=1)
             )
         
         elif self.downsample:
+            # factor = 2
+            # p = (len(blur_kernel) - factor) + (kernel_size - 1)
+            # pad0 = (p + 1) // 2
+            # pad1 = p // 2
+            # self.blur = Blur(blur_kernel, (pad0, pad1))
             self.down = nn.Sequential(
                 nn.Conv2d(input_nc, feat_ch, stride=2, kernel_size=1, padding=0)
             )
@@ -250,3 +261,29 @@ class StyleConv(nn.Module):
             x = self.activation(x)
         return x
     
+
+    
+class Blur(nn.Module):
+    def __init__(self, kernel, pad, upsample_factor=1):
+        super(Blur, self).__init__()
+        kernel = _make_kernel(kernel)
+        if upsample_factor > 1:
+            kernel = kernel * (upsample_factor**2)
+
+        self.register_buffer('kernel', kernel)
+        self.pad = pad
+
+    def forward(self, x):
+        orig_dtype = x.dtype
+        x = x.float()
+        out = upfirdn2d(x, self.kernel, padding=self.pad)
+        return out.to(orig_dtype)
+
+def _make_kernel(k):
+    k = torch.tensor(k, dtype=torch.float32)
+    if k.ndim == 1:
+        k = k[None, :] * k[:, None]
+
+    k /= k.sum()
+
+    return k
