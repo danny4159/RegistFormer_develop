@@ -226,7 +226,13 @@ class StyleConv(nn.Module):
         else:
             x = self.conv(x)
         
-        x = self.normalize(x)
+        if style.shape[1] == 1:
+            x = self.normalize(x)
+        elif style.shape[1] == 2:
+            x1, x2 = torch.chunk(x, chunks=2, dim=1)  # 각 부분 [B, C/2, H, W]
+            x1 = self.normalize(x1)
+            x2 = self.normalize(x2)
+            x = torch.cat((x1, x2), dim=1)
         
         # # Add noise
         if self.randomize_noise:
