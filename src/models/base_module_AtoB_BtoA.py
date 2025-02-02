@@ -183,7 +183,7 @@ class BaseModule_AtoB_BtoA(LightningModule):
             self.val_fid_A.update(gray2rgb(norm_to_uint8(real_A)), real=True)
             self.val_fid_A.update(gray2rgb(norm_to_uint8(fake_A)), real=False)
             self.val_kid_A.update(gray2rgb(norm_to_uint8(real_B)), real=True)
-            self.val_kid_A.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
+            self.val_kid_A.update(gray2rgb(norm_to_uint8(fake_A)), real=False)
             self.val_sharpness_A.update(norm_to_uint8(fake_A).float())
 
             self.val_gc_B.update(norm_to_uint8(real_A), norm_to_uint8(fake_B))
