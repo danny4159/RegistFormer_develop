@@ -56,78 +56,79 @@ class PixelGANModule(BaseModule_AtoB):
         }
 
     def backward_G(self, real_a, real_b, real_c, fake_b, fake_c, lambda_l1, lambda_percept):
+
+        ## GAN loss
+        pred_fake_b = self.netD_A(fake_b.detach())
+        loss_gan_b = self.criterionGAN(pred_fake_b, True)
+        loss_gan_b = torch.mean(loss_gan_b)
+        assert not torch.isnan(loss_gan_b).any(), "GAN Loss is NaN"
         
-        if self.params.use_multiple_outputs:
-            ## GAN loss
-            pred_fake_b = self.netD_A(fake_b.detach())
-            loss_gan_b = self.criterionGAN(pred_fake_b, True)
-            loss_gan_b = torch.mean(loss_gan_b)
-            assert not torch.isnan(loss_gan_b).any(), "GAN Loss is NaN"
-            
-            pred_fake_c = self.netD_B(fake_c.detach())
-            loss_gan_c = self.criterionGAN(pred_fake_c, True)
-            loss_gan_c = torch.mean(loss_gan_c)
-            assert not torch.isnan(loss_gan_c).any(), "GAN Loss is NaN"
+        pred_fake_c = self.netD_B(fake_c.detach())
+        loss_gan_c = self.criterionGAN(pred_fake_c, True)
+        loss_gan_c = torch.mean(loss_gan_c)
+        assert not torch.isnan(loss_gan_c).any(), "GAN Loss is NaN"
 
-            loss_gan = (loss_gan_b + loss_gan_c) / 2 
+        loss_gan = (loss_gan_b + loss_gan_c) / 2 
 
-            ## l1 loss
-            loss_l1_b = self.criterionL1(fake_b, real_b) * lambda_l1
-            loss_l1_b = torch.mean(loss_l1_b)
-            assert not torch.isnan(loss_l1_b).any(), "L1 Loss is NaN"
-            
-            loss_l1_c = self.criterionL1(fake_c, real_c) * lambda_l1
-            loss_l1_c = torch.mean(loss_l1_c)
-            assert not torch.isnan(loss_l1_c).any(), "L1 Loss is NaN"
+        ## l1 loss
+        loss_l1_b = self.criterionL1(fake_b, real_b) * lambda_l1
+        loss_l1_b = torch.mean(loss_l1_b)
+        assert not torch.isnan(loss_l1_b).any(), "L1 Loss is NaN"
+        
+        loss_l1_c = self.criterionL1(fake_c, real_c) * lambda_l1
+        loss_l1_c = torch.mean(loss_l1_c)
+        assert not torch.isnan(loss_l1_c).any(), "L1 Loss is NaN"
 
-            loss_l1 = (loss_l1_b + loss_l1_c) / 2 
+        loss_l1 = (loss_l1_b + loss_l1_c) / 2 
 
-            ## Percept loss
-            loss_percept_b = self.criterionPerceptual(real_b, fake_b)
-            loss_percept_b =  loss_percept_b * lambda_percept
-            loss_percept_b = torch.mean(loss_percept_b)
-            assert not torch.isnan(loss_percept_b).any(), "Percept Loss is NaN"
-            
-            loss_percept_c = self.criterionPerceptual(real_c, fake_c)
-            loss_percept_c =  loss_percept_c * lambda_percept
-            loss_percept_c = torch.mean(loss_percept_c)
-            assert not torch.isnan(loss_percept_c).any(), "Percept Loss is NaN"
+        ## Percept loss
+        loss_percept_b = self.criterionPerceptual(real_b, fake_b)
+        loss_percept_b =  loss_percept_b * lambda_percept
+        loss_percept_b = torch.mean(loss_percept_b)
+        assert not torch.isnan(loss_percept_b).any(), "Percept Loss is NaN"
+        
+        loss_percept_c = self.criterionPerceptual(real_c, fake_c)
+        loss_percept_c =  loss_percept_c * lambda_percept
+        loss_percept_c = torch.mean(loss_percept_c)
+        assert not torch.isnan(loss_percept_c).any(), "Percept Loss is NaN"
 
-            loss_percept = (loss_percept_b + loss_percept_c) / 2
+        loss_percept = (loss_percept_b + loss_percept_c) / 2
 
-            ## Total loss
-            loss_G = loss_gan + loss_l1 + loss_percept
-            assert not torch.isnan(loss_G).any(), "Total Loss is NaN"
+        ## Total loss
+        loss_G = loss_gan + loss_l1 + loss_percept
+        assert not torch.isnan(loss_G).any(), "Total Loss is NaN"
 
-        else:
+        return loss_G, loss_gan, loss_l1, loss_percept
+    
+    def backward_G_single(self, real_a, real_b, fake_b, lambda_l1, lambda_percept):
+        
+        ## GAN loss
+        pred_fake = self.netD_A(fake_b.detach())
+        loss_gan = self.criterionGAN(pred_fake, True)
+        loss_gan = torch.mean(loss_gan)
+        assert not torch.isnan(loss_gan).any(), "GAN Loss is NaN"
 
-            ## GAN loss
-            pred_fake = self.netD_A(fake_b.detach())
-            loss_gan = self.criterionGAN(pred_fake, True)
-            loss_gan = torch.mean(loss_gan)
-            assert not torch.isnan(loss_gan).any(), "GAN Loss is NaN"
+        ## l1 loss
+        loss_l1 = self.criterionL1(fake_b, real_b) * lambda_l1
+        loss_l1 = torch.mean(loss_l1)
+        assert not torch.isnan(loss_l1).any(), "L1 Loss is NaN"
 
-            ## l1 loss
-            loss_l1 = self.criterionL1(fake_b, real_b) * lambda_l1
-            loss_l1 = torch.mean(loss_l1)
-            assert not torch.isnan(loss_l1).any(), "L1 Loss is NaN"
+        ## Percept loss
+        loss_percept = self.criterionPerceptual(real_b, fake_b)
+        loss_percept =  loss_percept * lambda_percept
+        loss_percept = torch.mean(loss_percept)
+        assert not torch.isnan(loss_percept).any(), "Percept Loss is NaN"
 
-            ## Percept loss
-            loss_percept = self.criterionPerceptual(real_b, fake_b)
-            loss_percept =  loss_percept * lambda_percept
-            loss_percept = torch.mean(loss_percept)
-            assert not torch.isnan(loss_percept).any(), "Percept Loss is NaN"
-
-            ## Total loss
-            loss_G = loss_gan + loss_l1 + loss_percept
-            assert not torch.isnan(loss_G).any(), "Total Loss is NaN"
+        ## Total loss
+        loss_G = loss_gan + loss_l1 + loss_percept
+        assert not torch.isnan(loss_G).any(), "Total Loss is NaN"
 
         return loss_G, loss_gan, loss_l1, loss_percept
 
     def training_step(self, batch: Any, batch_idx: int):
-        optimizer_G_A, optimizer_D_A, optimizer_D_B = self.optimizers()
 
         if self.params.use_multiple_outputs:
+            optimizer_G_A, optimizer_D_A, optimizer_D_B = self.optimizers()
             real_a, real_b, real_c, fake_b, fake_c = self.model_step(batch)
             
             with optimizer_G_A.toggle_model():
@@ -166,10 +167,11 @@ class PixelGANModule(BaseModule_AtoB):
 
 
         else:
+            optimizer_G_A, optimizer_D_A = self.optimizers()
             real_a, real_b, fake_b = self.model_step(batch)
         
             with optimizer_G_A.toggle_model():
-                loss_G, loss_gan, loss_l1, loss_percept = self.backward_G(real_a, real_b, fake_b, self.params.lambda_l1, self.params.lambda_percept)
+                loss_G, loss_gan, loss_l1, loss_percept = self.backward_G_single(real_a, real_b, fake_b, self.params.lambda_l1, self.params.lambda_percept)
                 self.manual_backward(loss_G)
                 self.clip_gradients(
                     optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
