@@ -70,7 +70,7 @@ class RegistFormerModule(BaseModule_AtoB):
 
         if self.criterionCTX:
             # Random translation to Ground truth
-            if self.params.ran_shift is not None:
+            if self.params.ran_shift > 0:
                 shift_range_x, shift_range_y = 0, 0
                 while shift_range_x == 0 and shift_range_y == 0:
                     shift_range_x = torch.randint(-self.params.ran_shift, self.params.ran_shift, (1,)).item()
@@ -127,7 +127,7 @@ class RegistFormerModule(BaseModule_AtoB):
                 feat_b = [torch.flip(fb, [3]) for fb in feat_b]
 
             if self.params.nce_on_vgg:
-                feat_a = feat_a = self.vgg(real_a_rgb)
+                feat_a = self.vgg(real_a_rgb)
                 feat_a = list(feat_a.values())
             else:
                 feat_a = self.netG_A(real_a, real_b, for_nce=True, for_src=True)
