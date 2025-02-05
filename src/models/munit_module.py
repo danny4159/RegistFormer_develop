@@ -98,16 +98,18 @@ class MunitModule(BaseModule_AtoB_BtoA):
             loss_G += loss_image
 
         if lambda_style != 0:
-            loss_gen_recon_s_a = self.criterionRecon(s_a_recon, s_a)
-            loss_gen_recon_s_b = self.criterionRecon(s_b_recon, s_b)
-            loss_style = (loss_gen_recon_s_a + loss_gen_recon_s_b) * lambda_style
+            if self.params.no_noise:
+                loss_gen_recon_s_a = self.criterionRecon(s_a_recon, s_a_prime)
+                loss_gen_recon_s_b = self.criterionRecon(s_b_recon, s_b_prime)
+                loss_style = (loss_gen_recon_s_a + loss_gen_recon_s_b) * lambda_style
+            else:
+                loss_gen_recon_s_a = self.criterionRecon(s_a_recon, s_a)
+                loss_gen_recon_s_b = self.criterionRecon(s_b_recon, s_b)
+                loss_style = (loss_gen_recon_s_a + loss_gen_recon_s_b) * lambda_style
             self.log("loss_style", loss_style.detach(), prog_bar=True)
             loss_G += loss_style
 
         # Non noise
-        # loss_gen_recon_s_a = self.criterionRecon(s_a_recon, s_a_prime)
-        # loss_gen_recon_s_b = self.criterionRecon(s_b_recon, s_b_prime)
-        # loss_style = (loss_gen_recon_s_a + loss_gen_recon_s_b) * lambda_style
 
         if lambda_content != 0:
             loss_gen_recon_c_a = self.criterionRecon(c_a_recon, c_a)
@@ -148,8 +150,7 @@ class MunitModule(BaseModule_AtoB_BtoA):
         else:
             real_a, real_b = batch
         device = real_a.device
-        s_a = torch.randn(real_a.size(0), self.style_dim).to(device)
-        s_b = torch.randn(real_b.size(0), self.style_dim).to(device)
+         
         # encode
         c_a, s_a_prime = self.netG_A.encode(real_a)
         c_b, s_b_prime = self.netG_B.encode(real_b)
@@ -157,10 +158,14 @@ class MunitModule(BaseModule_AtoB_BtoA):
         x_a_recon = self.netG_A.decode(c_a, s_a_prime)
         x_b_recon = self.netG_B.decode(c_b, s_b_prime)
         # decode (cross domain)
-        x_ba = self.netG_A.decode(c_b, s_a)
-        x_ab = self.netG_B.decode(c_a, s_b)
-        # x_ba = self.netG_A.decode(c_b, s_a_prime) #TODO: 내가 수정해본 코드
-        # x_ab = self.netG_B.decode(c_a, s_b_prime)
+        if self.params.no_noise:
+            x_ba = self.netG_A.decode(c_b, s_a_prime)
+            x_ab = self.netG_B.decode(c_a, s_b_prime)
+        else:
+            s_a = torch.randn(real_a.size(0), self.style_dim).to(device)
+            s_b = torch.randn(real_b.size(0), self.style_dim).to(device)
+            x_ba = self.netG_A.decode(c_b, s_a)
+            x_ab = self.netG_B.decode(c_a, s_b)
         # encode again
         c_b_recon, s_a_recon = self.netG_A.encode(x_ba)
         c_a_recon, s_b_recon = self.netG_B.encode(x_ab)
