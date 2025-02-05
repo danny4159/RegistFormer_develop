@@ -147,8 +147,8 @@ class MunitModule(BaseModule_AtoB_BtoA):
     def model_step_munit(self, batch: Any):
         if len(batch) == 4:
             real_a, real_a2, real_b2, real_b = batch
-        if len(batch) == 3 and self.params.use_misalign_simul:
-            real_a, real_b, real_b_align = batch
+        elif len(batch) == 3 and self.params.use_misalign_simul:
+            real_a, real_b_align, real_b = batch
         else:
             real_a, real_b = batch
         device = real_a.device

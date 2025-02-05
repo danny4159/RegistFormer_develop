@@ -114,7 +114,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
             else: # use_misalign_simul == True:
                 if len(batch) == 5:
-                    real_a, real_b_ref, real_b, real_c_ref, real_c = batch
+                    real_a, real_b, real_b_ref, real_c, real_c_ref = batch
                     
                     real_merged = torch.cat((real_b_ref, real_c_ref), dim=1)
                     fake_merged = self.forward(real_a, real_merged)
@@ -130,7 +130,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 real_a, real_b = batch
                 fake_b = self.forward(real_a, real_b)
             else: # use_misalign_simul == True:
-                real_a, real_b_ref, real_b = batch
+                real_a, real_b, real_b_ref = batch
                 fake_b = self.forward(real_a, real_b_ref)
             return real_a, real_b, fake_b
 

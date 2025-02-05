@@ -79,7 +79,7 @@ class BaseModule_AtoB_BtoA(LightningModule):
         if len(batch) == 4: # histological dataset
             real_a, real_a2, real_b2, real_b = batch
         elif len(batch) == 3 and self.params.use_misalign_simul:
-            real_a, real_b, real_b_align = batch
+            real_a, real_b_align, real_b = batch
         else:
             real_a, real_b = batch
 

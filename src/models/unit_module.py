@@ -129,6 +129,8 @@ class UnitModule(BaseModule_AtoB_BtoA):
     def model_step_unit(self, batch: Any):
         if len(batch) == 4:
             real_a, real_a2, real_b2, real_b = batch
+        elif len(batch) == 3 and self.params.use_misalign_simul:
+            real_a, real_b_align, real_b = batch
         else:
             real_a, real_b = batch
 
