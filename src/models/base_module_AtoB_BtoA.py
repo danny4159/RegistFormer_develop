@@ -78,6 +78,8 @@ class BaseModule_AtoB_BtoA(LightningModule):
     def model_step(self, batch: Any):
         if len(batch) == 4: # histological dataset
             real_a, real_a2, real_b2, real_b = batch
+        elif len(batch) == 3 and self.params.use_misalign_simul:
+            real_a, real_b, real_b_align = batch
         else:
             real_a, real_b = batch
 
@@ -108,6 +110,10 @@ class BaseModule_AtoB_BtoA(LightningModule):
 
         if len(batch) == 4:
             return real_a, real_b, real_a2, real_b2, fake_a, fake_b
+        
+        if self.params.use_misalign_simul:
+            real_b = real_b_align
+            
         return real_a, real_b, fake_a, fake_b
 
     def on_train_start(self):

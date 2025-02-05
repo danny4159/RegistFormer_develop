@@ -63,3 +63,4 @@ params: # Other params
   lambda_perceptual: 1
   lambda_contextual: 0
   eval_on_align: ${data.eval_on_align}
+  use_misalign_simul: ${data.use_misalign_simul}

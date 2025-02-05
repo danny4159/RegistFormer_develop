@@ -13,8 +13,8 @@ data_dir: ${paths.root_dir}/data/IXI
 data_group_1: "T2"
 data_group_2: "T1"
 data_group_3: "T1_moved" # If exist put it, or null # Regist:syn_CT
-data_group_4: "PD"
-data_group_5: "PD_moved"
+data_group_4: null # PD
+data_group_5: null # PD_moved
 is_3d: False # True: 3D processing, False: 2D processing
 batch_size: 4 #5 #10 #4 #30 #16 #12 #2 #1
 num_workers: 6 # 3

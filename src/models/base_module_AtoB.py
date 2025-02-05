@@ -99,23 +99,39 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
     def model_step(self, batch: Any):
         if self.params.use_multiple_outputs:
-            if len(batch) == 3: # Ref cont 2
-                real_a, real_b, real_c = batch
-                real_merged = torch.cat((real_b, real_c), dim=1)
-                fake_merged = self.forward(real_a, real_merged)
-                fake_b, fake_c = fake_merged[:, :1, :, :], fake_merged[:, 1:, :, :]
-                real_d, fake_d = None, None
-            elif len(batch) == 4: # Ref cont 3
-                real_a, real_b, real_c, real_d = batch
-                real_merged = torch.cat((real_b, real_c, real_d), dim=1)
-                fake_merged = self.forward(real_a, real_merged)
-                fake_b, fake_c, fake_d = fake_merged[:, :1, :, :], fake_merged[:, 1:2, :, :], fake_merged[:, 2:, :, :]
+            if self.params.use_misalign_simul == False:
+                if len(batch) == 3: # Ref cont 2
+                    real_a, real_b, real_c = batch
+                    real_merged = torch.cat((real_b, real_c), dim=1)
+                    fake_merged = self.forward(real_a, real_merged)
+                    fake_b, fake_c = fake_merged[:, :1, :, :], fake_merged[:, 1:, :, :]
+                    real_d, fake_d = None, None
+                elif len(batch) == 4: # Ref cont 3
+                    real_a, real_b, real_c, real_d = batch
+                    real_merged = torch.cat((real_b, real_c, real_d), dim=1)
+                    fake_merged = self.forward(real_a, real_merged)
+                    fake_b, fake_c, fake_d = fake_merged[:, :1, :, :], fake_merged[:, 1:2, :, :], fake_merged[:, 2:, :, :]
 
+            else: # use_misalign_simul == True:
+                if len(batch) == 5:
+                    real_a, real_b_ref, real_b, real_c_ref, real_c = batch
+                    
+                    real_merged = torch.cat((real_b_ref, real_c_ref), dim=1)
+                    fake_merged = self.forward(real_a, real_merged)
+                    fake_b, fake_c = fake_merged[:, :1, :, :], fake_merged[:, 1:, :, :]
+                    real_d, fake_d = None, None
+                else:
+                    raise ValueError(f"Expected batch size of 5 for misaligned simulation, but got {len(batch)}")
+            
             return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d
 
         else: 
-            real_a, real_b = batch
-            fake_b = self.forward(real_a, real_b)
+            if self.params.use_misalign_simul == False:
+                real_a, real_b = batch
+                fake_b = self.forward(real_a, real_b)
+            else: # use_misalign_simul == True:
+                real_a, real_b_ref, real_b = batch
+                fake_b = self.forward(real_a, real_b_ref)
             return real_a, real_b, fake_b
 
     def on_train_start(self):

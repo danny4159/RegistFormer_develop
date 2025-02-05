@@ -18,8 +18,7 @@ from monai.transforms import Affine
 import random
 import math
 
-def padding_height_width(tensorA, tensorB, tensorC=None, tensorD=None, target_size=(256, 256), pad_value=-1):
-    # 기존 코드와 동일
+def padding_height_width(tensorA, tensorB, tensorC=None, tensorD=None, tensorE=None, target_size=(256, 256), pad_value=-1):
     # Determine if the input is 2D or 3D based on the number of dimensions
     if len(tensorA.shape) == 3:
         # 2D case
@@ -30,6 +29,8 @@ def padding_height_width(tensorA, tensorB, tensorC=None, tensorD=None, target_si
             assert len(tensorC.shape) == 3, "Input tensor C must have 3 dimensions (C, H, W)"
         if tensorD is not None:
             assert len(tensorD.shape) == 3, "Input tensor D must have 3 dimensions (C, H, W)"
+        if tensorE is not None:
+            assert len(tensorE.shape) == 3, "Input tensor E must have 3 dimensions (C, H, W)"
     elif len(tensorA.shape) == 4:
         # 3D case
         _, h, w, d = tensorA.shape
@@ -39,9 +40,11 @@ def padding_height_width(tensorA, tensorB, tensorC=None, tensorD=None, target_si
             assert len(tensorC.shape) == 4, "Input tensor C must have 4 dimensions (C, H, W, D)"
         if tensorD is not None:
             assert len(tensorD.shape) == 4, "Input tensor D must have 4 dimensions (C, H, W, D)"
+        if tensorE is not None:
+            assert len(tensorE.shape) == 4, "Input tensor E must have 4 dimensions (C, H, W, D)"
     else:
         raise ValueError("Input tensors must have 3 or 4 dimensions")
-    # 기존 코드와 동일
+
     # Calculate padding
     pad_top = (target_size[0] - h + 1) // 2 if h < target_size[0] else 0
     pad_bottom = (target_size[0] - h) // 2 if h < target_size[0] else 0
@@ -56,15 +59,19 @@ def padding_height_width(tensorA, tensorB, tensorC=None, tensorD=None, target_si
             tensorC = nnF.pad(tensorC, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
         if tensorD is not None:
             tensorD = nnF.pad(tensorD, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
+        if tensorE is not None:
+            tensorE = nnF.pad(tensorE, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
 
-    if tensorC is not None and tensorD is not None:
+    if tensorE is not None:
+        return tensorA, tensorB, tensorC, tensorD, tensorE
+    elif tensorD is not None:
         return tensorA, tensorB, tensorC, tensorD
     elif tensorC is not None:
         return tensorA, tensorB, tensorC
     else:
         return tensorA, tensorB
 
-def random_crop_height_width(tensorA, tensorB, tensorC=None, tensorD=None, target_size=(128, 128)):
+def random_crop_height_width(tensorA, tensorB, tensorC=None, tensorD=None, tensorE=None, target_size=(128, 128)):
     if isinstance(target_size, int):
         target_size = (target_size, target_size)
 
@@ -77,6 +84,8 @@ def random_crop_height_width(tensorA, tensorB, tensorC=None, tensorD=None, targe
             assert len(tensorC.shape) == 3, "Input tensor C must have 3 dimensions (C, H, W)"
         if tensorD is not None:
             assert len(tensorD.shape) == 3, "Input tensor D must have 3 dimensions (C, H, W)"
+        if tensorE is not None:
+            assert len(tensorE.shape) == 3, "Input tensor E must have 3 dimensions (C, H, W)"
     elif len(tensorA.shape) == 4:
         # 3D case
         _, h, w, d = tensorA.shape
@@ -85,6 +94,8 @@ def random_crop_height_width(tensorA, tensorB, tensorC=None, tensorD=None, targe
             assert len(tensorC.shape) == 4, "Input tensor C must have 4 dimensions (C, H, W, D)"
         if tensorD is not None:
             assert len(tensorD.shape) == 4, "Input tensor D must have 4 dimensions (C, H, W, D)"
+        if tensorE is not None:
+            assert len(tensorE.shape) == 4, "Input tensor E must have 4 dimensions (C, H, W, D)"
     else:
         raise ValueError("Input tensors must have 3 or 4 dimensions")
 
@@ -108,6 +119,8 @@ def random_crop_height_width(tensorA, tensorB, tensorC=None, tensorD=None, targe
             tensorC = F.crop(tensorC, top, left, target_size[0], target_size[1])
         if tensorD is not None:
             tensorD = F.crop(tensorD, top, left, target_size[0], target_size[1])
+        if tensorE is not None:
+            tensorE = F.crop(tensorE, top, left, target_size[0], target_size[1])
     elif len(tensorA.shape) == 4:
         # Perform the crop for 3D tensors
         tensorA = tensorA[:, top:top + target_size[0], left:left + target_size[1], :]
@@ -116,8 +129,12 @@ def random_crop_height_width(tensorA, tensorB, tensorC=None, tensorD=None, targe
             tensorC = tensorC[:, top:top + target_size[0], left:left + target_size[1], :]
         if tensorD is not None:
             tensorD = tensorD[:, top:top + target_size[0], left:left + target_size[1], :]
+        if tensorE is not None:
+            tensorE = tensorE[:, top:top + target_size[0], left:left + target_size[1], :]
 
-    if tensorC is not None and tensorD is not None:
+    if tensorE is not None:
+        return tensorA, tensorB, tensorC, tensorD, tensorE
+    elif tensorD is not None:
         return tensorA, tensorB, tensorC, tensorD
     elif tensorC is not None:
         return tensorA, tensorB, tensorC
@@ -256,6 +273,8 @@ class dataset_SynthRAD(Dataset):
                     C = file[self.data_group_3][patient_key][...]
                 if self.data_group_4:
                     D = file[self.data_group_4][patient_key][...]
+                if self.data_group_5:
+                    E = file[self.data_group_5][patient_key][...]
                 
         else:
             patient_idx = np.searchsorted(self.cumulative_slice_counts, idx + 1) - 1
@@ -268,6 +287,8 @@ class dataset_SynthRAD(Dataset):
                     C = file[self.data_group_3][patient_key][..., slice_idx]
                 if self.data_group_4:
                     D = file[self.data_group_4][patient_key][..., slice_idx]
+                if self.data_group_5:
+                    E = file[self.data_group_5][patient_key][..., slice_idx]
 
         A = torch.from_numpy(A).unsqueeze(0).float()
         B = torch.from_numpy(B).unsqueeze(0).float()
@@ -275,6 +296,8 @@ class dataset_SynthRAD(Dataset):
             C = torch.from_numpy(C).unsqueeze(0).float()
         if self.data_group_4:
             D = torch.from_numpy(D).unsqueeze(0).float()
+        if self.data_group_5:
+            E = torch.from_numpy(E).unsqueeze(0).float()
 
         # Create a dictionary for the data
         data_dict = {"A": A, "B": B}
@@ -282,6 +305,8 @@ class dataset_SynthRAD(Dataset):
             data_dict["C"] = C
         if self.data_group_4:
             data_dict["D"] = D
+        if self.data_group_5:
+            data_dict["E"] = E
 
         A = data_dict["A"]
         B = data_dict["B"]
@@ -289,19 +314,25 @@ class dataset_SynthRAD(Dataset):
             C = data_dict["C"]
         if self.data_group_4:
             D = data_dict["D"]
-
+        if self.data_group_5:
+            E = data_dict["E"]
+            
         if self.padding_size:
-            if self.data_group_4:
-                A, B, C, D = padding_height_width(A, B, C, D, target_size=self.padding_size)
+            if self.data_group_5:
+                A, B, C, D, E = padding_height_width(A, B, C, D, E, target_size=self.padding_size) 
+            elif self.data_group_4:
+                A, B, C, D = padding_height_width(A, B, C, D, E, target_size=self.padding_size)
             elif self.data_group_3:
-                A, B, C = padding_height_width(A, B, C, target_size=self.padding_size)
+                A, B, C = padding_height_width(A, B, C, E, target_size=self.padding_size)
             else:
-                A, B = padding_height_width(A, B, target_size=self.padding_size)
+                A, B = padding_height_width(A, B, E, target_size=self.padding_size)
 
         data_dict = self.aug_func(data_dict)
 
         if self.crop_size:
-            if self.data_group_4:
+            if self.data_group_5:
+                A, B, C, D, E = random_crop_height_width(A, B, C, D, E, target_size=self.crop_size)
+            elif self.data_group_4:
                 A, B, C, D = random_crop_height_width(A, B, C, D, target_size=self.crop_size) 
             elif self.data_group_3:
                 A, B, C = random_crop_height_width(A, B, C, target_size=self.crop_size) 
@@ -309,21 +340,25 @@ class dataset_SynthRAD(Dataset):
                 A, B = random_crop_height_width(A, B, target_size=self.crop_size) 
         else:
             if self.data_group_4:
-                A, B, C, D = even_crop_height_width(A, B, C, D, multiple=(16, 16)) # 16의 배수로 Crop
+                A, B, C, D = even_crop_height_width(A, B, C, D, multiple=(16, 16))
             elif self.data_group_3:
-                A, B, C = even_crop_height_width(A, B, C, multiple=(16, 16)) # 16의 배수로 Crop
+                A, B, C = even_crop_height_width(A, B, C, multiple=(16, 16))
             else:
-                A, B = even_crop_height_width(A, B, multiple=(16, 16)) # 16의 배수로 Crop
+                A, B = even_crop_height_width(A, B, multiple=(16, 16))
                 
         if self.reverse:
-            if self.data_group_4:
+            if self.data_group_5:
+                return E, D, C, B, A
+            elif self.data_group_4:
                 return D, C, B, A
             elif self.data_group_3:
                 return C, B, A
             else:
                 return B, A
         else:
-            if self.data_group_4:
+            if self.data_group_5:
+                return A, B, C, D, E
+            elif self.data_group_4:
                 return A, B, C, D
             elif self.data_group_3:
                 return A, B, C
