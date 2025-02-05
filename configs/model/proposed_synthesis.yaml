@@ -76,3 +76,4 @@ params: # Other params
   use_multiple_outputs: ${data.use_multiple_outputs} # Set True if data_group_3 is exist
   nce_on_vgg: false #True
   nce_independent: false
+  use_misalign_simul: ${data.use_misalign_simul}

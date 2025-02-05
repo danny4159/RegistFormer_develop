@@ -191,6 +191,7 @@ class dataset_SynthRAD(Dataset):
         data_group_2: str,
         data_group_3: Optional[str] = None,
         data_group_4: Optional[str] = None,
+        data_group_5: Optional[str] = None,
         is_3d: bool = False,
         padding_size: Optional[Tuple[int, int]] = None,
         flip_prob: float = 0.0,
@@ -206,6 +207,7 @@ class dataset_SynthRAD(Dataset):
         self.data_group_2 = data_group_2
         self.data_group_3 = data_group_3
         self.data_group_4 = data_group_4
+        self.data_group_5 = data_group_5
         self.is_3d = is_3d
         self.padding_size = padding_size
         self.crop_size = crop_size

@@ -86,6 +86,7 @@ class MunitModule(BaseModule_AtoB_BtoA):
         pred_fake = self.netD_B(x_ab)
         loss_G_adv_b = self.criterionGAN(pred_fake, True)
         loss_GAN = (loss_G_adv_a + loss_G_adv_b)
+        self.log("loss_GAN", loss_GAN.detach(), prog_bar=True)
         loss_G += loss_GAN
 
         # loss recon
@@ -93,12 +94,14 @@ class MunitModule(BaseModule_AtoB_BtoA):
             loss_gen_recon_x_a = self.criterionRecon(x_a_recon, real_a)
             loss_gen_recon_x_b = self.criterionRecon(x_b_recon, real_b)
             loss_image = (loss_gen_recon_x_a + loss_gen_recon_x_b) * lambda_image
+            self.log("loss_image", loss_image.detach(), prog_bar=True)
             loss_G += loss_image
 
         if lambda_style != 0:
             loss_gen_recon_s_a = self.criterionRecon(s_a_recon, s_a)
             loss_gen_recon_s_b = self.criterionRecon(s_b_recon, s_b)
             loss_style = (loss_gen_recon_s_a + loss_gen_recon_s_b) * lambda_style
+            self.log("loss_style", loss_style.detach(), prog_bar=True)
             loss_G += loss_style
 
         # Non noise
@@ -110,12 +113,14 @@ class MunitModule(BaseModule_AtoB_BtoA):
             loss_gen_recon_c_a = self.criterionRecon(c_a_recon, c_a)
             loss_gen_recon_c_b = self.criterionRecon(c_b_recon, c_b)
             loss_content = (loss_gen_recon_c_a+ loss_gen_recon_c_b) * lambda_content
+            self.log("loss_content", loss_content.detach(), prog_bar=True)
             loss_G += loss_content
 
         if lambda_cycle != 0:
             loss_gen_cycrecon_x_a = self.criterionRecon(x_aba, real_a)
             loss_gen_cycrecon_x_b = self.criterionRecon(x_bab, real_b)
             loss_cycle = (loss_gen_cycrecon_x_a + loss_gen_cycrecon_x_b) * lambda_cycle
+            self.log("loss_cycle", loss_cycle.detach(), prog_bar=True)
             loss_G += loss_cycle
 
         # domain-invariant perceptual loss
@@ -123,6 +128,7 @@ class MunitModule(BaseModule_AtoB_BtoA):
             loss_G_vgg_b = self.criterionPerceptual(x_ba, real_b)  
             loss_G_vgg_a = self.criterionPerceptual(x_ab, real_a)  
             loss_perceptual = (loss_G_vgg_a + loss_G_vgg_b) * lambda_perceptual
+            self.log("loss_perceptual", loss_perceptual.detach(), prog_bar=True)
             loss_G += loss_perceptual
         
         # contextual loss (extra)
@@ -130,6 +136,7 @@ class MunitModule(BaseModule_AtoB_BtoA):
             loss_contextual_a = torch.mean(self.contextual_loss(x_ba, real_a))
             loss_contextual_b = torch.mean(self.contextual_loss(x_ab, real_b))
             loss_contextual = (loss_contextual_a + loss_contextual_b) * lambda_contextual
+            self.log("loss_contextual", loss_contextual.detach(), prog_bar=True)
             loss_G += loss_contextual
 
         # total loss 
