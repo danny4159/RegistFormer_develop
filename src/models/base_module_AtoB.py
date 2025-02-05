@@ -88,7 +88,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             
             # Sliding window on inference
             if self.params.use_sliding_inference and not self.training:
-                inferer = SlidingWindowInferer(roi_size=(256,256), mode='gaussian') # 128,128
+                inferer = SlidingWindowInferer(roi_size=(128,128), mode='gaussian') # 128,128
                 pred = inferer(inputs=merged_input, network=self.netG_A) #inputs 손봐야해
                 return pred
         
@@ -335,6 +335,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 self.test_lpips_C.update(gray2rgb(real_C), gray2rgb(fake_C))
                 self.lpips_values_C.append(self.test_lpips_C.compute().item())
                 self.test_lpips_C.reset()
+                self.test_sharpness_C.update(norm_to_uint8(fake_C).float())
 
                 if fake_D is not None:
                     self.test_ssim_D.update(real_D, fake_D)
