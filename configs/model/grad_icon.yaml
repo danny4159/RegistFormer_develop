@@ -29,3 +29,5 @@ params: # Other params
   use_split_inference: ${data.use_split_inference}
   batch_size: ${data.batch_size}
   is_3d: ${data.is_3d}
+  eval_on_align: ${data.eval_on_align}
+  use_misalign_simul: ${data.use_misalign_simul}

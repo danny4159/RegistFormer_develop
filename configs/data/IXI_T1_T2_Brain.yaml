@@ -14,6 +14,7 @@ data_group_1: "T1"
 data_group_2: "T2"
 data_group_3: null # If exist put it, or null # Regist:syn_CT
 data_group_4: null
+data_group_5: null
 is_3d: False # True: 3D processing, False: 2D processing
 batch_size: 4 #5 #10 #4 #30 #16 #12 #2 #1
 num_workers: 6 # 3

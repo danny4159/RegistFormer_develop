@@ -91,13 +91,17 @@ class TransMorph_Module(BaseModule_Registration):
         
     #
     def model_step(self, batch: Any, is_3d=False, is_train=False):
-        evaluation_img, moving_img, fixed_img = batch
+        if len(batch) == 4 and self.params.use_misalign_simul:
+            evaluation_img, fixed_eval, moving_img, fixed_img = batch
+        elif len(batch) == 3:
+            evaluation_img, moving_img, fixed_img = batch
+
         if is_3d:
 
             _, _, H, W, D = evaluation_img.shape
             # scale_factor = 0.7
             # new_size = [int(H * scale_factor), int(W * scale_factor), int(D)]
-            new_size = [int(320), int(256), int(D)]
+            new_size = [int(256), int(256), int(D)] #TODO: 이미지의 사이즈대로 세팅해줘야함
 
             evaluation_img = F.interpolate(evaluation_img, size=new_size, mode='trilinear', align_corners=False)
             moving_img = F.interpolate(moving_img, size=new_size, mode='trilinear', align_corners=False)
@@ -121,6 +125,9 @@ class TransMorph_Module(BaseModule_Registration):
             moving_img = self.crop_slice_to_original(moving_img, original_slices)
             fixed_img = self.crop_slice_to_original(fixed_img, original_slices)
             warped_img = self.crop_slice_to_original(warped_img, original_slices)
+
+        if self.params.use_misalign_simul:
+            fixed_img = fixed_eval # fixed eval is aligned GT
 
         if is_train:
             return evaluation_img, moving_img, fixed_img, warped_img, deform_field

@@ -60,13 +60,17 @@ class GradICONModule(BaseModule_Registration):
     def model_step_for_train(self, batch: Any):
         evaluation_img, moving_img, fixed_img = batch # MR, CT, syn_CT
         original_slices = evaluation_img.shape[-1]
-        moving_img = self.pad_slice_to_128(moving_img)
+        moving_img = self.pad_slice_to_128(moving_img) # TODO: slice 128 되도록 유지. 더 적으면 error였어.
         fixed_img = self.pad_slice_to_128(fixed_img)
         loss, transform_vector, warped_img = self.netR_A(moving_img, fixed_img)
         return loss
 
     def model_step(self, batch: Any, is_3d=False):
-        evaluation_img, moving_img, fixed_img = batch
+        if len(batch) == 4 and self.params.use_misalign_simul:
+            evaluation_img, fixed_eval, moving_img, fixed_img = batch
+        elif len(batch) == 3:
+            evaluation_img, moving_img, fixed_img = batch
+
         if is_3d:
             moving_img_np = moving_img.cpu().detach().squeeze().numpy()
             fixed_img_np = fixed_img.cpu().detach().squeeze().numpy()
@@ -87,8 +91,7 @@ class GradICONModule(BaseModule_Registration):
                                                     )
             warped_img_np = itk.array_from_image(warped_img) # D, W, H -> H, W, D
             warped_img_tensor = torch.from_numpy(warped_img_np).unsqueeze(0).unsqueeze(0)
-            warped_img_tensor = warped_img_tensor.to(evaluation_img.device)
-            return evaluation_img, moving_img, fixed_img, warped_img_tensor
+            warped_img = warped_img_tensor.to(evaluation_img.device)
     
         else:
             # original_slices = evaluation_img.shape[-1] #Padding is not needed
@@ -97,7 +100,11 @@ class GradICONModule(BaseModule_Registration):
             # loss, transform_vector, warped_img_pad = self.netR_A(moving_img_pad, fixed_img_pad)
             loss, transform_vector, warped_img = self.netR_A(moving_img, fixed_img)
             # warped_img = self.crop_slice_to_original(warped_img_pad, original_slices)
-            return evaluation_img, moving_img, fixed_img, warped_img
+
+        if self.params.use_misalign_simul:
+            fixed_img = fixed_eval # fixed eval is aligned GT
+
+        return evaluation_img, moving_img, fixed_img, warped_img
 
 
         

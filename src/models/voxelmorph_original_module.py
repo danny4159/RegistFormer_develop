@@ -99,7 +99,11 @@ class VoxelmorphOriginalModule(BaseModule_Registration):
 
 
     def model_step(self, batch: Any, is_3d=False, is_train=False):
-        evaluation_img, moving_img, fixed_img = batch
+        if len(batch) == 4 and self.params.use_misalign_simul:
+            evaluation_img, fixed_eval, moving_img, fixed_img = batch
+        elif len(batch) == 3:
+            evaluation_img, moving_img, fixed_img = batch
+
         if is_3d:
             original_slices = evaluation_img.shape[-1]
             # moving_img = self.pad_slice_to_128(moving_img)
@@ -113,6 +117,9 @@ class VoxelmorphOriginalModule(BaseModule_Registration):
 
         else:
             warped_img, deform_field = self.netR_A(moving_img, fixed_img, registration=True)
+
+        if self.params.use_misalign_simul:
+            fixed_img = fixed_eval # fixed eval is aligned GT
 
         if is_train:
             return evaluation_img, moving_img, fixed_img, warped_img, deform_field
