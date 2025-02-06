@@ -111,7 +111,10 @@ class BaseModule_AtoB_BtoA(LightningModule):
         if len(batch) == 4:
             return real_a, real_b, real_a2, real_b2, fake_a, fake_b
         
-        if self.params.use_misalign_simul and not self.params.inference_for_registration:
+        if self.params.inference_for_registration: # nii -> h5 (For registration)
+            return real_a, real_b_align, real_b, fake_b # T2, T1_aligned, T1_misaligned, T1_synthesized
+
+        if self.params.use_misalign_simul:
             real_b = real_b_align
             
         return real_a, real_b, fake_a, fake_b

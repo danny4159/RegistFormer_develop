@@ -8,6 +8,8 @@ from torchmetrics.clustering import NormalizedMutualInfoScore
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.kid import KernelInceptionDistance
 from src.metrics.sharpness import SharpnessMetric
+from torchmetrics.image import StructuralSimilarityIndexMeasure, PeakSignalNoiseRatio
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics import MeanSquaredError
 
 gray2rgb = lambda x: torch.cat((x, x, x), dim=1)
@@ -20,24 +22,40 @@ class BaseModule_Registration(LightningModule):  # single direction
         super().__init__()
         self.params = params
 
-        self.val_gc_B, self.val_nmi_B, self.val_fid_B, self.val_kid_B, self.val_sharpness_B, self.val_l2_B = self.define_metrics()
-        self.test_gc_B, self.test_nmi_B, self.test_fid_B, self.test_kid_B, self.test_sharpness_B, self.test_l2_B = self.define_metrics()
+        if self.params.eval_on_align:
+            self.val_ssim_B, self.val_psnr_B, self.val_lpips_B, self.val_sharpness_B = self.define_metrics()
+            self.test_ssim_B, self.test_psnr_B, self.test_lpips_B, self.test_sharpness_B = self.define_metrics()
+            self.val_metrics = [self.val_ssim_B, self.val_psnr_B, self.val_lpips_B, self.val_sharpness_B]
+            self.test_metrics = [self.test_ssim_B, self.test_psnr_B, self.test_lpips_B, self.test_sharpness_B]
+            self.psnr_values_B = []
+            self.lpips_values_B = []
 
-        self.val_metrics = [self.val_gc_B, self.val_nmi_B, self.val_fid_B, self.val_kid_B, self.val_sharpness_B, self.val_l2_B]
-        self.test_metrics = [self.test_gc_B, self.test_nmi_B, self.test_fid_B, self.test_kid_B, self.test_sharpness_B, self.test_l2_B]
+        else: 
+            self.val_gc_B, self.val_nmi_B, self.val_fid_B, self.val_kid_B, self.val_sharpness_B, self.val_l2_B = self.define_metrics()
+            self.test_gc_B, self.test_nmi_B, self.test_fid_B, self.test_kid_B, self.test_sharpness_B, self.test_l2_B = self.define_metrics()
 
-        self.nmi_scores = []
+            self.val_metrics = [self.val_gc_B, self.val_nmi_B, self.val_fid_B, self.val_kid_B, self.val_sharpness_B, self.val_l2_B]
+            self.test_metrics = [self.test_gc_B, self.test_nmi_B, self.test_fid_B, self.test_kid_B, self.test_sharpness_B, self.test_l2_B]
 
-    @staticmethod
-    def define_metrics():
-        gc = GradientCorrelationMetric()
-        nmi = NormalizedMutualInfoScore()
-        fid = FrechetInceptionDistance()
-        kid = KernelInceptionDistance(subset_size=2)
-        sharpness = SharpnessMetric()
-        l2 = MeanSquaredError()
+            self.nmi_scores = []
 
-        return gc, nmi, fid, kid, sharpness, l2
+    def define_metrics(self):
+        if self.params.eval_on_align:
+            ssim = StructuralSimilarityIndexMeasure(reduction="none")
+            psnr = PeakSignalNoiseRatio()
+            lpips = LearnedPerceptualImagePatchSimilarity()
+            sharpness = SharpnessMetric()
+            return ssim, psnr, lpips, sharpness
+
+        else:
+            gc = GradientCorrelationMetric()
+            nmi = NormalizedMutualInfoScore()
+            fid = FrechetInceptionDistance()
+            kid = KernelInceptionDistance(subset_size=2)
+            sharpness = SharpnessMetric()
+            l2 = MeanSquaredError()
+            return gc, nmi, fid, kid, sharpness, l2
+
 
     # def forward(self, a: torch.Tensor, b: torch.Tensor):
     #     return self.netG_A(a, b)
@@ -84,6 +102,17 @@ class BaseModule_Registration(LightningModule):  # single direction
     def validation_step(self, batch: Any, batch_idx: int):
         evaluation_img, moving_img, fixed_img, warped_img = self.model_step(batch, is_3d=self.params.is_3d) # MR, CT, syn_CT, _
         
+        if self.params.eval_on_align:
+            self.val_ssim_B.update(fixed_img, warped_img)
+            self.val_psnr_B.update(fixed_img, warped_img)
+            self.psnr_values_B.append(self.val_psnr_B.compute().item())
+            self.val_psnr_B.reset()
+            self.val_lpips_B.update(gray2rgb(fixed_img), gray2rgb(warped_img))
+            self.lpips_values_B.append(self.val_lpips_B.compute().item())
+            self.val_lpips_B.reset()
+            self.val_sharpness_B.update(norm_to_uint8(warped_img).float())
+
+
         if len(evaluation_img.size()) == 5: # B x C x H x W x D (3D image)
             for i in range(evaluation_img.size(4)):  # slice dim
                 self.val_gc_B.update(norm_to_uint8(evaluation_img[:, :, :, :, i]), norm_to_uint8(warped_img[:, :, :, :, i]))
