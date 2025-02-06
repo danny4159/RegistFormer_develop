@@ -59,3 +59,4 @@ params: # Other params
   eval_on_align: ${data.eval_on_align}
   no_noise: False
   use_misalign_simul: ${data.use_misalign_simul}
+  inference_for_registration: False # MUNIT을 학습할땐 False, Reigstration을 위해 Inference 필요할땐 True. 이때 평가된 Metric은 무시. 틀린 것.
