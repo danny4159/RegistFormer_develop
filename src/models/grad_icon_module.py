@@ -58,7 +58,10 @@ class GradICONModule(BaseModule_Registration):
         return tensor[..., :original_slices]
     
     def model_step_for_train(self, batch: Any):
-        evaluation_img, moving_img, fixed_img = batch # MR, CT, syn_CT
+        if len(batch) == 4 and self.params.use_misalign_simul:
+            evaluation_img, fixed_eval, moving_img, fixed_img = batch
+        elif len(batch) == 3:
+            evaluation_img, moving_img, fixed_img = batch
         original_slices = evaluation_img.shape[-1]
         moving_img = self.pad_slice_to_128(moving_img) # TODO: slice 128 되도록 유지. 더 적으면 error였어.
         fixed_img = self.pad_slice_to_128(fixed_img)
