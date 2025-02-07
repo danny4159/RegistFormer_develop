@@ -208,7 +208,7 @@ class BaseModule_Registration(LightningModule):  # single direction
                     self.test_lpips_B.reset()
                     self.test_sharpness_B.update(norm_to_uint8(warped_img[:, :, :, :, i]).float())
 
-            elif len(evaluation_img.size()) == 4:
+            elif len(evaluation_img.size()) == 4: 
                 self.test_ssim_B.update(fixed_img, warped_img)
                 self.test_psnr_B.update(fixed_img, warped_img)
                 self.psnr_values_B.append(self.test_psnr_B.compute().item())
