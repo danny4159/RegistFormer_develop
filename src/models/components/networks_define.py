@@ -20,6 +20,7 @@ from src.models.components.network_grad_icon import GradICON
 from src.models.components.network_voxelmorph_original import VxmDense
 from src.models.components.network_lapIRN import Miccai2020_LDR_laplacian_unit_disp_add_lvl1, Miccai2020_LDR_laplacian_unit_disp_add_lvl2, Miccai2020_LDR_laplacian_unit_disp_add_lvl3
 from src.models.components.network_transMorph import TransMorph
+from src.models.components.network_resvit import ResViT
 
 # from src.models.components.networks_spade_danny import SPADEGenerator, ConvEncoder
 
@@ -250,6 +251,8 @@ def define_G(**kwargs):
         net = ResnetGenerator(**kwargs)
     elif kwargs.get('netG_type') == 'resnet_cat':
         net = G_Resnet(**kwargs)
+    elif kwargs.get('netG_type') == 'resvit':
+        net = ResViT(**kwargs)
     else:
         raise ValueError('This netG_type is not expected')
     return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)

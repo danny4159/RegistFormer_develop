@@ -1,0 +1,66 @@
+_target_: src.models.resvit_module.ResViTModule
+
+name: resvit
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.0001
+  betas: [0.5, 0.999]
+  weight_decay: 0.0001
+
+
+netG_A:
+  _target_: src.models.components.networks_define.define_G
+  netG_type: 'resvit'
+  vit_name: 'Res-ViT-B_16'
+  input_dim: 1
+  output_dim: 1
+  ngf: 64
+  img_size: 256
+  vis: False
+  norm_layer: 'instance'
+  use_dropout: False
+  init_type: 'normal'
+
+netG_B:
+  _target_: src.models.components.networks_define.define_G
+  netG_type: 'resvit'
+  vit_name: 'Res-ViT-B_16'
+  input_dim: 1
+  output_dim: 1
+  ngf: 64
+  img_size: 256
+  vis: False
+  norm_layer: 'instance'
+  use_dropout: False
+  init_type: 'normal'
+
+netD_A:
+  _target_: src.models.components.networks_define.define_D
+  input_nc: 2
+  ndf: 64
+  norm: 'instance'
+  n_layers_D: 3
+  init_type: 'normal'
+
+netD_B:
+  _target_: src.models.components.networks_define.define_D
+  input_nc: 2
+  ndf: 64
+  norm: 'instance'
+  n_layers_D: 3
+  init_type: 'normal'
+
+params: # Other params
+  pool_size: 0
+  lambda_l1: 150
+  # lambda_vgg: 20
+  # lambda_smooth: 25
+  reverse: ${data.reverse} # A->B if False, B->A if True
+  use_split_inference: ${data.use_split_inference}
+  eval_on_align: ${data.eval_on_align}
+  use_sliding_inference: ${data.use_sliding_inference}
+  use_multiple_outputs: ${data.use_multiple_outputs} # Set True if data_group_3 is exist
+  use_misalign_simul: ${data.use_misalign_simul}
+  inference_for_registration: False
