@@ -73,14 +73,14 @@ class ProposedSynthesisModule(nn.Module):
         ref = merged_input[:, 1:, :, :]
         
         if self.training: # H,W = 128,128
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='bilinear', align_corners=True)
+            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest')
         else: # H,W = 256,256
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯 
+            style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯 
         
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/64, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, size=(1, 1), mode='bilinear', align_corners=True) # Ablation
+        # style_guidance_1 = F.interpolate(ref, size=(1, 1), mode='nearest') # Ablation
         feats = []
         feat0 = self.conv0(x, style_guidance_1) # [1, feat_ch, H, W]
         feat1 = self.conv11(feat0, style_guidance_1) # [1, feat_ch, H/2, W/2]
