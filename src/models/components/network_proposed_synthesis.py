@@ -97,26 +97,6 @@ class ProposedSynthesisModule(nn.Module):
         out = self.conv_final(feat6)
         out = torch.tanh(out)
 
-        ## Delete Conv end for a moment
-        # if self.use_multiple_outputs:
-        #     feat6_1, feat6_2 = torch.chunk(feat6, chunks=2, dim=1)
-        #     feat7_1 = self.conv7_1(feat6_1)
-        #     feat8_1 = self.conv8_1(feat7_1)
-        #     out_1 = self.conv_final_1(feat8_1)
-        #     out_1 = torch.tanh(out_1)
-
-        #     feat7_2 = self.conv7_2(feat6_2)
-        #     feat8_2 = self.conv8_2(feat7_2)
-        #     out_2 = self.conv_final_2(feat8_2)
-        #     out_2 = torch.tanh(out_2)
-
-        #     out = torch.cat((out_1, out_2), dim=1)
-        # else:
-        #     feat7 = self.conv7(feat6)
-        #     feat8 = self.conv8(feat7)
-        #     out = self.conv_final(feat8)
-        #     out = torch.tanh(out)
-
         if encode_only:
             # Collect intermediate features based on specified layers
             layers_dict = {
