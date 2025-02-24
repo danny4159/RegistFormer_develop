@@ -7,6 +7,7 @@ import torch
 from src.losses.gan_loss import GANLoss
 from src.losses.contextual_loss import Contextual_Loss, VGG_Model
 from src.losses.patch_nce_loss import PatchNCELoss
+from src.losses.mind_loss import MINDLoss
 
 from src import utils
 from src.models.base_module_AtoB_BtoA import BaseModule_AtoB_BtoA
@@ -63,152 +64,192 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         }
 
         # loss function
-        self.criterionContextual = Contextual_Loss(style_feat_layers)
+        self.criterionContextual = Contextual_Loss(style_feat_layers) if params.lambda_style != 0 else None
         self.criterionGAN = GANLoss(gan_type='lsgan')
-        self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size)
+        self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size) if params.lambda_nce != 0 else None
+
+        # Loss for ablation
+        self.criterionMIND = MINDLoss() if params.lambda_mind != 0 else None
+        self.criterionL1 = torch.nn.L1Loss() if params.lambda_l1 != 0 else None
+
 
         # PatchNCE specific initializations
         # self.nce_layers = [0,2,4,6] # range: 0~6
         # self.flip_equivariance = params.flip_equivariance
 
-    def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, lambda_style, lambda_nce): # real_a, real_b, fake_b
+    def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d): # real_a, real_b, fake_b
+        loss_G = 0.0
         ##################################################################################################################
         ## 1. GAN Loss
-        pred_fake = self.netD_A(fake_b.detach())
-        loss_gan_b = self.criterionGAN(pred_fake, True)
-        # assert not torch.isnan(loss_gan_b).any(), "GAN Loss is NaN"
-        
-        if self.params.use_multiple_outputs:
-            pred_fake = self.netD_B(fake_c.detach())
-            loss_gan_c = self.criterionGAN(pred_fake, True)
-            # assert not torch.isnan(loss_gan_c).any(), "GAN Loss is NaN"
-            if fake_d is not None:
-                pred_fake = self.netD_D(fake_d.detach())
-                loss_gan_d = self.criterionGAN(pred_fake, True)
-                # assert not torch.isnan(loss_gan_d).any(), "GAN Loss is NaN"
+        if self.criterionGAN:
+            pred_fake = self.netD_A(fake_b.detach())
+            loss_gan_b = self.criterionGAN(pred_fake, True)
+            self.log("Gan_b_Loss", loss_gan_b.detach(), prag_bar=True)
+            loss_G += loss_gan_b
+            # assert not torch.isnan(loss_gan_b).any(), "GAN Loss is NaN"
+            
+            if self.params.use_multiple_outputs:
+                pred_fake = self.netD_B(fake_c.detach())
+                loss_gan_c = self.criterionGAN(pred_fake, True)
+                self.log("Gan_c_Loss", loss_gan_c.detach(), prag_bar=True)
+                loss_G += loss_gan_c
+                # assert not torch.isnan(loss_gan_c).any(), "GAN Loss is NaN"
+                if fake_d is not None:
+                    pred_fake = self.netD_D(fake_d.detach())
+                    loss_gan_d = self.criterionGAN(pred_fake, True)
+                    self.log("Gan_d_Loss", loss_gan_d.detach(), prag_bar=True)
+                    loss_G += loss_gan_d
+                    # assert not torch.isnan(loss_gan_d).any(), "GAN Loss is NaN"
 
         ##################################################################################################################
         ## 2. Contextual loss: fake_b, fake_c 각각 따로
-        loss_style_b = self.criterionContextual(real_b, fake_b)
-        loss_style_b =  loss_style_b * lambda_style
-        # assert not torch.isnan(loss_style_b).any(), "Contextual Loss is NaN"
+        if self.criterionContextual:
+            loss_style_b = self.criterionContextual(real_b, fake_b)
+            loss_style_b =  loss_style_b * self.params.lambda_style
+            self.log("Context_b_Loss", loss_style_b.detach(), prag_bar=True)
+            loss_G += loss_style_b
+            # assert not torch.isnan(loss_style_b).any(), "Contextual Loss is NaN"
 
-        if self.params.use_multiple_outputs:
-            loss_style_c = self.criterionContextual(real_c, fake_c)
-            loss_style_c =  loss_style_c * lambda_style
-            # assert not torch.isnan(loss_style_c).any(), "Contextual Loss is NaN"
-            if fake_d is not None:
-                loss_style_d = self.criterionContextual(real_d, fake_d)
-                loss_style_d =  loss_style_d * lambda_style
-            # assert not torch.isnan(loss_style_d).any(), "Contextual Loss is NaN"
+            if self.params.use_multiple_outputs:
+                loss_style_c = self.criterionContextual(real_c, fake_c)
+                loss_style_c =  loss_style_c * self.params.lambda_style
+                self.log("Context_c_Loss", loss_style_c.detach(), prag_bar=True)
+                loss_G += loss_style_c
+                # assert not torch.isnan(loss_style_c).any(), "Contextual Loss is NaN"
+                if fake_d is not None:
+                    loss_style_d = self.criterionContextual(real_d, fake_d)
+                    loss_style_d =  loss_style_d * self.params.lambda_style
+                    self.log("Context_d_Loss", loss_style_d.detach(), prag_bar=True)
+                    loss_G += loss_style_d
+                # assert not torch.isnan(loss_style_d).any(), "Contextual Loss is NaN"
 
         ##################################################################################################################
         ## 3. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
-        if self.params.nce_on_vgg:
-            real_rgb = real_a.repeat(1, 3, 1, 1)
-            if self.params.nce_independent:
-                fake_rgb_b = fake_b.repeat(1, 3, 1, 1)
-                fake_rgb_c = fake_c.repeat(1, 3, 1, 1)
-            elif fake_d is not None:
-                fake_rgb = torch.cat((fake_b, fake_c, fake_d), dim=1)
-            elif fake_c is not None:
-                fake_rgb = torch.cat((fake_b, fake_c, torch.zeros_like(fake_b)), dim=1) # Last channel is average -> zero (For checkerboard artifact but not sure)
-            else:
-                fake_rgb = torch.cat((fake_b, fake_b, fake_b), dim=1) # Last channel is average -> zero (For checkerboard artifact but not sure)
-            self.vgg.to(real_a.device)
+        if self.criterionNCE:
+            if self.params.nce_on_vgg:
+                real_rgb = real_a.repeat(1, 3, 1, 1)
+                if self.params.nce_independent:
+                    fake_rgb_b = fake_b.repeat(1, 3, 1, 1)
+                    fake_rgb_c = fake_c.repeat(1, 3, 1, 1)
+                elif fake_d is not None:
+                    fake_rgb = torch.cat((fake_b, fake_c, fake_d), dim=1)
+                elif fake_c is not None:
+                    fake_rgb = torch.cat((fake_b, fake_c, torch.zeros_like(fake_b)), dim=1) # Last channel is average -> zero (For checkerboard artifact but not sure)
+                else:
+                    fake_rgb = torch.cat((fake_b, fake_b, fake_b), dim=1) # Last channel is average -> zero (For checkerboard artifact but not sure)
+                self.vgg.to(real_a.device)
 
-            if self.params.nce_independent:
-                feat_a = self.vgg(real_rgb)
-                feat_a = list(feat_a.values())
+                if self.params.nce_independent:
+                    feat_a = self.vgg(real_rgb)
+                    feat_a = list(feat_a.values())
 
-                feat_b = self.vgg(fake_rgb_b)
-                feat_b = list(feat_b.values())
+                    feat_b = self.vgg(fake_rgb_b)
+                    feat_b = list(feat_b.values())
 
-                feat_c = self.vgg(fake_rgb_c)
-                feat_c = list(feat_c.values())
+                    feat_c = self.vgg(fake_rgb_c)
+                    feat_c = list(feat_c.values())
 
-                feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-                feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
-                feat_c_pool, _ = self.netF_A(feat_c, 256, sample_ids)
+                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+                    feat_c_pool, _ = self.netF_A(feat_c, 256, sample_ids)
 
-                total_nce_loss = 0.0
+                    total_nce_loss = 0.0
 
-                for f_a, f_b, f_c in zip(feat_a_pool, feat_b_pool, feat_c_pool):
-                    loss = (self.criterionNCE(f_a, f_b) + self.criterionNCE(f_a, f_c)) * self.params.lambda_nce
-                    total_nce_loss = total_nce_loss + loss.mean()
-                loss_nce_b = total_nce_loss / (len(feat_b) + len(feat_c))
+                    for f_a, f_b, f_c in zip(feat_a_pool, feat_b_pool, feat_c_pool):
+                        loss = (self.criterionNCE(f_a, f_b) + self.criterionNCE(f_a, f_c)) * self.params.lambda_nce
+                        total_nce_loss = total_nce_loss + loss.mean()
+                    loss_nce_b = total_nce_loss / (len(feat_b) + len(feat_c))
+                    self.log("NCE_b_Loss", loss_nce_b.detach(), prag_bar=True)
+                    loss_G += loss_nce_b
 
-            else:
-                feat_b = self.vgg(fake_rgb)
-                feat_b = list(feat_b.values()) # [0]:8,512,16,16 [1]:8,512,8,8
+                else:
+                    feat_b = self.vgg(fake_rgb)
+                    feat_b = list(feat_b.values()) # [0]:8,512,16,16 [1]:8,512,8,8
 
-                feat_a = self.vgg(real_rgb)
-                feat_a = list(feat_a.values())
+                    feat_a = self.vgg(real_rgb)
+                    feat_a = list(feat_a.values())
 
-                feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-                feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
 
-                total_nce_loss = 0.0
+                    total_nce_loss = 0.0
 
-                for f_a, f_b in zip(feat_a_pool,feat_b_pool):
-                    loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce
-                    total_nce_loss = total_nce_loss + loss.mean()
-                loss_nce_b = total_nce_loss / len(feat_b)
+                    for f_a, f_b in zip(feat_a_pool,feat_b_pool):
+                        loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce
+                        total_nce_loss = total_nce_loss + loss.mean()
+                    loss_nce_b = total_nce_loss / len(feat_b)
+                    self.log("NCE_b_Loss", loss_nce_b.detach(), prag_bar=True)
+                    loss_G += loss_nce_b
 
-        else: # 이건 구현 덜됨. 나중에 필요할때 구현.
+            else: # 이건 구현 덜됨. 나중에 필요할때 구현.
+                if self.params.use_multiple_outputs:
+                    n_layers = len(self.params.nce_layers)
+                    merged_input_1 = torch.cat((fake_b, real_a, real_a), dim=1)
+                    feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
+                    
+                    merged_input_2 = torch.cat((fake_c, real_a, real_a), dim=1) 
+                    feat_c = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+
+                    flipped_for_equivariance = np.random.random() < 0.5
+                    if self.params.flip_equivariance and flipped_for_equivariance:
+                        feat_b = [torch.flip(fb, [3]) for fb in feat_b]
+                        feat_c = [torch.flip(fc, [3]) for fc in feat_c]
+
+                    merged_input_2 = torch.cat((real_a, real_b, real_c), dim=1)
+                    feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+                    feat_c_pool, _ = self.netF_A(feat_c, 256, sample_ids)
+
+                    total_nce_loss = 0.0
+                    for f_a, f_b, f_c in zip(feat_a_pool, feat_b_pool, feat_c_pool):
+                        loss = (self.criterionNCE(f_a, f_b) + self.criterionNCE(f_a, f_c)) * self.params.lambda_nce
+                        total_nce_loss = total_nce_loss + loss.mean()
+                    loss_nce_b = total_nce_loss / n_layers
+                    self.log("NCE_b_Loss", loss_nce_b.detach(), prag_bar=True)
+                    loss_G += loss_nce_b
+                    assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
+                else:
+                    n_layers = len(self.params.nce_layers)
+                    merged_input_1 = torch.cat((fake_b, real_a), dim=1)
+                    feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
+
+                    flipped_for_equivariance = np.random.random() < 0.5
+                    if self.params.flip_equivariance and flipped_for_equivariance:
+                        feat_b = [torch.flip(fb, [3]) for fb in feat_b]
+
+                    merged_input_2 = torch.cat((real_a, real_b), dim=1)
+                    feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+
+                    total_nce_loss = 0.0
+                    for f_a, f_b in zip(feat_a_pool, feat_b_pool):
+                        loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce
+                        total_nce_loss = total_nce_loss + loss.mean()
+                    loss_nce_b = total_nce_loss / n_layers
+                    self.log("NCE_b_Loss", loss_nce_b.detach(), prag_bar=True)
+                    loss_G += loss_nce_b
+                    assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
+
+        if self.criterionMIND:
+            loss_mind_b = self.criterionMIND(real_a, fake_b) * self.params.lambda_mind
+            self.log("MIND_b_Loss", loss_mind_b.detach(), prog_bar=True)
+
             if self.params.use_multiple_outputs:
-                n_layers = len(self.params.nce_layers)
-                merged_input_1 = torch.cat((fake_b, real_a, real_a), dim=1)
-                feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
-                
-                merged_input_2 = torch.cat((fake_c, real_a, real_a), dim=1) 
-                feat_c = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+                loss_mind_c = self.criterionMIND(real_a, fake_c) * self.params.lambda_mind
+                self.log("MIND_c_Loss", loss_mind_c.detach(), prog_bar=True)
 
-                flipped_for_equivariance = np.random.random() < 0.5
-                if self.params.flip_equivariance and flipped_for_equivariance:
-                    feat_b = [torch.flip(fb, [3]) for fb in feat_b]
-                    feat_c = [torch.flip(fc, [3]) for fc in feat_c]
+        if self.criterionL1:
+            loss_l1_b = self.criterionL1(real_b, fake_b) * self.params.lambda_l1
+            self.log("L1_b_Loss", loss_l1_b.detach(), prag_bar=True)
 
-                merged_input_2 = torch.cat((real_a, real_b, real_c), dim=1)
-                feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
-                feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-                feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
-                feat_c_pool, _ = self.netF_A(feat_c, 256, sample_ids)
+            if self.params.use_multiple_outputs:
+                loss_l1_c = self.criterionL1(real_c, fake_c) * self.params.lambda_l1
+                self.log("L1_c_Loss", loss_l1_c.detach(), prag_bar=True)
 
-                total_nce_loss = 0.0
-                for f_a, f_b, f_c in zip(feat_a_pool, feat_b_pool, feat_c_pool):
-                    loss = (self.criterionNCE(f_a, f_b) + self.criterionNCE(f_a, f_c)) * lambda_nce
-                    total_nce_loss = total_nce_loss + loss.mean()
-                loss_nce_b = total_nce_loss / n_layers
-                assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
-            else:
-                n_layers = len(self.params.nce_layers)
-                merged_input_1 = torch.cat((fake_b, real_a), dim=1)
-                feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
-
-                flipped_for_equivariance = np.random.random() < 0.5
-                if self.params.flip_equivariance and flipped_for_equivariance:
-                    feat_b = [torch.flip(fb, [3]) for fb in feat_b]
-
-                merged_input_2 = torch.cat((real_a, real_b), dim=1)
-                feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
-                feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-                feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
-
-                total_nce_loss = 0.0
-                for f_a, f_b in zip(feat_a_pool, feat_b_pool):
-                    loss = self.criterionNCE(f_a, f_b) * lambda_nce
-                    total_nce_loss = total_nce_loss + loss.mean()
-                loss_nce_b = total_nce_loss / n_layers
-                assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
-
-
-        if self.params.use_multiple_outputs:
-            loss_G = loss_gan_b + loss_gan_c + loss_style_b + loss_style_c + loss_nce_b # fake_d에 대한 loss는 추가안함. 필요할때.
-            return loss_G, loss_gan_b, loss_gan_c, loss_style_b, loss_style_c, loss_nce_b
-        else:
-            loss_G = loss_gan_b + loss_style_b + loss_nce_b
-            return loss_G, loss_gan_b, loss_style_b, loss_nce_b
+        self.log("G_loss", loss_G.detach(), prog_bar=True)
+        return loss_G
         # assert not torch.isnan(loss_G).any(), "Total Loss is NaN"
 
     def training_step(self, batch: Any, batch_idx: int):
@@ -223,9 +264,9 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         
         with optimizer_G_A.toggle_model():
             if self.params.use_multiple_outputs:
-                loss_G, loss_gan_b, loss_gan_c, loss_style_b, loss_style_c, loss_nce_b = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, self.params.lambda_style, self.params.lambda_nce)
+                loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d)
             else:
-                loss_G, loss_gan_b, loss_style_b, loss_nce_b = self.backward_G(real_a, real_b, None, None, fake_b, None, None, self.params.lambda_style, self.params.lambda_nce)
+                loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None)
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
@@ -237,20 +278,6 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             optimizer_F_A.step()
             optimizer_G_A.zero_grad()
             optimizer_F_A.zero_grad()
-
-        # self.loss_G = loss_G.detach() * 0.1 + self.loss_G * 0.9
-        self.log("G_loss", loss_G.detach(), prog_bar=True)
-        self.log("loss_gan_b", loss_gan_b.detach(), prog_bar=True)
-        if self.params.use_multiple_outputs:
-            self.log("loss_gan_c", loss_gan_c.detach(), prog_bar=True)
-        # self.log("loss_gan", loss_gan_d.detach(), prog_bar=True)
-        self.log("loss_style_b", loss_style_b.detach(), prog_bar=True)
-        if self.params.use_multiple_outputs:
-            self.log("loss_style_c", loss_style_c.detach(), prog_bar=True)
-        # self.log("loss_style", loss_style_d.detach(), prog_bar=True)
-        self.log("loss_nce", loss_nce_b.detach(), prog_bar=True)
-        # self.log("loss_nce", loss_nce_c.detach(), prog_bar=True)
-        # self.log("loss_nce", loss_nce_d.detach(), prog_bar=True)
 
         with optimizer_D_A.toggle_model(): 
             loss_D_A = self.backward_D_A(real_b, fake_b)
