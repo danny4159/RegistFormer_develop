@@ -235,18 +235,22 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         if self.criterionMIND:
             loss_mind_b = self.criterionMIND(real_a, fake_b) * self.params.lambda_mind
             self.log("MIND_b_Loss", loss_mind_b.detach(), prog_bar=True)
+            loss_G += loss_mind_b
 
             if self.params.use_multiple_outputs:
                 loss_mind_c = self.criterionMIND(real_a, fake_c) * self.params.lambda_mind
                 self.log("MIND_c_Loss", loss_mind_c.detach(), prog_bar=True)
+                loss_G += loss_mind_c
 
         if self.criterionL1:
             loss_l1_b = self.criterionL1(real_b, fake_b) * self.params.lambda_l1
             self.log("L1_b_Loss", loss_l1_b.detach(), prog_bar=True)
+            loss_G += loss_l1_b
 
             if self.params.use_multiple_outputs:
                 loss_l1_c = self.criterionL1(real_c, fake_c) * self.params.lambda_l1
                 self.log("L1_c_Loss", loss_l1_c.detach(), prog_bar=True)
+                loss_G += loss_l1_c
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
