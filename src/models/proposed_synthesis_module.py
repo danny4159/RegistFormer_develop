@@ -107,24 +107,20 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             loss_style_b = self.criterionContextual(real_b, fake_b)
             loss_style_b =  loss_style_b * self.params.lambda_style
             self.log("Context_b_Loss", loss_style_b.detach(), prog_bar=True)
-            print(loss_G)
-            print(loss_G.shape)
-            print(loss_style_b)
-            print(loss_style_b.shape)
-            loss_G += loss_style_b
+            loss_G += loss_style_b.squeeze()
             # assert not torch.isnan(loss_style_b).any(), "Contextual Loss is NaN"
 
             if self.params.use_multiple_outputs:
                 loss_style_c = self.criterionContextual(real_c, fake_c)
                 loss_style_c =  loss_style_c * self.params.lambda_style
                 self.log("Context_c_Loss", loss_style_c.detach(), prog_bar=True)
-                loss_G += loss_style_c
+                loss_G += loss_style_c.squeeze()
                 # assert not torch.isnan(loss_style_c).any(), "Contextual Loss is NaN"
                 if fake_d is not None:
                     loss_style_d = self.criterionContextual(real_d, fake_d)
                     loss_style_d =  loss_style_d * self.params.lambda_style
                     self.log("Context_d_Loss", loss_style_d.detach(), prog_bar=True)
-                    loss_G += loss_style_d
+                    loss_G += loss_style_d.squeeze()
                 # assert not torch.isnan(loss_style_d).any(), "Contextual Loss is NaN"
 
         ##################################################################################################################
