@@ -78,26 +78,26 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # self.flip_equivariance = params.flip_equivariance
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d): # real_a, real_b, fake_b
-        loss_G = 0.0
+        loss_G = torch.tensor(0.0, device=real_a.device) 
         ##################################################################################################################
         ## 1. GAN Loss
         if self.criterionGAN:
             pred_fake = self.netD_A(fake_b.detach())
             loss_gan_b = self.criterionGAN(pred_fake, True)
-            self.log("Gan_b_Loss", loss_gan_b.detach(), prag_bar=True)
+            self.log("Gan_b_Loss", loss_gan_b.detach(), prog_bar=True)
             loss_G += loss_gan_b
             # assert not torch.isnan(loss_gan_b).any(), "GAN Loss is NaN"
             
             if self.params.use_multiple_outputs:
                 pred_fake = self.netD_B(fake_c.detach())
                 loss_gan_c = self.criterionGAN(pred_fake, True)
-                self.log("Gan_c_Loss", loss_gan_c.detach(), prag_bar=True)
+                self.log("Gan_c_Loss", loss_gan_c.detach(), prog_bar=True)
                 loss_G += loss_gan_c
                 # assert not torch.isnan(loss_gan_c).any(), "GAN Loss is NaN"
                 if fake_d is not None:
                     pred_fake = self.netD_D(fake_d.detach())
                     loss_gan_d = self.criterionGAN(pred_fake, True)
-                    self.log("Gan_d_Loss", loss_gan_d.detach(), prag_bar=True)
+                    self.log("Gan_d_Loss", loss_gan_d.detach(), prog_bar=True)
                     loss_G += loss_gan_d
                     # assert not torch.isnan(loss_gan_d).any(), "GAN Loss is NaN"
 
@@ -106,20 +106,24 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         if self.criterionContextual:
             loss_style_b = self.criterionContextual(real_b, fake_b)
             loss_style_b =  loss_style_b * self.params.lambda_style
-            self.log("Context_b_Loss", loss_style_b.detach(), prag_bar=True)
+            self.log("Context_b_Loss", loss_style_b.detach(), prog_bar=True)
+            print(loss_G)
+            print(loss_G.shape)
+            print(loss_style_b)
+            print(loss_style_b.shape)
             loss_G += loss_style_b
             # assert not torch.isnan(loss_style_b).any(), "Contextual Loss is NaN"
 
             if self.params.use_multiple_outputs:
                 loss_style_c = self.criterionContextual(real_c, fake_c)
                 loss_style_c =  loss_style_c * self.params.lambda_style
-                self.log("Context_c_Loss", loss_style_c.detach(), prag_bar=True)
+                self.log("Context_c_Loss", loss_style_c.detach(), prog_bar=True)
                 loss_G += loss_style_c
                 # assert not torch.isnan(loss_style_c).any(), "Contextual Loss is NaN"
                 if fake_d is not None:
                     loss_style_d = self.criterionContextual(real_d, fake_d)
                     loss_style_d =  loss_style_d * self.params.lambda_style
-                    self.log("Context_d_Loss", loss_style_d.detach(), prag_bar=True)
+                    self.log("Context_d_Loss", loss_style_d.detach(), prog_bar=True)
                     loss_G += loss_style_d
                 # assert not torch.isnan(loss_style_d).any(), "Contextual Loss is NaN"
 
@@ -159,7 +163,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                         loss = (self.criterionNCE(f_a, f_b) + self.criterionNCE(f_a, f_c)) * self.params.lambda_nce
                         total_nce_loss = total_nce_loss + loss.mean()
                     loss_nce_b = total_nce_loss / (len(feat_b) + len(feat_c))
-                    self.log("NCE_b_Loss", loss_nce_b.detach(), prag_bar=True)
+                    self.log("NCE_b_Loss", loss_nce_b.detach(), prog_bar=True)
                     loss_G += loss_nce_b
 
                 else:
@@ -178,7 +182,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                         loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce
                         total_nce_loss = total_nce_loss + loss.mean()
                     loss_nce_b = total_nce_loss / len(feat_b)
-                    self.log("NCE_b_Loss", loss_nce_b.detach(), prag_bar=True)
+                    self.log("NCE_b_Loss", loss_nce_b.detach(), prog_bar=True)
                     loss_G += loss_nce_b
 
             else: # 이건 구현 덜됨. 나중에 필요할때 구현.
@@ -206,7 +210,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                         loss = (self.criterionNCE(f_a, f_b) + self.criterionNCE(f_a, f_c)) * self.params.lambda_nce
                         total_nce_loss = total_nce_loss + loss.mean()
                     loss_nce_b = total_nce_loss / n_layers
-                    self.log("NCE_b_Loss", loss_nce_b.detach(), prag_bar=True)
+                    self.log("NCE_b_Loss", loss_nce_b.detach(), prog_bar=True)
                     loss_G += loss_nce_b
                     assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
                 else:
@@ -228,7 +232,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                         loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce
                         total_nce_loss = total_nce_loss + loss.mean()
                     loss_nce_b = total_nce_loss / n_layers
-                    self.log("NCE_b_Loss", loss_nce_b.detach(), prag_bar=True)
+                    self.log("NCE_b_Loss", loss_nce_b.detach(), prog_bar=True)
                     loss_G += loss_nce_b
                     assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
 
@@ -242,11 +246,11 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
         if self.criterionL1:
             loss_l1_b = self.criterionL1(real_b, fake_b) * self.params.lambda_l1
-            self.log("L1_b_Loss", loss_l1_b.detach(), prag_bar=True)
+            self.log("L1_b_Loss", loss_l1_b.detach(), prog_bar=True)
 
             if self.params.use_multiple_outputs:
                 loss_l1_c = self.criterionL1(real_c, fake_c) * self.params.lambda_l1
-                self.log("L1_c_Loss", loss_l1_c.detach(), prag_bar=True)
+                self.log("L1_c_Loss", loss_l1_c.detach(), prog_bar=True)
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
