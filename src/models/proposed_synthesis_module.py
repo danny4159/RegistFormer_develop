@@ -274,7 +274,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             if self.params.use_multiple_outputs:
                 if self.params.use_misalign_simul:
                     loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
-                loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, None, None, None)
+                else:
+                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, None, None, None)
             else:
                 loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, None, None, None)
             self.manual_backward(loss_G)
