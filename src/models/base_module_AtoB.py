@@ -119,11 +119,11 @@ class BaseModule_AtoB(LightningModule):  # single direction
                     real_merged = torch.cat((real_b_ref, real_c_ref), dim=1)
                     fake_merged = self.forward(real_a, real_merged)
                     fake_b, fake_c = fake_merged[:, :1, :, :], fake_merged[:, 1:, :, :]
-                    real_d, fake_d = None, None
+                    real_d, fake_d, real_d_ref = None, None, None
                 else:
                     raise ValueError(f"Expected batch size of 5 for misaligned simulation, but got {len(batch)}")
             
-            return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d
+            return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref # real: GT, fake: syn by Ref
 
         else: 
             if self.params.use_misalign_simul == False:
@@ -174,7 +174,10 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
     def validation_step(self, batch: Any, batch_idx: int):
         if self.params.use_multiple_outputs:
-            real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
+            if self.params.use_misalign_simul:
+                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D, real_B_ref, real_C_ref, real_D_ref = self.model_step(batch) 
+            else:
+                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
         else:
             real_A, real_B, fake_B = self.model_step(batch)
 
@@ -328,7 +331,10 @@ class BaseModule_AtoB(LightningModule):  # single direction
     def test_step(self, batch: Any, batch_idx: int):
  
         if self.params.use_multiple_outputs:
-            real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
+            if self.params.use_misalign_simul:
+                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D, real_B_ref, real_C_ref, real_D_ref = self.model_step(batch) 
+            else:
+                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
         else:
             real_A, real_B, fake_B = self.model_step(batch)
 

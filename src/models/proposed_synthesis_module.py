@@ -77,7 +77,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # self.nce_layers = [0,2,4,6] # range: 0~6
         # self.flip_equivariance = params.flip_equivariance
 
-    def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d): # real_a, real_b, fake_b
+    def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device) 
         ##################################################################################################################
         ## 1. GAN Loss
@@ -104,20 +104,20 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         ##################################################################################################################
         ## 2. Contextual loss: fake_b, fake_c 각각 따로
         if self.criterionContextual:
-            loss_style_b = self.criterionContextual(real_b, fake_b)
+            loss_style_b = self.criterionContextual(real_b_ref, fake_b)
             loss_style_b =  loss_style_b * self.params.lambda_style
             self.log("Context_b_Loss", loss_style_b.detach(), prog_bar=True)
             loss_G += loss_style_b.squeeze()
             # assert not torch.isnan(loss_style_b).any(), "Contextual Loss is NaN"
 
             if self.params.use_multiple_outputs:
-                loss_style_c = self.criterionContextual(real_c, fake_c)
+                loss_style_c = self.criterionContextual(real_c_ref, fake_c)
                 loss_style_c =  loss_style_c * self.params.lambda_style
                 self.log("Context_c_Loss", loss_style_c.detach(), prog_bar=True)
                 loss_G += loss_style_c.squeeze()
                 # assert not torch.isnan(loss_style_c).any(), "Contextual Loss is NaN"
                 if fake_d is not None:
-                    loss_style_d = self.criterionContextual(real_d, fake_d)
+                    loss_style_d = self.criterionContextual(real_d_ref, fake_d)
                     loss_style_d =  loss_style_d * self.params.lambda_style
                     self.log("Context_d_Loss", loss_style_d.detach(), prog_bar=True)
                     loss_G += loss_style_d.squeeze()
@@ -243,12 +243,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_G += loss_mind_c
 
         if self.criterionL1:
-            loss_l1_b = self.criterionL1(real_b, fake_b) * self.params.lambda_l1
+            loss_l1_b = self.criterionL1(real_b_ref, fake_b) * self.params.lambda_l1
             self.log("L1_b_Loss", loss_l1_b.detach(), prog_bar=True)
             loss_G += loss_l1_b
 
             if self.params.use_multiple_outputs:
-                loss_l1_c = self.criterionL1(real_c, fake_c) * self.params.lambda_l1
+                loss_l1_c = self.criterionL1(real_c_ref, fake_c) * self.params.lambda_l1
                 self.log("L1_c_Loss", loss_l1_c.detach(), prog_bar=True)
                 loss_G += loss_l1_c
 
@@ -260,7 +260,11 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         
         if self.params.use_multiple_outputs:
             optimizer_G_A, optimizer_D_A, optimizer_D_B, optimizer_F_A = self.optimizers()
-            real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d = self.model_step(batch)
+
+            if self.params.use_misalign_simul:
+                real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref = self.model_step(batch)
+            else:
+                real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d = self.model_step(batch)
         else:
             optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
             real_a, real_b, fake_b = self.model_step(batch)
@@ -268,9 +272,11 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         
         with optimizer_G_A.toggle_model():
             if self.params.use_multiple_outputs:
-                loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d)
+                if self.params.use_misalign_simul:
+                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
+                loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, None, None, None)
             else:
-                loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None)
+                loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, None, None, None)
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
