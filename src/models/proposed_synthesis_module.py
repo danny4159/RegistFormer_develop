@@ -80,7 +80,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device) 
         if self.params.use_misalign_simul:
-            real_b, real_c, real_d = real_b_ref, real_c_ref. real_d_ref # Misaligned simulated data is ref. It is assigned to real
+            real_b, real_c, real_d = real_b_ref, real_c_ref, real_d_ref # Misaligned simulated data is ref. It is assigned to real
         ##################################################################################################################
         ## 1. GAN Loss
         if self.criterionGAN:
