@@ -112,6 +112,8 @@ class BaseModule_AtoB(LightningModule):  # single direction
                     fake_merged = self.forward(real_a, real_merged)
                     fake_b, fake_c, fake_d = fake_merged[:, :1, :, :], fake_merged[:, 1:2, :, :], fake_merged[:, 2:, :, :]
 
+                return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d
+
             else: # use_misalign_simul == True:
                 if len(batch) == 5:
                     real_a, real_b, real_b_ref, real_c, real_c_ref = batch

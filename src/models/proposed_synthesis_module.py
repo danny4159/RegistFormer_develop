@@ -79,6 +79,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device) 
+        if self.params.use_misalign_simul:
+            real_b, real_c, real_d = real_b_ref, real_c_ref. real_d_ref # Misaligned simulated data is ref. It is assigned to real
         ##################################################################################################################
         ## 1. GAN Loss
         if self.criterionGAN:
@@ -104,20 +106,20 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         ##################################################################################################################
         ## 2. Contextual loss: fake_b, fake_c 각각 따로
         if self.criterionContextual:
-            loss_style_b = self.criterionContextual(real_b_ref, fake_b)
+            loss_style_b = self.criterionContextual(real_b, fake_b)
             loss_style_b =  loss_style_b * self.params.lambda_style
             self.log("Context_b_Loss", loss_style_b.detach(), prog_bar=True)
             loss_G += loss_style_b.squeeze()
             # assert not torch.isnan(loss_style_b).any(), "Contextual Loss is NaN"
 
             if self.params.use_multiple_outputs:
-                loss_style_c = self.criterionContextual(real_c_ref, fake_c)
+                loss_style_c = self.criterionContextual(real_c, fake_c)
                 loss_style_c =  loss_style_c * self.params.lambda_style
                 self.log("Context_c_Loss", loss_style_c.detach(), prog_bar=True)
                 loss_G += loss_style_c.squeeze()
                 # assert not torch.isnan(loss_style_c).any(), "Contextual Loss is NaN"
                 if fake_d is not None:
-                    loss_style_d = self.criterionContextual(real_d_ref, fake_d)
+                    loss_style_d = self.criterionContextual(real_d, fake_d)
                     loss_style_d =  loss_style_d * self.params.lambda_style
                     self.log("Context_d_Loss", loss_style_d.detach(), prog_bar=True)
                     loss_G += loss_style_d.squeeze()
@@ -126,7 +128,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         ##################################################################################################################
         ## 3. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
         if self.criterionNCE:
-            if self.params.nce_on_vgg:
+            if self.params.nce_on_vgg: # 이거 안써
                 real_rgb = real_a.repeat(1, 3, 1, 1)
                 if self.params.nce_independent:
                     fake_rgb_b = fake_b.repeat(1, 3, 1, 1)
@@ -181,7 +183,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     self.log("NCE_b_Loss", loss_nce_b.detach(), prog_bar=True)
                     loss_G += loss_nce_b
 
-            else: # 이건 구현 덜됨. 나중에 필요할때 구현.
+            else:
                 if self.params.use_multiple_outputs:
                     n_layers = len(self.params.nce_layers)
                     merged_input_1 = torch.cat((fake_b, real_a, real_a), dim=1)
