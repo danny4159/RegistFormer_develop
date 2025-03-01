@@ -39,9 +39,9 @@ mim install mmcv
 
 ## 3. Dataset
 ### Dataset 
-Grand challenge ['SynthRAD 2023'](https://synthrad2023.grand-challenge.org/) Pelvis MR, CT
-The demo dataset for testing can be downloaded from ['Google drive'](https://drive.google.com/drive/folders/1Vvm4NtNGuHSkscJDLh9Kgs0ssupe4EZ2?usp=sharing)
-Put it in the following path: `/data`.  
+Grand challenge ['SynthRAD 2023'](https://synthrad2023.grand-challenge.org/) Pelvis MR, CT.
+The demo dataset for testing can be downloaded from ['this link'](https://drive.google.com/drive/folders/1Vvm4NtNGuHSkscJDLh9Kgs0ssupe4EZ2?usp=sharing/).
+Put it in the following path: `/data`.
 
 ### Dataset Structure (HDF5 Format: Hierarchical Data Structure)
 
@@ -53,10 +53,10 @@ The dataset is stored in an HDF5 file with the following hierarchical structure:
 - **Group**: CT
   - **Dataset**: `1PA001`, `1PA004`, ... (Patient number)
 
-All datasets must be resized to have the same width and height dimensions.  
+All datasets must be resized to have the same width and height dimensions.
 
 ## 4. Pretrained weight 
-Pretrained weights can be downloaded from [this link](https://drive.google.com/drive/folders/1M-7WRObLH3CrzhCJgm3XVlslVVrJbMf-?usp=sharing/).  
+Pretrained weights can be downloaded from [this link](https://drive.google.com/drive/folders/1dR1kGKsZQCLMtXnNqJ8Arm5aFl2IslrX?usp=sharing/).  
 Put it in the following path: `/pretrained`.  
 
 ## 5. How to test (with pretrained weight)
