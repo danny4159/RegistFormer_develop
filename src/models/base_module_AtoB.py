@@ -131,10 +131,11 @@ class BaseModule_AtoB(LightningModule):  # single direction
             if self.params.use_misalign_simul == False:
                 real_a, real_b = batch
                 fake_b = self.forward(real_a, real_b)
+                real_b_ref = None
             else: # use_misalign_simul == True:
                 real_a, real_b, real_b_ref = batch
                 fake_b = self.forward(real_a, real_b_ref)
-            return real_a, real_b, fake_b
+            return real_a, real_b, fake_b, real_b_ref
 
     def on_train_start(self):
         # by default lightning executes validation step sanity checks before training starts,
@@ -177,11 +178,11 @@ class BaseModule_AtoB(LightningModule):  # single direction
     def validation_step(self, batch: Any, batch_idx: int):
         if self.params.use_multiple_outputs:
             if self.params.use_misalign_simul:
-                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D, real_B_ref, real_C_ref, real_D_ref = self.model_step(batch) 
+                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D, *_ = self.model_step(batch) 
             else:
                 real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
         else:
-            real_A, real_B, fake_B = self.model_step(batch)
+            real_A, real_B, fake_B, *_ = self.model_step(batch)
 
         if self.params.eval_on_align:
             self.val_ssim_B.update(real_B, fake_B)
@@ -338,7 +339,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             else:
                 real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
         else:
-            real_A, real_B, fake_B = self.model_step(batch)
+            real_A, real_B, fake_B, *_ = self.model_step(batch)
 
         if self.params.eval_on_align:
             self.test_ssim_B.update(real_B, fake_B)

@@ -75,7 +75,7 @@ class ProposedSynthesisModule(nn.Module):
         if self.training: # H,W = 128,128
             style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest')
         else: # H,W = 256,256
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯 
+            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯 
         
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Ablation

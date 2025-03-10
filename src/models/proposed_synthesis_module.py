@@ -269,7 +269,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d = self.model_step(batch)
         else:
             optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
-            real_a, real_b, fake_b = self.model_step(batch)
+            if self.params.use_misalign_simul:
+                real_a, real_b, fake_b, real_b_ref = self.model_step(batch)
+            else:
+                real_a, real_b, fake_b = self.model_step(batch)
 
         
         with optimizer_G_A.toggle_model():
@@ -279,7 +282,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 else:
                     loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, None, None, None)
             else:
-                loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, None, None, None)
+                if self.params.use_misalign_simul:
+                    loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
+                else:
+                    loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, None, None, None)
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
