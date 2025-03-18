@@ -88,21 +88,25 @@ class BaseModule_AtoB(LightningModule):  # single direction
             
             # Sliding window on inference
             if self.params.use_sliding_inference and not self.training:
-                inferer = SlidingWindowInferer(roi_size=(128,128), mode='gaussian') # 128,128
+                inferer = SlidingWindowInferer(roi_size=(64,64,64), mode='gaussian') # 128,128
                 pred = inferer(inputs=merged_input, network=self.netG_A) #inputs 손봐야해
                 return pred
         
             return self.netG_A(merged_input)
         
         if type(self.netG_A).__name__ in ["AutoencoderKL"]:
-            reconsturction, z_mu, z_sigma = self.netG_A(a)
+            if self.params.use_sliding_inference and not self.training:
+                inferer = SlidingWindowInferer(roi_size=(64,64,64), mode='gaussian') # 128,128
+                reconsturction, z_mu, z_sigma = inferer(inputs=a, network=self.netG_A)
+            else:
+                reconsturction, z_mu, z_sigma = self.netG_A(a)
             return reconsturction, z_mu, z_sigma
 
 
         # Case2. Normal generation
         return self.netG_A(a)
 
-    def model_step(self, batch: Any):
+    def model_step(self, batch: Any, is_3d=False):
         if type(self.netG_A).__name__ in ["AutoencoderKL"]:
             real_a, real_b = batch
             fake_b, z_mu, z_sigma = self.forward(real_a, real_b)
@@ -193,6 +197,18 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
         else:
             real_A, real_B, fake_B, *_ = self.model_step(batch)
+
+        if len(real_A.size()) == 5:
+            for i in range(real_A.size(4)):
+                self.val_gc_B.update(norm_to_uint8(real_A[:, :, :, :, i]), norm_to_uint8(fake_B[:, :, :, :, i]))
+                nmi_score = self.val_nmi_B(flatten_to_1d(norm_to_uint8(real_A[:, :, :, :, i])), flatten_to_1d(norm_to_uint8(fake_B[:, :, :, :, i])))
+                self.nmi_scores_B.append(nmi_score)
+                self.val_fid_B.update(gray2rgb(norm_to_uint8(real_B[:, :, :, :, i])), real=True)
+                self.val_fid_B.update(gray2rgb(norm_to_uint8(fake_B[:, :, :, :, i])), real=False)
+                self.val_kid_B.update(gray2rgb(norm_to_uint8(real_B[:, :, :, :, i])), real=True)
+                self.val_kid_B.update(gray2rgb(norm_to_uint8(fake_B[:, :, :, :, i])), real=False)
+                self.val_sharpness_B.update(norm_to_uint8(fake_B[:, :, :, :, i]))
+                return
 
         if self.params.eval_on_align:
             self.val_ssim_B.update(real_B, fake_B)
@@ -350,6 +366,18 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
         else:
             real_A, real_B, fake_B, *_ = self.model_step(batch)
+
+        if len(real_A.size()) == 5:
+            for i in range(real_A.size(4)):
+                self.val_gc_B.update(norm_to_uint8(real_A[:, :, :, :, i]), norm_to_uint8(fake_B[:, :, :, :, i]))
+                nmi_score = self.val_nmi_B(flatten_to_1d(norm_to_uint8(real_A[:, :, :, :, i])), flatten_to_1d(norm_to_uint8(fake_B[:, :, :, :, i])))
+                self.nmi_scores_B.append(nmi_score)
+                self.val_fid_B.update(gray2rgb(norm_to_uint8(real_B[:, :, :, :, i])), real=True)
+                self.val_fid_B.update(gray2rgb(norm_to_uint8(fake_B[:, :, :, :, i])), real=False)
+                self.val_kid_B.update(gray2rgb(norm_to_uint8(real_B[:, :, :, :, i])), real=True)
+                self.val_kid_B.update(gray2rgb(norm_to_uint8(fake_B[:, :, :, :, i])), real=False)
+                self.val_sharpness_B.update(norm_to_uint8(fake_B[:, :, :, :, i]))
+                return
 
         if self.params.eval_on_align:
             self.test_ssim_B.update(real_B, fake_B)

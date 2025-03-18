@@ -166,7 +166,7 @@ class ImageLoggingCallback(Callback):
             and trainer.current_epoch % self.every_epoch == 0
         ):  
             
-            if len(batch[0].size()) == 5: # 3D Image
+            if len(batch[0].size()) == 5 and pl_module.params.is_registration == True: # 3D Image Registration
                 d_index = 30  # 5번째 D 차원의 30번째 데이터 선택
                 evaluation_img, moving_img, fixed_img, warped_img = pl_module.model_step(batch, is_3d=True)
                 evaluation_img = evaluation_img[:, :, :, :, d_index].squeeze(-1)
@@ -174,7 +174,14 @@ class ImageLoggingCallback(Callback):
                 fixed_img = fixed_img[:, :, :, :, d_index].squeeze(-1)
                 warped_img = warped_img[:, :, :, :, d_index].squeeze(-1)
                 self.saving_to_grid([evaluation_img, moving_img, fixed_img, warped_img])
-            elif len(batch[0].size()) == 4:
+            elif len(batch[0].size()) == 5 and pl_module.params.is_registration == False:  # 3D Image Generation
+                d_index = 30
+                real_a, real_b, fake_b, _, _ = pl_module.model_step(batch)
+                real_a = real_a[:, :, :, :, d_index].squeeze(-1)
+                real_b = real_b[:, :, :, :, d_index].squeeze(-1)
+                fake_b = fake_b[:, :, :, :, d_index].squeeze(-1)
+                self.saving_to_grid([real_a, real_b, fake_b])
+            elif len(batch[0].size()) == 4: # 2D
                 res = pl_module.model_step(batch)
                 self.saving_to_grid(res)
             
@@ -209,7 +216,7 @@ class ImageLoggingCallback(Callback):
             self.log_test and batch_idx in self.tst_batch_idx
         ):  # log every indexes for slice number in test set
             
-            if len(batch[0].size()) == 5: # 3D Image
+            if len(batch[0].size()) == 5 and pl_module.params.is_registration == True: # 3D Image
                 d_index = 30  # 5번째 D 차원의 30번째 데이터 선택
                 evaluation_img, moving_img, fixed_img, warped_img = pl_module.model_step(batch, is_3d=True)
                 evaluation_img = evaluation_img[:, :, :, :, d_index].squeeze(-1)
@@ -217,6 +224,13 @@ class ImageLoggingCallback(Callback):
                 fixed_img = fixed_img[:, :, :, :, d_index].squeeze(-1)
                 warped_img = warped_img[:, :, :, :, d_index].squeeze(-1)
                 self.saving_to_grid([evaluation_img, moving_img, fixed_img, warped_img])
+            elif len(batch[0].size()) == 5 and pl_module.params.is_registration == False:  # 3D Image Generation
+                d_index = 30
+                real_a, real_b, fake_b, _, _ = pl_module.model_step(batch)
+                real_a = real_a[:, :, :, :, d_index].squeeze(-1)
+                real_b = real_b[:, :, :, :, d_index].squeeze(-1)
+                fake_b = fake_b[:, :, :, :, d_index].squeeze(-1)
+                self.saving_to_grid([real_a, real_b, fake_b])
             elif len(batch[0].size()) == 4:
                 res = pl_module.model_step(batch)
                 self.saving_to_grid(res)

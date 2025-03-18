@@ -264,7 +264,7 @@ class AutoencoderKLModule(BaseModule_AtoB):
 
     def training_step(self, batch: Any, batch_idx: int):
         
-        optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
+        optimizer_G_A, optimizer_D_A = self.optimizers()
         optimizer_D_A.zero_grad(set_to_none=True)
         real_a, real_b, fake_b, z_mu, z_sigma = self.model_step(batch)
 

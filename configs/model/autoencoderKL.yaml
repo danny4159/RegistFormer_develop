@@ -55,6 +55,7 @@ params: # Other params
   lambda_adv: 0.01
   lambda_percept: 0.001
   lambda_kl: 1e-6
+  is_registration: false
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
