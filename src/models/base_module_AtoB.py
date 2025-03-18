@@ -95,12 +95,13 @@ class BaseModule_AtoB(LightningModule):  # single direction
             return self.netG_A(merged_input)
         
         if type(self.netG_A).__name__ in ["AutoencoderKL"]:
-            if self.params.use_sliding_inference:
-                inferer = SlidingWindowInferer(roi_size=(8,8,8), mode='gaussian') # 128,128
-                reconsturction, z_mu, z_sigma = inferer(inputs=a, network=self.netG_A)
+            torch.cuda.empty_cache()
+            if self.params.use_sliding_inference and not self.training:
+                inferer = SlidingWindowInferer(roi_size=(128,128,128), mode='gaussian') # 128,128
+                reconstruction, z_mu, z_sigma = inferer(inputs=a, network=self.netG_A)
             else:
-                reconsturction, z_mu, z_sigma = self.netG_A(a)
-            return reconsturction, z_mu, z_sigma
+                reconstruction, z_mu, z_sigma = self.netG_A(a) # reconstruction = fake_a
+            return reconstruction, z_mu, z_sigma
 
 
         # Case2. Normal generation
@@ -109,10 +110,14 @@ class BaseModule_AtoB(LightningModule):  # single direction
     def model_step(self, batch: Any, is_3d=False):
         if type(self.netG_A).__name__ in ["AutoencoderKL"]:
             real_a, real_b = batch
-            print("real_a model_step", real_a.shape)
-            fake_b, z_mu, z_sigma = self.forward(real_a, real_b)
-            print("fake_b model_step", fake_b.shape)
-            return real_a, real_b, fake_b, z_mu, z_sigma
+            original_slices = real_a.shape[-1]
+            real_a = self.pad_slice_to_128(real_a)
+            real_b = self.pad_slice_to_128(real_b)
+            fake_a, z_mu, z_sigma = self.forward(real_a, real_b)
+            real_a = self.crop_slice_to_original(real_a, original_slices)
+            real_b = self.crop_slice_to_original(real_b, original_slices)
+            fake_a = self.crop_slice_to_original(fake_a, original_slices)
+            return real_a, real_b, fake_a, z_mu, z_sigma
 
         if self.params.use_multiple_outputs:
             if self.params.use_misalign_simul == False:
@@ -576,6 +581,19 @@ class BaseModule_AtoB(LightningModule):  # single direction
             if self.params.use_multiple_outputs:
                 self.nmi_scores_C = []
                 self.nmi_scores_D = []
+
+    
+    def pad_slice_to_128(self, tensor, padding_value=-1):
+        # tensor shape: [batch, channel, height, width, slice]
+        slices = tensor.shape[-1]
+        if slices < 128:
+            padding = (0, 128 - slices)  # padding only on one side
+            tensor = F.pad(tensor, padding, mode='constant', value=padding_value)
+        return tensor
+    
+    def crop_slice_to_original(self, tensor, original_slices):
+        # tensor shape: [batch, channel, height, width, slice]
+        return tensor[..., :original_slices]
 
     def configure_optimizers(self):
         pass
