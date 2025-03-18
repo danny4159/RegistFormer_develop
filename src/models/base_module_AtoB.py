@@ -95,8 +95,8 @@ class BaseModule_AtoB(LightningModule):  # single direction
             return self.netG_A(merged_input)
         
         if type(self.netG_A).__name__ in ["AutoencoderKL"]:
-            if self.params.use_sliding_inference and not self.training:
-                inferer = SlidingWindowInferer(roi_size=(64,64,64), mode='gaussian') # 128,128
+            if self.params.use_sliding_inference:
+                inferer = SlidingWindowInferer(roi_size=(8,8,8), mode='gaussian') # 128,128
                 reconsturction, z_mu, z_sigma = inferer(inputs=a, network=self.netG_A)
             else:
                 reconsturction, z_mu, z_sigma = self.netG_A(a)
@@ -109,7 +109,9 @@ class BaseModule_AtoB(LightningModule):  # single direction
     def model_step(self, batch: Any, is_3d=False):
         if type(self.netG_A).__name__ in ["AutoencoderKL"]:
             real_a, real_b = batch
+            print("real_a model_step", real_a.shape)
             fake_b, z_mu, z_sigma = self.forward(real_a, real_b)
+            print("fake_b model_step", fake_b.shape)
             return real_a, real_b, fake_b, z_mu, z_sigma
 
         if self.params.use_multiple_outputs:
