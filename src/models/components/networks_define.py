@@ -22,6 +22,8 @@ from src.models.components.network_lapIRN import Miccai2020_LDR_laplacian_unit_d
 from src.models.components.network_transMorph import TransMorph
 from src.models.components.network_resvit import ResViT
 
+from monai.networks.nets import AutoencoderKL, DiffusionModelUNet, PatchDiscriminator
+
 # from src.models.components.networks_spade_danny import SPADEGenerator, ConvEncoder
 
 
@@ -237,30 +239,35 @@ def init_net(
 def define_G(**kwargs):
     
     net = None
-    if kwargs.get('netG_type') == 'registformer':
+    netG_type = kwargs.pop('netG_type', None)
+
+    if netG_type == 'registformer':
         net = RegistFormer(**kwargs)
-    elif kwargs.get('netG_type') == 'spade':
+    elif netG_type == 'spade':
         net = SPADEGenerator(**kwargs)
-    elif kwargs.get('netG_type') == 'adainGen':
+    elif netG_type == 'adainGen':
         net = AdaINGen(**kwargs)
-    elif kwargs.get('netG_type') == 'dam':
+    elif netG_type == 'dam':
         net = DAModule(**kwargs)
-    elif kwargs.get('netG_type') == 'proposed_synthesis':
+    elif netG_type == 'proposed_synthesis':
         net = ProposedSynthesisModule(**kwargs)
-    elif kwargs.get('netG_type') == 'resnet_generator':
+    elif netG_type == 'resnet_generator':
         net = ResnetGenerator(**kwargs)
-    elif kwargs.get('netG_type') == 'resnet_cat':
+    elif netG_type == 'resnet_cat':
         net = G_Resnet(**kwargs)
-    elif kwargs.get('netG_type') == 'resvit':
+    elif netG_type == 'resvit':
         net = ResViT(**kwargs)
+    elif netG_type == 'autoencoder_monai':
+        
+        net = AutoencoderKL(**kwargs)
     else:
         raise ValueError('This netG_type is not expected')
     return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
 
 
 def define_D(
-    input_nc,
-    ndf,
+    input_nc=1,
+    ndf=64,
     netD="basic",
     n_layers_D=3,
     norm="batch",
@@ -268,6 +275,11 @@ def define_D(
     init_gain=0.02,
     no_antialias=False,
     opt=None,
+    spatial_dims= 3, 
+    num_layers_d= 3,
+    channels= 32,
+    in_channels= 1,
+    out_channels= 1
 ):
     """Create a discriminator
 
@@ -318,6 +330,8 @@ def define_D(
         )
     elif netD == "pixel":  # classify if each pixel is real or fake
         net = PixelDiscriminator(input_nc, ndf, norm_layer=norm_layer)
+    elif netD == "patch_monai":
+        net = PatchDiscriminator(spatial_dims=spatial_dims, num_layers_d=num_layers_d, channels=channels, in_channels=in_channels, out_channels=out_channels)
     else:
         raise NotImplementedError(
             "Discriminator model name [%s] is not recognized" % netD
@@ -532,26 +546,26 @@ class PixelDiscriminator(nn.Module):
         return self.net(input)
 
 
-class PatchDiscriminator(NLayerDiscriminator):
-    """Defines a PatchGAN discriminator"""
+# class PatchDiscriminator(NLayerDiscriminator):
+#     """Defines a PatchGAN discriminator"""
 
-    def __init__(
-        self,
-        input_nc,
-        ndf=64,
-        n_layers=3,
-        norm_layer=nn.BatchNorm2d,
-        no_antialias=False,
-    ):
-        super().__init__(input_nc, ndf, 2, norm_layer, no_antialias)
+#     def __init__(
+#         self,
+#         input_nc,
+#         ndf=64,
+#         n_layers=3,
+#         norm_layer=nn.BatchNorm2d,
+#         no_antialias=False,
+#     ):
+#         super().__init__(input_nc, ndf, 2, norm_layer, no_antialias)
 
-    def forward(self, input):
-        B, C, H, W = input.size(0), input.size(1), input.size(2), input.size(3)
-        size = 16
-        Y = H // size
-        X = W // size
-        input = input.view(B, C, Y, size, X, size)
-        input = (
-            input.permute(0, 2, 4, 1, 3, 5).contiguous().view(B * Y * X, C, size, size)
-        )
-        return super().forward(input)
+#     def forward(self, input):
+#         B, C, H, W = input.size(0), input.size(1), input.size(2), input.size(3)
+#         size = 16
+#         Y = H // size
+#         X = W // size
+#         input = input.view(B, C, Y, size, X, size)
+#         input = (
+#             input.permute(0, 2, 4, 1, 3, 5).contiguous().view(B * Y * X, C, size, size)
+#         )
+#         return super().forward(input)

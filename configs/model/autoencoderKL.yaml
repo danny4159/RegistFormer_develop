@@ -20,18 +20,17 @@ netG_A:
   netG_type: 'autoencoder_monai'
   spatial_dims: 3
   in_channels: 1
-  out_channels=1
+  out_channels: 1
   channels: [32, 64, 64]
   latent_channels: 3
   num_res_blocks: 1
   norm_num_groups: 16
   attention_levels: [False, False, True]
-  use_multiple_outputs: ${data.use_multiple_outputs}
   # init_type: 'kaiming'
 
 netD_A:
   _target_: src.models.components.networks_define.define_D
-  net_D: 'patch_monai'
+  netD: 'patch_monai'
   spatial_dims: 3 
   num_layers_d: 3
   channels: 32

@@ -105,7 +105,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
     def model_step(self, batch: Any):
         if type(self.netG_A).__name__ in ["AutoencoderKL"]:
             real_a, real_b = batch
-            fake_b, z_mu, z_sigma = self.forward(real_a)
+            fake_b, z_mu, z_sigma = self.forward(real_a, real_b)
             return real_a, real_b, fake_b, z_mu, z_sigma
 
         if self.params.use_multiple_outputs:

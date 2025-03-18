@@ -30,7 +30,7 @@ class AutoencoderKLModule(BaseModule_AtoB):
         netG_A: torch.nn.Module,
         netD_A: torch.nn.Module,
         # netD_B: torch.nn.Module,
-        netF_A: torch.nn.Module,
+        # netF_A: torch.nn.Module,
         optimizer,
         params,
         scheduler,
@@ -43,7 +43,7 @@ class AutoencoderKLModule(BaseModule_AtoB):
         self.netG_A = netG_A
         self.netD_A = netD_A
         # self.netD_B = netD_B
-        self.netF_A = netF_A
+        # self.netF_A = netF_A
 
         self.save_hyperparameters(logger=False)
         self.automatic_optimization = False # perform manual
@@ -69,21 +69,16 @@ class AutoencoderKLModule(BaseModule_AtoB):
         }
 
         # loss function
-        self.criterionContextual = Contextual_Loss(style_feat_layers) if params.lambda_style != 0 else None
-        self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size) if params.lambda_nce != 0 else None
+        # self.criterionContextual = Contextual_Loss(style_feat_layers) if params.lambda_style != 0 else None
+        # self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size) if params.lambda_nce != 0 else None
         self.criterionGAN = PatchAdversarialLoss(criterion="least_squares") 
         self.criterionPeceptual = PerceptualLoss(spatial_dims=3, network_type="squeeze", is_fake_3d=True, fake_3d_ratio=0.2) if params.lambda_percept !=0 else None
-        self.criterionL1 = torch.nn.L1Loss() if params.lambda_l1 != 0 else None
-        self.criterionMIND = MINDLoss() if params.lambda_mind != 0 else None
+        self.criterionL1 = torch.nn.L1Loss() if params.lambda_recon != 0 else None
+        # self.criterionMIND = MINDLoss() if params.lambda_mind != 0 else None
         
         def kl_loss(self, z_mu, z_sigma):
             klloss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             return torch.sum(klloss) / klloss.shape[0]
-        
-        #TODO: lambda 설정해주기. 
-        adv_weight = 0.01
-        perceptual_weight = 0.001
-        kl_weight = 1e-6
         
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
@@ -273,7 +268,7 @@ class AutoencoderKLModule(BaseModule_AtoB):
         optimizer_D_A.zero_grad(set_to_none=True)
         real_a, real_b, fake_b, z_mu, z_sigma = self.model_step(batch)
 
-        loss_recon = self.criterionL1(fake_b.float(), real_a.float()) * self.params.lambda_l1
+        loss_recon = self.criterionL1(fake_b.float(), real_a.float()) * self.params.lambda_recon
         loss_kl = self.kl_loss(z_mu, z_sigma) * self.params.lambda_kl
         loss_percept = self.criterionPeceptual(fake_b.float(), real_a.float()) * self.params.lambda_percept
         loss_g = loss_recon + loss_kl + loss_percept
