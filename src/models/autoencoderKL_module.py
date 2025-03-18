@@ -68,51 +68,47 @@ class AutoencoderKLModule(BaseModule_AtoB):
 
     def training_step(self, batch: Any, batch_idx: int):
         optimizer_G_A, optimizer_D_A = self.optimizers()
-        optimizer_G_A.zero_grad(set_to_none=True)
         real_a, real_b, fake_a, z_mu, z_sigma = self.model_step(batch)
 
-        loss_recon = self.criterionL1(fake_a.float().detach(), real_a.float().detach()) * self.params.lambda_recon
-        loss_kl = self.kl_loss(z_mu, z_sigma) * self.params.lambda_kl
-        loss_percept = self.criterionPeceptual(fake_a.float().detach(), real_a.float().detach()) * self.params.lambda_percept
-        loss_g = loss_recon + loss_kl + loss_percept
+        with optimizer_G_A.toggle_model():
+            loss_recon = self.criterionL1(fake_a.float().detach(), real_a.float().detach()) * self.params.lambda_recon
+            loss_kl = self.kl_loss(z_mu, z_sigma) * self.params.lambda_kl
+            loss_percept = self.criterionPeceptual(fake_a.float().detach(), real_a.float().detach()) * self.params.lambda_percept
+            loss_g = loss_recon + loss_kl + loss_percept
 
         # Epoch 5까지는 GAN에서 Generator만 학습
-        if self.current_epoch > 5: # autoencoder_warm_up_n_epochs
-            logit_fake = self.netD_A(fake_a.float())[-1]
-            generator_loss = self.criterionGAN(logit_fake, target_is_real=True, for_discriminator=False) * self.params.lambda_adv
-            loss_g += generator_loss
+            if self.current_epoch > 5: # autoencoder_warm_up_n_epochs
+                logit_fake = self.netD_A(fake_a.float())[-1]
+                generator_loss = self.criterionGAN(logit_fake, target_is_real=True, for_discriminator=False) * self.params.lambda_adv
+                loss_g += generator_loss
 
-        loss_g.backward()
-        torch.cuda.synchronize()
-        optimizer_G_A.step()
+            self.manual_backward(loss_g)
+            optimizer_G_A.step()
+            optimizer_G_A.zero_grad()
 
         self.log("loss_recon", loss_recon.detach(), prog_bar=True)
         self.log("loss_percept", loss_percept.detach(), prog_bar=True)
         self.log("loss_kl", loss_kl.detach(), prog_bar=True)
         self.log("loss_g", loss_g.detach(), prog_bar=True)
 
-        del real_a, real_b, fake_a, z_mu, z_sigma, loss_g, loss_recon, loss_kl, loss_percept
-        torch.cuda.empty_cache()
+        with optimizer_D_A.toggle_model(): 
+            if self.current_epoch > 5: # autoencoder_warm_up_n_epochs
+                optimizer_D_A.zero_grad(set_to_none=True)
+                logits_fake = self.netD_A(fake_a.detach())[-1]
+                loss_d_fake = self.criterionGAN(logits_fake, target_is_real=False, for_discriminator=True)
+                logits_real = self.netD_A(real_b.detach())[-1]
+                loss_d_real = self.criterionGAN(logits_real, target_is_real=True, for_discriminator=True)
+                loss_d = (loss_d_fake + loss_d_real) * 0.5
 
+                loss_d = self.params.lambda_adv * loss_d
+                self.manual_backward(loss_d)
+                optimizer_D_A.step()
+                optimizer_D_A.zero_grad()
 
-        if self.current_epoch > 5: # autoencoder_warm_up_n_epochs
-            optimizer_D_A.zero_grad(set_to_none=True)
-            logits_fake = self.netD_A(fake_a.detach())[-1]
-            loss_d_fake = self.criterionGAN(logits_fake, target_is_real=False, for_discriminator=True)
-            logits_real = self.netD_A(real_b.detach())[-1]
-            loss_d_real = self.criterionGAN(logits_real, target_is_real=True, for_discriminator=True)
-            loss_d = (loss_d_fake + loss_d_real) * 0.5
+                self.log("loss_d_fake", loss_d_fake.detach(), prog_bar=True)
+                self.log("loss_d_real", loss_d_real.detach(), prog_bar=True)
+                self.log("loss_d", loss_d.detach(), prog_bar=True)
 
-            loss_d = self.params.lambda_adv * loss_d
-            loss_d.backward()
-            optimizer_D_A.step()
-
-            self.log("loss_d_fake", loss_d_fake.detach(), prog_bar=True)
-            self.log("loss_d_real", loss_d_real.detach(), prog_bar=True)
-            self.log("loss_d", loss_d.detach(), prog_bar=True)
-        
-            del loss_d, loss_d_fake, loss_d_real
-            torch.cuda.empty_cache()
         
     def configure_optimizers(self):
         """Choose what optimizers and learning-rate schedulers to use in your optimization.
