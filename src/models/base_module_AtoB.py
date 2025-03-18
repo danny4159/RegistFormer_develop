@@ -94,10 +94,20 @@ class BaseModule_AtoB(LightningModule):  # single direction
         
             return self.netG_A(merged_input)
         
+        if type(self.netG_A).__name__ in ["AutoencoderKL"]:
+            reconsturction, z_mu, z_sigma = self.netG_A(a)
+            return reconsturction, z_mu, z_sigma
+
+
         # Case2. Normal generation
         return self.netG_A(a)
 
     def model_step(self, batch: Any):
+        if type(self.netG_A).__name__ in ["AutoencoderKL"]:
+            real_a, real_b = batch
+            fake_b, z_mu, z_sigma = self.forward(real_a)
+            return real_a, real_b, fake_b, z_mu, z_sigma
+
         if self.params.use_multiple_outputs:
             if self.params.use_misalign_simul == False:
                 if len(batch) == 3: # Ref cont 2
