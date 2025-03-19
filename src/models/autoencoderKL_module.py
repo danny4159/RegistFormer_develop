@@ -96,7 +96,7 @@ class AutoencoderKLModule(BaseModule_AtoB):
                 optimizer_D_A.zero_grad(set_to_none=True)
                 logits_fake = self.netD_A(fake_a.detach())[-1]
                 loss_d_fake = self.criterionGAN(logits_fake, target_is_real=False, for_discriminator=True)
-                logits_real = self.netD_A(real_b.detach())[-1]
+                logits_real = self.netD_A(real_a.detach())[-1]
                 loss_d_real = self.criterionGAN(logits_real, target_is_real=True, for_discriminator=True)
                 loss_d = (loss_d_fake + loss_d_real) * 0.5
 
