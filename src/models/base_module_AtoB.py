@@ -121,6 +121,18 @@ class BaseModule_AtoB(LightningModule):  # single direction
             real_b = self.crop_slice_to_original(real_b, original_slices)
             fake_a = self.crop_slice_to_original(fake_a, original_slices)
             return real_a, real_b, fake_a, z_mu, z_sigma
+        
+        if type(self.netG_A).__name__ in ["LatentDiffusionModel"]:
+            real_a, real_b = batch
+            # original_slices = real_a.shape[-1]
+            # real_a = self.pad_slice_to_128(real_a, padding_value=0)
+            # real_b = self.pad_slice_to_128(real_b, padding_value=0)
+            
+            noise = torch.randn(1,3,384,320,128)
+            noise = noise.to(real_a.device)
+            self.scheduler.set_timesteps(num_inference_steps=1000)
+            fake_a = self.inferer.sample(input_noise=noise, autoencoder_model=self.autoencoder, diffusion_model=self.netG_A, scheduler=self.scheduler)
+            return real_a, real_b, fake_a # 여기서 fake_a는 랜덤하게 생성된 output
 
         if self.params.use_multiple_outputs:
             if self.params.use_misalign_simul == False:

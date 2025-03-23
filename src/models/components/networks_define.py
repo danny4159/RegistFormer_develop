@@ -258,9 +258,10 @@ def define_G(**kwargs):
     elif netG_type == 'resvit':
         net = ResViT(**kwargs)
     elif netG_type == 'autoencoder_monai':
-        
         net = AutoencoderKL(**kwargs)
         return net # 일부러 초기화 따로 안하려고
+    elif netG_type == 'latentDiffusion_monai':
+        net = DiffusionModelUNet(**kwargs)
     else:
         raise ValueError('This netG_type is not expected')
     return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
