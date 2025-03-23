@@ -35,6 +35,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         rot_prob: float = 0.0,  # augmentation for training (rot90)
         padding_size: Optional[Tuple[int, int]] = None,
         crop_size: Optional[Tuple[int, int]] = None,
+        norm_ZeroToOne: bool = False,
         **kwargs: Any
     ):
         super().__init__()
@@ -62,6 +63,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         self.rot_prob = rot_prob
         self.padding_size = padding_size
         self.crop_size = crop_size
+        self.norm_ZeroToOne = norm_ZeroToOne
 
         self.data_train: Optional[Dataset] = None
         self.data_val: Optional[Dataset] = None
@@ -85,6 +87,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             rot_prob=self.rot_prob,
             crop_size=self.crop_size,
             reverse=self.reverse,
+            norm_ZeroToOne=self.norm_ZeroToOne,
         )  # Use flip and crop augmentation for training data
         self.data_val = dataset_SynthRAD(
             self.val_dir,
@@ -99,6 +102,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             # rot_prob=0.0,
             # crop_size=self.crop_size,
             reverse=self.reverse,
+            norm_ZeroToOne=self.norm_ZeroToOne,
         )
         self.data_test = dataset_SynthRAD(
             self.test_dir,
@@ -113,6 +117,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             # rot_prob=0.0,
             # crop_size=self.crop_size,
             reverse=self.reverse,
+            norm_ZeroToOne=self.norm_ZeroToOne,
         )
 
     def train_dataloader(self):

@@ -260,6 +260,7 @@ def define_G(**kwargs):
     elif netG_type == 'autoencoder_monai':
         
         net = AutoencoderKL(**kwargs)
+        return net # 일부러 초기화 따로 안하려고
     else:
         raise ValueError('This netG_type is not expected')
     return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
@@ -332,6 +333,7 @@ def define_D(
         net = PixelDiscriminator(input_nc, ndf, norm_layer=norm_layer)
     elif netD == "patch_monai":
         net = PatchDiscriminator(spatial_dims=spatial_dims, num_layers_d=num_layers_d, channels=channels, in_channels=in_channels, out_channels=out_channels)
+        return net # 일부러 초기화 따로 안하려고
     else:
         raise NotImplementedError(
             "Discriminator model name [%s] is not recognized" % netD

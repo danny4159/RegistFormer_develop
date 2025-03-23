@@ -215,6 +215,7 @@ class dataset_SynthRAD(Dataset):
         rot_prob: float = 0.0,
         crop_size: Optional[Tuple[int, int]] = None,
         reverse: bool = False,
+        norm_ZeroToOne: bool = False,
         *args,
         **kwargs,
     ):
@@ -229,6 +230,7 @@ class dataset_SynthRAD(Dataset):
         self.padding_size = padding_size
         self.crop_size = crop_size
         self.reverse = reverse
+        self.norm_ZeroToOne = norm_ZeroToOne
 
         os.environ["HDF5_USE_FILE_LOCKING"] = "TRUE"
 
@@ -345,7 +347,19 @@ class dataset_SynthRAD(Dataset):
                 A, B, C = even_crop_height_width(A, B, C, multiple=(16, 16))
             else:
                 A, B = even_crop_height_width(A, B, multiple=(16, 16))
-                
+        
+        # Normalize A, B, C, D, E to range [0,1]
+        if self.norm_ZeroToOne:
+            A = (A - A.min()) / (A.max() - A.min() + 1e-8)
+            B = (B - B.min()) / (B.max() - B.min() + 1e-8)
+
+            if self.data_group_3:
+                C = (C - C.min()) / (C.max() - C.min() + 1e-8)
+            if self.data_group_4:
+                D = (D - D.min()) / (D.max() - D.min() + 1e-8)
+            if self.data_group_5:
+                E = (E - E.min()) / (E.max() - E.min() + 1e-8)
+
         if self.reverse:
             if self.data_group_5:
                 return E, D, C, B, A

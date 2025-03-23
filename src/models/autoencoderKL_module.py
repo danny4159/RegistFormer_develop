@@ -70,44 +70,41 @@ class AutoencoderKLModule(BaseModule_AtoB):
         optimizer_G_A, optimizer_D_A = self.optimizers()
         real_a, real_b, fake_a, z_mu, z_sigma = self.model_step(batch)
 
-        with optimizer_G_A.toggle_model():
-            loss_recon = self.criterionL1(fake_a.float().detach(), real_a.float().detach()) * self.params.lambda_recon
-            loss_kl = self.kl_loss(z_mu, z_sigma) * self.params.lambda_kl
-            loss_percept = self.criterionPeceptual(fake_a.float().detach(), real_a.float().detach()) * self.params.lambda_percept
-            loss_g = loss_recon + loss_kl + loss_percept
+        loss_recon = self.criterionL1(fake_a.float(), real_a.float()) * self.params.lambda_recon
+        loss_kl = self.kl_loss(z_mu, z_sigma) * self.params.lambda_kl
+        loss_percept = self.criterionPeceptual(fake_a.float(), real_a.float()) * self.params.lambda_percept
+        loss_g = loss_recon + loss_kl + loss_percept
 
         # Epoch 5까지는 GAN에서 Generator만 학습
-            if self.current_epoch > 5: # autoencoder_warm_up_n_epochs
-                logit_fake = self.netD_A(fake_a.float())[-1]
-                generator_loss = self.criterionGAN(logit_fake, target_is_real=True, for_discriminator=False) * self.params.lambda_adv
-                loss_g += generator_loss
+        if self.current_epoch > 5: # autoencoder_warm_up_n_epochs
+            logit_fake = self.netD_A(fake_a.contiguous().float())[-1]
+            generator_loss = self.criterionGAN(logit_fake, target_is_real=True, for_discriminator=False) * self.params.lambda_adv
+            loss_g += generator_loss
 
-            self.manual_backward(loss_g)
-            optimizer_G_A.step()
-            optimizer_G_A.zero_grad()
+        loss_g.backward()
+        optimizer_G_A.step()
+        optimizer_G_A.zero_grad()
+        # Toggle model과 manual backward가 VAE 학습 안되는 원인이였어.
 
         self.log("loss_recon", loss_recon.detach(), prog_bar=True)
         self.log("loss_percept", loss_percept.detach(), prog_bar=True)
         self.log("loss_kl", loss_kl.detach(), prog_bar=True)
         self.log("loss_g", loss_g.detach(), prog_bar=True)
 
-        with optimizer_D_A.toggle_model(): 
-            if self.current_epoch > 5: # autoencoder_warm_up_n_epochs
-                optimizer_D_A.zero_grad(set_to_none=True)
-                logits_fake = self.netD_A(fake_a.detach())[-1]
-                loss_d_fake = self.criterionGAN(logits_fake, target_is_real=False, for_discriminator=True)
-                logits_real = self.netD_A(real_a.detach())[-1]
-                loss_d_real = self.criterionGAN(logits_real, target_is_real=True, for_discriminator=True)
-                loss_d = (loss_d_fake + loss_d_real) * 0.5
+        if self.current_epoch > 5: # autoencoder_warm_up_n_epochs
+            logits_fake = self.netD_A(fake_a.contiguous().detach())[-1]
+            loss_d_fake = self.criterionGAN(logits_fake, target_is_real=False, for_discriminator=True)
+            logits_real = self.netD_A(real_a.contiguous().detach())[-1]
+            loss_d_real = self.criterionGAN(logits_real, target_is_real=True, for_discriminator=True)
+            loss_d = (loss_d_fake + loss_d_real) * 0.5 * self.params.lambda_adv
 
-                loss_d = self.params.lambda_adv * loss_d
-                self.manual_backward(loss_d)
-                optimizer_D_A.step()
-                optimizer_D_A.zero_grad()
+            loss_d.backward()
+            optimizer_D_A.step()
+            optimizer_D_A.zero_grad()
 
-                self.log("loss_d_fake", loss_d_fake.detach(), prog_bar=True)
-                self.log("loss_d_real", loss_d_real.detach(), prog_bar=True)
-                self.log("loss_d", loss_d.detach(), prog_bar=True)
+            self.log("loss_d_fake", loss_d_fake.detach(), prog_bar=True)
+            self.log("loss_d_real", loss_d_real.detach(), prog_bar=True)
+            self.log("loss_d", loss_d.detach(), prog_bar=True)
 
         
     def configure_optimizers(self):

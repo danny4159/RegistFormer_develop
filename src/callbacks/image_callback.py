@@ -25,6 +25,7 @@ class ImageLoggingCallback(Callback):
         center_crop: int = 256,
         every_epoch=5,
         log_test: bool = False,
+        norm_ZeroToOne: bool = False,
     ):
         """_summary_
 
@@ -39,7 +40,11 @@ class ImageLoggingCallback(Callback):
         self.every_epoch = every_epoch
         self.log_test = log_test  # log images on the testing stage as well
         self.center_crop = center_crop  # center crop the images to this size
+        self.norm_ZeroToOne = norm_ZeroToOne
 
+    def normalize_img(self, tensor):
+        return tensor if self.norm_ZeroToOne else (tensor + 1) / 2
+    
     def saving_to_grid(self, res):
         # def gray2rgb(tensor):
         #     if tensor.size(0) == 1:  # Grayscale image with 1 channel
@@ -61,11 +66,11 @@ class ImageLoggingCallback(Callback):
                 self.first_image_size = a[0].shape[1:3]
 
             self.img_grid.extend([
-                resize(((a[0] + 1) / 2), self.first_image_size),
-                resize(((b[0] + 1) / 2), self.first_image_size),
-                resize(((preds_b[0] + 1) / 2), self.first_image_size),
-                resize(((c[0] + 1) / 2), self.first_image_size),
-                resize(((preds_c[0] + 1) / 2), self.first_image_size),
+                resize(self.normalize_img(a[0]), self.first_image_size),
+                resize(self.normalize_img(b[0]), self.first_image_size),
+                resize(self.normalize_img(preds_b[0]), self.first_image_size),
+                resize(self.normalize_img(c[0]), self.first_image_size),
+                resize(self.normalize_img(preds_c[0]), self.first_image_size),
             ])
             self.err_grid.extend([
                 resize(err_b[0], self.first_image_size),
@@ -82,12 +87,12 @@ class ImageLoggingCallback(Callback):
                 self.first_image_size = a[0].shape[1:3]
 
             self.img_grid.extend([
-            resize(((a[0] + 1) / 2), self.first_image_size),
-            resize(((a2[0] + 1) / 2), self.first_image_size),
-            resize(((preds_a[0] + 1) / 2), self.first_image_size),
-            resize(((b[0] + 1) / 2), self.first_image_size),
-            resize(((b2[0] + 1) / 2), self.first_image_size),
-            resize(((preds_b[0] + 1) / 2), self.first_image_size),
+            resize(self.normalize_img(a[0]), self.first_image_size),
+            resize(self.normalize_img(a2[0]), self.first_image_size),
+            resize(self.normalize_img(preds_a[0]), self.first_image_size),
+            resize(self.normalize_img(b[0]), self.first_image_size),
+            resize(self.normalize_img(b2[0]), self.first_image_size),
+            resize(self.normalize_img(preds_b[0]), self.first_image_size),
             ])
             self.err_grid.extend([
                 resize(err_a[0], self.first_image_size),
@@ -104,11 +109,11 @@ class ImageLoggingCallback(Callback):
                 self.first_image_size = a[0].shape[1:3]
 
             self.img_grid.extend([
-                resize(((a[0] + 1) / 2), self.first_image_size),
-                resize(((preds_b[0] + 1) / 2), self.first_image_size),
-                resize(((b[0] + 1) / 2), self.first_image_size),
-                resize(((preds_c[0] + 1) / 2), self.first_image_size),
-                resize(((c[0] + 1) / 2), self.first_image_size),
+                resize(self.normalize_img(a[0]), self.first_image_size),
+                resize(self.normalize_img(preds_b[0]), self.first_image_size),
+                resize(self.normalize_img(b[0]), self.first_image_size),
+                resize(self.normalize_img(preds_c[0]), self.first_image_size),
+                resize(self.normalize_img(c[0]), self.first_image_size),
             ])
             self.err_grid.extend([
                 resize(err_a[0], self.first_image_size),
@@ -125,10 +130,10 @@ class ImageLoggingCallback(Callback):
                 self.first_image_size = a[0].shape[1:3]
 
             self.img_grid.extend([
-                resize(((a[0] + 1) / 2), self.first_image_size),
-                resize(((preds_a[0] + 1) / 2), self.first_image_size),
-                resize(((b[0] + 1) / 2), self.first_image_size),
-                resize(((preds_b[0] + 1) / 2), self.first_image_size),
+                resize(self.normalize_img(a[0]), self.first_image_size),
+                resize(self.normalize_img(preds_a[0]), self.first_image_size),
+                resize(self.normalize_img(b[0]), self.first_image_size),
+                resize(self.normalize_img(preds_b[0]), self.first_image_size),
             ])
             self.err_grid.extend([
                 resize(err_a[0], self.first_image_size),
@@ -144,9 +149,9 @@ class ImageLoggingCallback(Callback):
                 self.first_image_size = a[0].shape[1:3]
 
             self.img_grid.extend([
-                resize(((a[0] + 1) / 2), self.first_image_size),
-                resize(((preds_b[0] + 1) / 2), self.first_image_size),
-                resize(((b[0] + 1) / 2), self.first_image_size),
+                resize(self.normalize_img(a[0]), self.first_image_size),
+                resize(self.normalize_img(preds_b[0]), self.first_image_size),
+                resize(self.normalize_img(b[0]), self.first_image_size),
             ])
             self.err_grid.extend([
                 resize(err_b[0], self.first_image_size),
@@ -257,6 +262,7 @@ class ImageSavingCallback(Callback):
                  flag_normalize: bool = True,
                  data_dir: str = None,
                  data_type:str = None,
+                 norm_ZeroToOne: bool = False,
                  ):
         """_summary_
         Image saving callback : Save images in nii format for each subject
@@ -269,9 +275,13 @@ class ImageSavingCallback(Callback):
         self.flag_normalize = flag_normalize
         self.data_dir = data_dir
         self.data_type = data_type
+        self.norm_ZeroToOne = norm_ZeroToOne
         # print("test_file: ", test_file)
         # print("flag_normalize: ", self.flag_normalize)
 
+    def normalize_np(self, arr):
+        return arr if self.norm_ZeroToOne else (arr + 1) / 2
+    
     @staticmethod
     def change_torch_numpy(a, b, c, d, e=None, f=None):
         assert (
@@ -293,8 +303,7 @@ class ImageSavingCallback(Callback):
         
         return a_np, b_np, c_np, d_np, e_np, f_np
 
-    @staticmethod
-    def change_numpy_nii(a, b, c, d, e, flag_normalize=True):
+    def change_numpy_nii(self, a, b, c, d, e, flag_normalize=True):
         assert (
             a.ndim == b.ndim == c.ndim == d.ndim == 3
         ), "All input arrays must have the same number of dimensions (3)"
@@ -302,11 +311,11 @@ class ImageSavingCallback(Callback):
         if flag_normalize:
             # scale to [0, 1] and [0, 255]
             a, b, c, d, e = (
-                ((a + 1) / 2) * 255,
-                ((b + 1) / 2) * 255,
-                ((c + 1) / 2) * 255,
-                ((d + 1) / 2) * 255,
-                ((e + 1) / 2) * 255,
+                self.normalize_np(a) * 255,
+                self.normalize_np(b) * 255,
+                self.normalize_np(c) * 255,
+                self.normalize_np(d) * 255,
+                self.normalize_np(e) * 255,
             )
 
             # type to np.int16
@@ -346,18 +355,16 @@ class ImageSavingCallback(Callback):
 
         return a_nii, b_nii, c_nii, d_nii, e_nii
     
-    @staticmethod
-    def change_numpy_tif(a, b, a2, b2, preds_a, preds_b):
-        a = ((a + 1) / 2 * 255).astype(np.uint8)
-        b = ((b + 1) / 2 * 255).astype(np.uint8)
-        a2 = ((a2 + 1) / 2 * 255).astype(np.uint8)
-        b2 = ((b2 + 1) / 2 * 255).astype(np.uint8)
-        preds_a = ((preds_a + 1) / 2 * 255).astype(np.uint8)
-        preds_b = ((preds_b + 1) / 2 * 255).astype(np.uint8)
+    def change_numpy_tif(self, a, b, a2, b2, preds_a, preds_b):
+        a = (self.normalize_np(a) * 255).astype(np.uint8)
+        b = (self.normalize_np(a) * 255).astype(np.uint8)
+        a2 = (self.normalize_np(a) * 255).astype(np.uint8)
+        b2 = (self.normalize_np(a) * 255).astype(np.uint8)
+        preds_a = (self.normalize_np(a) * 255).astype(np.uint8)
+        preds_b = (self.normalize_np(a) * 255).astype(np.uint8)
         return a, b, a2, b2, preds_a, preds_b
 
-    @staticmethod
-    def save_nii(a_nii, b_nii, c_nii, d_nii, e_nii, subject_number, folder_path):
+    def save_nii(self, a_nii, b_nii, c_nii, d_nii, e_nii, subject_number, folder_path):
         nib.save(a_nii, os.path.join(folder_path, f"a_{subject_number}.nii.gz"))
         nib.save(b_nii, os.path.join(folder_path, f"b_{subject_number}.nii.gz"))
         nib.save(c_nii, os.path.join(folder_path, f"preds_a_{subject_number}.nii.gz"))

@@ -36,7 +36,7 @@ netD_A:
   channels: 32
   in_channels: 1
   out_channels: 1
-  init_type: 'normal' #'kaiming'
+  # init_type: 'normal' #'kaiming'
 
 
 # netF_A: # For PatchNCELoss
@@ -54,7 +54,7 @@ params: # Other params
   lambda_recon: 1 # l1
   lambda_adv: 0.01
   lambda_percept: 0.001
-  lambda_kl: 1e-6
+  lambda_kl: 0.000001
   is_registration: false
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}

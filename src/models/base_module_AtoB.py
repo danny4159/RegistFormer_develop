@@ -111,8 +111,11 @@ class BaseModule_AtoB(LightningModule):  # single direction
         if type(self.netG_A).__name__ in ["AutoencoderKL"]:
             real_a, real_b = batch
             original_slices = real_a.shape[-1]
-            real_a = self.pad_slice_to_128(real_a)
-            real_b = self.pad_slice_to_128(real_b)
+            real_a = self.pad_slice_to_128(real_a, padding_value=0)
+            real_b = self.pad_slice_to_128(real_b, padding_value=0)
+            # if is_train is False:
+            #     self.netG_A.eval()
+            #     self.netD_A.eval()                
             fake_a, z_mu, z_sigma = self.forward(real_a, real_b)
             real_a = self.crop_slice_to_original(real_a, original_slices)
             real_b = self.crop_slice_to_original(real_b, original_slices)
