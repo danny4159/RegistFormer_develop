@@ -9,11 +9,11 @@ optimizer:
   betas: [0.5, 0.999]
   weight_decay: 0.0001
 
-scheduler:
-  _target_: torch.optim.lr_scheduler.MultiStepLR
-  _partial_: true
-  milestones: [250000, 300000]
-  gamma: 0.5
+# scheduler:
+#   _target_: torch.optim.lr_scheduler.MultiStepLR
+#   _partial_: true
+#   milestones: [250000, 300000]
+#   gamma: 0.5
 
 netG_A:
   _target_: src.models.components.networks_define.define_G
@@ -22,8 +22,9 @@ netG_A:
   in_channels: 3
   out_channels: 3
   num_res_blocks: 1
-  attention_levels: [False, False, True]
-  channels: [0, 64, 64]
+  channels: [32, 64, 64]
+  attention_levels: [False, True, True]
+  num_head_channels: [0, 64, 64]
   # init_type: 'kaiming'
 
 # netD_A:

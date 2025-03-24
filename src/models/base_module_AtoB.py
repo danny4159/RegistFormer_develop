@@ -1,5 +1,7 @@
 from typing import Any, Optional
 
+import random
+
 import torch
 import torch.nn.functional as F
 from lightning import LightningModule
@@ -122,13 +124,27 @@ class BaseModule_AtoB(LightningModule):  # single direction
             fake_a = self.crop_slice_to_original(fake_a, original_slices)
             return real_a, real_b, fake_a, z_mu, z_sigma
         
-        if type(self.netG_A).__name__ in ["LatentDiffusionModel"]:
+        if type(self.netG_A).__name__ in ["DiffusionModelUNet"]:
             real_a, real_b = batch
             # original_slices = real_a.shape[-1]
             # real_a = self.pad_slice_to_128(real_a, padding_value=0)
             # real_b = self.pad_slice_to_128(real_b, padding_value=0)
+            real_a = self.pad_slice_to_128(real_a, padding_value=0)
+            real_b = self.pad_slice_to_128(real_b, padding_value=0)
             
-            noise = torch.randn(1,3,384,320,128)
+            _, _, H, W, D = real_a.shape
+            crop_h, crop_w = 96, 96
+            # 🟡 시작점 랜덤 설정
+            start_h = random.randint(0, max(0, H - crop_h))
+            start_w = random.randint(0, max(0, W - crop_w))
+            # 🟡 crop 수행
+            real_a = real_a[:, :, start_h:start_h + crop_h, start_w:start_w + crop_w, :]
+            real_b = real_b[:, :, start_h:start_h + crop_h, start_w:start_w + crop_w, :]
+
+            real_a = torch.randn(1,1,96,96,64).to(real_a.device)
+            real_b = torch.randn(1,1,96,96,64).to(real_a.device)
+            noise = torch.randn(1,3,24,24,16) # 380,320,128 / 95,80,32
+            # noise = torch.randn(1,3,96,80,32) # 380,320,128 / 95,80,32
             noise = noise.to(real_a.device)
             self.scheduler.set_timesteps(num_inference_steps=1000)
             fake_a = self.inferer.sample(input_noise=noise, autoencoder_model=self.autoencoder, diffusion_model=self.netG_A, scheduler=self.scheduler)
@@ -222,6 +238,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
         if len(real_A.size()) == 5:
             for i in range(real_A.size(4)):
+                print(real_A.shape, fake_B.shape)
                 self.val_gc_B.update(norm_to_uint8(real_A[:, :, :, :, i]), norm_to_uint8(fake_B[:, :, :, :, i]))
                 nmi_score = self.val_nmi_B(flatten_to_1d(norm_to_uint8(real_A[:, :, :, :, i])), flatten_to_1d(norm_to_uint8(fake_B[:, :, :, :, i])))
                 self.nmi_scores_B.append(nmi_score)

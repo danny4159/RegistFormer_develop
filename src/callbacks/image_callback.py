@@ -181,7 +181,7 @@ class ImageLoggingCallback(Callback):
                 self.saving_to_grid([evaluation_img, moving_img, fixed_img, warped_img])
             elif len(batch[0].size()) == 5 and pl_module.params.is_registration == False:  # 3D Image Generation
                 d_index = 30
-                real_a, real_b, fake_b, _, _ = pl_module.model_step(batch)
+                real_a, real_b, fake_b, *_ = pl_module.model_step(batch)
                 real_a = real_a[:, :, :, :, d_index].squeeze(-1)
                 real_b = real_b[:, :, :, :, d_index].squeeze(-1)
                 fake_b = fake_b[:, :, :, :, d_index].squeeze(-1)
@@ -231,7 +231,7 @@ class ImageLoggingCallback(Callback):
                 self.saving_to_grid([evaluation_img, moving_img, fixed_img, warped_img])
             elif len(batch[0].size()) == 5 and pl_module.params.is_registration == False:  # 3D Image Generation
                 d_index = 30
-                real_a, real_b, fake_b, _, _ = pl_module.model_step(batch)
+                real_a, real_b, fake_b, *_ = pl_module.model_step(batch)
                 real_a = real_a[:, :, :, :, d_index].squeeze(-1)
                 real_b = real_b[:, :, :, :, d_index].squeeze(-1)
                 fake_b = fake_b[:, :, :, :, d_index].squeeze(-1)
