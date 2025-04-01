@@ -23,6 +23,7 @@ from src.models.components.network_transMorph import TransMorph
 from src.models.components.network_resvit import ResViT
 
 from monai.networks.nets import AutoencoderKL, DiffusionModelUNet, PatchDiscriminator
+from monai.apps.generation.maisi.networks.autoencoderkl_maisi import AutoencoderKlMaisi
 
 # from src.models.components.networks_spade_danny import SPADEGenerator, ConvEncoder
 
@@ -260,6 +261,9 @@ def define_G(**kwargs):
     elif netG_type == 'autoencoder_monai':
         net = AutoencoderKL(**kwargs)
         return net # 일부러 초기화 따로 안하려고
+    elif netG_type == 'autoencoder_maisi_monai':
+        net = AutoencoderKlMaisi(**kwargs)
+        return net
     elif netG_type == 'latentDiffusion_monai':
         net = DiffusionModelUNet(**kwargs)
     else:

@@ -60,6 +60,19 @@ class AutoencoderKLModule(BaseModule_AtoB):
         self.criterionPeceptual = PerceptualLoss(spatial_dims=3, network_type="squeeze", is_fake_3d=True, fake_3d_ratio=0.2) if params.lambda_percept !=0 else None
         self.criterionL1 = torch.nn.L1Loss() if params.lambda_recon != 0 else None
         # self.criterionMIND = MINDLoss() if params.lambda_mind != 0 else None
+
+        ### Load checkpoint
+        ckpt_path = "/home/sumin/registformer/RegistFormer_develop/pretrained/maisi/autoencoder_epoch273.pt"
+        ckpt = torch.load(ckpt_path, map_location=self.device)
+        ckpt_state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+
+        if any(k.startswith("netG_A.") for k in ckpt_state_dict):
+            netG_A_state_dict = {k.replace("netG_A.", ""): v for k, v in ckpt_state_dict.items() if k.startswith("netG_A.")}
+        else:
+            netG_A_state_dict = ckpt_state_dict
+
+        self.netG_A.load_state_dict(netG_A_state_dict, strict=False)
+
         
     def kl_loss(self, z_mu, z_sigma):
         klloss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])

@@ -1,0 +1,77 @@
+_target_: src.models.autoencoderKL_module.AutoencoderKLModule
+
+name: AutoencoderKLMaisi
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.0001
+  betas: [0.5, 0.999]
+  weight_decay: 0.0001
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.MultiStepLR
+  _partial_: true
+  milestones: [250000, 300000]
+  gamma: 0.5
+
+netG_A:
+  _target_: src.models.components.networks_define.define_G
+  netG_type: 'autoencoder_maisi_monai'
+  spatial_dims: 3
+  in_channels: 1
+  out_channels: 1
+  latent_channels: 4
+  num_channels: [64, 128, 256]
+  num_res_blocks: [2, 2, 2]
+  norm_num_groups: 32
+  norm_eps: 1e-06
+  attention_levels: [False, False, False]
+  with_encoder_nonlocal_attn: false
+  with_decoder_nonlocal_attn: false
+  use_checkpointing: false
+  use_convtranspose: false
+  norm_float16: false # 원래는 true인데, 에러가 자꾸 떠서 false로해서 precision 32로 하니 잘돼.
+  num_splits: 8 # 1로 바꿔서 해보기.
+  dim_split: 1
+  # init_type: 'kaiming'
+
+netD_A:
+  _target_: src.models.components.networks_define.define_D
+  netD: 'patch_monai'
+  spatial_dims: 3 
+  num_layers_d: 3
+  channels: 32
+  in_channels: 1
+  out_channels: 1
+  # init_type: 'normal' #'kaiming'
+
+
+# netF_A: # For PatchNCELoss
+#   _target_: src.models.components.networks_define.define_F
+#   netF_type: 'mlp_sample'
+#   use_mlp: True #True
+#   init_type: 'xavier' #'xavier'
+#   init_gain: 0.02
+#   nc: 256
+#   input_nc: 512 # ${model.netG_A.feat_ch}
+
+
+
+params: # Other params
+  lambda_recon: 1 # l1
+  lambda_adv: 0.01
+  lambda_percept: 0.001
+  lambda_kl: 0.000001
+  is_registration: false
+  reverse: ${data.reverse} # A->B if False, B->A if True
+  use_split_inference: ${data.use_split_inference}
+  flip_equivariance: False
+  batch_size: ${data.batch_size}
+  nce_layers: [0,2,4,6] # [0,2,4,6] # 3까지가 encoder # [0,1,2,3]-> encoder만 하니까 성능 떨어진다. 전부다 하는게 낫다.
+  eval_on_align: ${data.eval_on_align}
+  use_sliding_inference: ${data.use_sliding_inference}
+  use_multiple_outputs: ${data.use_multiple_outputs} # Set True if data_group_3 is exist
+  nce_on_vgg: false #True
+  nce_independent: false
+  use_misalign_simul: ${data.use_misalign_simul}
