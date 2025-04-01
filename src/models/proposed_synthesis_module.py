@@ -258,6 +258,89 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         return loss_G
         # assert not torch.isnan(loss_G).any(), "Total Loss is NaN"
 
+    def backward_G_3D(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref):
+        loss_G = torch.tensor(0.0, device=real_a.device)
+        D = real_a.shape[-1]  # 슬라이스 수
+
+        loss_logs = {}
+
+        for d in range(D):
+            ra = real_a[..., d]
+            rb = real_b[..., d]
+            rb_ref = real_b_ref[..., d] if real_b_ref is not None else None
+            fb = fake_b[..., d]
+
+            ## GAN
+            if self.criterionGAN:
+                pred_fake = self.netD_A(fb.detach())
+                loss_gan_b = self.criterionGAN(pred_fake, True) / D
+                loss_G += loss_gan_b
+                loss_logs.setdefault("Gan_b_Loss", 0.0)
+                loss_logs["Gan_b_Loss"] += loss_gan_b.detach()
+
+            # Contextual
+            if self.criterionContextual:
+                loss_style_b = self.criterionContextual(rb, fb) * self.params.lambda_style / D
+                loss_G += loss_style_b.squeeze()
+                loss_logs.setdefault("Context_b_Loss", 0.0)
+                loss_logs["Context_b_Loss"] += loss_style_b.detach()
+
+            ## PatchNCE (slice-wise)
+            if self.criterionNCE:
+                if self.params.nce_on_vgg:
+                    real_rgb = ra.repeat(1, 3, 1, 1)
+                    fake_rgb = fb.repeat(1, 3, 1, 1)
+                    self.vgg.to(ra.device)
+
+                    feat_b = self.vgg(fake_rgb)
+                    feat_b = list(feat_b.values()) # [0]:8,512,16,16 [1]:8,512,8,8
+
+                    feat_a = self.vgg(real_rgb)
+                    feat_a = list(feat_a.values())
+
+                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+
+                    total_nce_loss = 0.0
+
+                    for f_a, f_b in zip(feat_a_pool, feat_b_pool):
+                        loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce / D
+                        total_nce_loss = total_nce_loss + loss.mean()
+                    loss_nce_b = total_nce_loss / len(feat_b)
+                    loss_logs.setdefault("NCE_b_Loss", 0.0)
+                    loss_logs["NCE_b_Loss"] += loss_nce_b.detach()
+                    loss_G += loss_nce_b
+
+                else:
+                    n_layers = len(self.params.nce_layers)
+                    merged_input_1 = torch.cat((fb, ra), dim=1)
+                    feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
+
+                    flipped_for_equivariance = np.random.random() < 0.5
+                    if self.params.flip_equivariance and flipped_for_equivariance:
+                        feat_b = [torch.flip(fb_, [3]) for fb_ in feat_b]
+
+                    merged_input_2 = torch.cat((ra, rb), dim=1)
+                    feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+
+                    total_nce_loss = 0.0
+                    for f_a, f_b in zip(feat_a_pool, feat_b_pool):
+                        loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce / D
+                        total_nce_loss += loss.mean()
+
+                    loss_nce_b = total_nce_loss / n_layers
+                    loss_logs.setdefault("NCE_b_Loss", 0.0)
+                    loss_logs["NCE_b_Loss"] += loss_nce_b.detach()
+                    loss_G += loss_nce_b
+        # 평균 로그 출력
+        for key, val in loss_logs.items():
+            self.log(key, val, prog_bar=True)
+        self.log("G_loss", loss_G.detach(), prog_bar=True)
+
+        return loss_G
+
     def training_step(self, batch: Any, batch_idx: int):
         
         if self.params.use_multiple_outputs:
@@ -285,7 +368,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 if self.params.use_misalign_simul:
                     loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
                 else:
-                    loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, None, None, None)
+                    if self.params.is_3d:
+                        loss_G = self.backward_G_3D(real_a, real_b, None, None, fake_b, None, None, None, None, None)
+                    else:
+                        loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, None, None, None)
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
@@ -298,8 +384,11 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             optimizer_G_A.zero_grad()
             optimizer_F_A.zero_grad()
 
-        with optimizer_D_A.toggle_model(): 
-            loss_D_A = self.backward_D_A(real_b, fake_b)
+        with optimizer_D_A.toggle_model():
+            if self.params.is_3d:
+                loss_D_A = self.backward_D_A_3D(real_a, fake_b)
+            else:
+                loss_D_A = self.backward_D_A(real_b, fake_b)
             self.manual_backward(loss_D_A)
             self.clip_gradients(
                 optimizer_D_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"

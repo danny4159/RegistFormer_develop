@@ -18,7 +18,12 @@ from monai.transforms import Affine
 import random
 import math
 
-def padding_height_width(tensorA, tensorB, tensorC=None, tensorD=None, tensorE=None, target_size=(256, 256), pad_value=-1):
+def padding_height_width_depth(tensorA, tensorB, tensorC=None, tensorD=None, tensorE=None, target_size=(256, 256), pad_value=-1):
+    if isinstance(target_size, int):
+        target_size = (target_size, target_size)
+    elif isinstance(target_size, (list, tuple)) and len(target_size) not in (2, 3):
+        raise ValueError("target_size는 int, (H, W), 또는 (H, W, D) 형식이어야 합니다.")
+    
     # Determine if the input is 2D or 3D based on the number of dimensions
     if len(tensorA.shape) == 3:
         # 2D case
@@ -50,17 +55,32 @@ def padding_height_width(tensorA, tensorB, tensorC=None, tensorD=None, tensorE=N
     pad_bottom = (target_size[0] - h) // 2 if h < target_size[0] else 0
     pad_left = (target_size[1] - w + 1) // 2 if w < target_size[1] else 0
     pad_right = (target_size[1] - w) // 2 if w < target_size[1] else 0
+    if len(target_size) == 3:
+        pad_front = (target_size[2] - d + 1) // 2 if d < target_size[2] else 0
+        pad_back = (target_size[2] - d) // 2 if d < target_size[2] else 0
 
     # Apply padding
-    if pad_top != 0 or pad_left != 0:
-        tensorA = nnF.pad(tensorA, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
-        tensorB = nnF.pad(tensorB, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
-        if tensorC is not None:
-            tensorC = nnF.pad(tensorC, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
-        if tensorD is not None:
-            tensorD = nnF.pad(tensorD, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
-        if tensorE is not None:
-            tensorE = nnF.pad(tensorE, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
+    if len(target_size) == 2:
+        if pad_top != 0 or pad_left != 0:
+            tensorA = nnF.pad(tensorA, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
+            tensorB = nnF.pad(tensorB, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
+            if tensorC is not None:
+                tensorC = nnF.pad(tensorC, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
+            if tensorD is not None:
+                tensorD = nnF.pad(tensorD, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
+            if tensorE is not None:
+                tensorE = nnF.pad(tensorE, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
+        elif len(target_size) == 3:
+            if pad_top != 0 or pad_left != 0 or pad_front != 0:
+                tensorA = nnF.pad(tensorA, (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back), value=pad_value)
+                tensorB = nnF.pad(tensorB, (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back), value=pad_value)
+                if tensorC is not None:
+                    tensorC = nnF.pad(tensorC, (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back), value=pad_value)
+                if tensorD is not None:
+                    tensorD = nnF.pad(tensorD, (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back), value=pad_value)
+                if tensorE is not None:
+                    tensorE = nnF.pad(tensorE, (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back), value=pad_value)
+
 
     if tensorE is not None:
         return tensorA, tensorB, tensorC, tensorD, tensorE
@@ -71,10 +91,16 @@ def padding_height_width(tensorA, tensorB, tensorC=None, tensorD=None, tensorE=N
     else:
         return tensorA, tensorB
 
-def random_crop_height_width(tensorA, tensorB, tensorC=None, tensorD=None, tensorE=None, target_size=(128, 128)):
+def random_crop(tensorA, tensorB, tensorC=None, tensorD=None, tensorE=None, target_size=(128, 128)):
+    """
+    Random crop for both 2D (C, H, W) and 3D (C, H, W, D) tensors.
+    `target_size` can be 2D (H, W) or 3D (H, W, D)
+    """
     if isinstance(target_size, int):
         target_size = (target_size, target_size)
-
+    elif isinstance(target_size, (list, tuple)) and len(target_size) not in (2, 3):
+        raise ValueError("target_size는 int, (H, W), 또는 (H, W, D) 형식이어야 합니다.")
+    
     # Determine if the input is 2D or 3D based on the number of dimensions
     if len(tensorA.shape) == 3:
         # 2D case
@@ -110,9 +136,16 @@ def random_crop_height_width(tensorA, tensorB, tensorC=None, tensorD=None, tenso
         if w > target_size[1]
         else 0
     )
+    if len(target_size) == 3:
+        depth = (
+            torch.randint(0, d - target_size[2] + 1, size=(1,)).item()
+            if d > target_size[2]
+            else 0
+        )
+        
+    
 
-    if len(tensorA.shape) == 3:
-        # Perform the crop for 2D tensors
+    if len(tensorA.shape) == 3: # Perform the crop for 2D tensors
         tensorA = F.crop(tensorA, top, left, target_size[0], target_size[1])
         tensorB = F.crop(tensorB, top, left, target_size[0], target_size[1])
         if tensorC is not None:
@@ -121,16 +154,25 @@ def random_crop_height_width(tensorA, tensorB, tensorC=None, tensorD=None, tenso
             tensorD = F.crop(tensorD, top, left, target_size[0], target_size[1])
         if tensorE is not None:
             tensorE = F.crop(tensorE, top, left, target_size[0], target_size[1])
-    elif len(tensorA.shape) == 4:
-        # Perform the crop for 3D tensors
-        tensorA = tensorA[:, top:top + target_size[0], left:left + target_size[1], :]
-        tensorB = tensorB[:, top:top + target_size[0], left:left + target_size[1], :]
-        if tensorC is not None:
-            tensorC = tensorC[:, top:top + target_size[0], left:left + target_size[1], :]
-        if tensorD is not None:
-            tensorD = tensorD[:, top:top + target_size[0], left:left + target_size[1], :]
-        if tensorE is not None:
-            tensorE = tensorE[:, top:top + target_size[0], left:left + target_size[1], :]
+    elif len(tensorA.shape) == 4: # Perform the crop for 3D tensors
+        if len(target_size) == 2:
+            tensorA = tensorA[:, top:top + target_size[0], left:left + target_size[1], :]
+            tensorB = tensorB[:, top:top + target_size[0], left:left + target_size[1], :]
+            if tensorC is not None:
+                tensorC = tensorC[:, top:top + target_size[0], left:left + target_size[1], :]
+            if tensorD is not None:
+                tensorD = tensorD[:, top:top + target_size[0], left:left + target_size[1], :]
+            if tensorE is not None:
+                tensorE = tensorE[:, top:top + target_size[0], left:left + target_size[1], :]
+        elif len(target_size) == 3:
+            tensorA = tensorA[:, top:top + target_size[0], left:left + target_size[1], depth:depth + target_size[2]]
+            tensorB = tensorB[:, top:top + target_size[0], left:left + target_size[1], depth:depth + target_size[2]]
+            if tensorC is not None:
+                tensorC = tensorC[:, top:top + target_size[0], left:left + target_size[1], depth:depth + target_size[2]]
+            if tensorD is not None:
+                tensorD = tensorD[:, top:top + target_size[0], left:left + target_size[1], depth:depth + target_size[2]]
+            if tensorE is not None:
+                tensorE = tensorE[:, top:top + target_size[0], left:left + target_size[1], depth:depth + target_size[2]]
 
     if tensorE is not None:
         return tensorA, tensorB, tensorC, tensorD, tensorE
@@ -321,25 +363,25 @@ class dataset_SynthRAD(Dataset):
             
         if self.padding_size:
             if self.data_group_5:
-                A, B, C, D, E = padding_height_width(A, B, C, D, E, target_size=self.padding_size) 
+                A, B, C, D, E = padding_height_width_depth(A, B, C, D, E, target_size=self.padding_size) 
             elif self.data_group_4:
-                A, B, C, D = padding_height_width(A, B, C, D, E, target_size=self.padding_size)
+                A, B, C, D = padding_height_width_depth(A, B, C, D, target_size=self.padding_size)
             elif self.data_group_3:
-                A, B, C = padding_height_width(A, B, C, E, target_size=self.padding_size)
+                A, B, C = padding_height_width_depth(A, B, C, target_size=self.padding_size)
             else:
-                A, B = padding_height_width(A, B, E, target_size=self.padding_size)
+                A, B = padding_height_width_depth(A, B, target_size=self.padding_size)
 
         data_dict = self.aug_func(data_dict)
 
         if self.crop_size:
             if self.data_group_5:
-                A, B, C, D, E = random_crop_height_width(A, B, C, D, E, target_size=self.crop_size)
+                A, B, C, D, E = random_crop(A, B, C, D, E, target_size=self.crop_size)
             elif self.data_group_4:
-                A, B, C, D = random_crop_height_width(A, B, C, D, target_size=self.crop_size) 
+                A, B, C, D = random_crop(A, B, C, D, target_size=self.crop_size) 
             elif self.data_group_3:
-                A, B, C = random_crop_height_width(A, B, C, target_size=self.crop_size) 
+                A, B, C = random_crop(A, B, C, target_size=self.crop_size) 
             else:
-                A, B = random_crop_height_width(A, B, target_size=self.crop_size) 
+                A, B = random_crop(A, B, target_size=self.crop_size) 
         else:
             if self.data_group_4:
                 A, B, C, D = even_crop_height_width(A, B, C, D, multiple=(16, 16))
@@ -446,7 +488,7 @@ class dataset_Histological(Dataset):
         data_dict = {"A": A, "B": B, "C": C, "D": D}
 
         if self.padding_size:
-            A, B, C, D = padding_height_width(A, B, C, D, target_size=self.padding_size)
+            A, B, C, D = padding_height_width_depth(A, B, C, D, target_size=self.padding_size)
 
         data_dict = self.aug_func(data_dict)
 
@@ -456,7 +498,7 @@ class dataset_Histological(Dataset):
         D = data_dict["D"]
 
         if self.crop_size:
-            A, B, C, D = random_crop_height_width(A, B, C, D, target_size=self.crop_size) 
+            A, B, C, D = random_crop(A, B, C, D, target_size=self.crop_size) 
         else:
             A, B, C, D = even_crop_height_width(A, B, C, D) 
 

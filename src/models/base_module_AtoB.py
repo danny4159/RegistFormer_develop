@@ -90,13 +90,13 @@ class BaseModule_AtoB(LightningModule):  # single direction
             
             # Sliding window on inference
             if self.params.use_sliding_inference and not self.training:
-                inferer = SlidingWindowInferer(roi_size=(64,64,64), mode='gaussian') # 128,128
+                inferer = SlidingWindowInferer(roi_size=(128,128), mode='gaussian') # 128,128
                 pred = inferer(inputs=merged_input, network=self.netG_A) #inputs 손봐야해
                 return pred
         
             return self.netG_A(merged_input)
         
-        if type(self.netG_A).__name__ in ["AutoencoderKL"]:
+        if type(self.netG_A).__name__ in ["AutoencoderKL", "AutoencoderKlMaisi"]:
             torch.cuda.empty_cache()
             if self.params.use_sliding_inference and not self.training:
                 inferer = SlidingWindowInferer(roi_size=(128,128,128), mode='gaussian') # 128,128
@@ -110,7 +110,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
         return self.netG_A(a)
 
     def model_step(self, batch: Any, is_3d=False):
-        if type(self.netG_A).__name__ in ["AutoencoderKL"]:
+        if type(self.netG_A).__name__ in ["AutoencoderKL", "AutoencoderKlMaisi"]:
             real_a, real_b = batch
             original_slices = real_a.shape[-1]
             real_a = self.pad_slice_to_128(real_a, padding_value=0)
@@ -182,8 +182,11 @@ class BaseModule_AtoB(LightningModule):  # single direction
         else: 
             if self.params.use_misalign_simul == False:
                 real_a, real_b = batch
+                real_a = self.pad_slice_to_128(real_a, padding_value=-1)
+                real_b = self.pad_slice_to_128(real_b, padding_value=-1)
                 fake_b = self.forward(real_a, real_b)
                 real_b_ref = None
+                return real_a, real_b, fake_b
             else: # use_misalign_simul == True:
                 real_a, real_b, real_b_ref = batch
                 fake_b = self.forward(real_a, real_b_ref)
@@ -216,6 +219,30 @@ class BaseModule_AtoB(LightningModule):  # single direction
         loss_D_fake = self.criterionGAN(pred_fake, False)
         loss_D = (loss_D_real + loss_D_fake) * 0.5
         return loss_D
+    
+    def backward_D_A_3D(self, real_b, fake_b):
+        """
+        3D volume을 slice 단위로 잘라서 2D Discriminator로 loss 계산
+        """
+        b, c, h, w, d = real_b.shape
+        loss_D_total = 0.0
+
+        for i in range(d):  # D-axis 기준 슬라이스
+            real_slice = real_b[..., i]     # [B, C, H, W]
+            fake_slice = fake_b[..., i]     # [B, C, H, W]
+
+            pred_real = self.netD_A(real_slice)
+            loss_real = self.criterionGAN(pred_real, True)
+
+            pred_fake = self.netD_A(fake_slice.detach())
+            loss_fake = self.criterionGAN(pred_fake, False)
+
+            loss_D = (loss_real + loss_fake) * 0.5
+            loss_D_total += loss_D
+
+        # 슬라이스 수만큼 평균
+        loss_D_total = loss_D_total / d
+        return loss_D_total
 
     def training_step(self, batch: Any, batch_idx: int):
         return super().training_step(batch, batch_idx)
@@ -238,7 +265,6 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
         if len(real_A.size()) == 5:
             for i in range(real_A.size(4)):
-                print(real_A.shape, fake_B.shape)
                 self.val_gc_B.update(norm_to_uint8(real_A[:, :, :, :, i]), norm_to_uint8(fake_B[:, :, :, :, i]))
                 nmi_score = self.val_nmi_B(flatten_to_1d(norm_to_uint8(real_A[:, :, :, :, i])), flatten_to_1d(norm_to_uint8(fake_B[:, :, :, :, i])))
                 self.nmi_scores_B.append(nmi_score)
@@ -247,7 +273,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 self.val_kid_B.update(gray2rgb(norm_to_uint8(real_B[:, :, :, :, i])), real=True)
                 self.val_kid_B.update(gray2rgb(norm_to_uint8(fake_B[:, :, :, :, i])), real=False)
                 self.val_sharpness_B.update(norm_to_uint8(fake_B[:, :, :, :, i]))
-                return
+            return
 
         if self.params.eval_on_align:
             self.val_ssim_B.update(real_B, fake_B)
@@ -405,18 +431,18 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
         else:
             real_A, real_B, fake_B, *_ = self.model_step(batch)
-
+        
         if len(real_A.size()) == 5:
             for i in range(real_A.size(4)):
-                self.val_gc_B.update(norm_to_uint8(real_A[:, :, :, :, i]), norm_to_uint8(fake_B[:, :, :, :, i]))
-                nmi_score = self.val_nmi_B(flatten_to_1d(norm_to_uint8(real_A[:, :, :, :, i])), flatten_to_1d(norm_to_uint8(fake_B[:, :, :, :, i])))
+                self.test_gc_B.update(norm_to_uint8(real_A[:, :, :, :, i]), norm_to_uint8(fake_B[:, :, :, :, i]))
+                nmi_score = self.test_nmi_B(flatten_to_1d(norm_to_uint8(real_A[:, :, :, :, i])), flatten_to_1d(norm_to_uint8(fake_B[:, :, :, :, i])))
                 self.nmi_scores_B.append(nmi_score)
-                self.val_fid_B.update(gray2rgb(norm_to_uint8(real_B[:, :, :, :, i])), real=True)
-                self.val_fid_B.update(gray2rgb(norm_to_uint8(fake_B[:, :, :, :, i])), real=False)
-                self.val_kid_B.update(gray2rgb(norm_to_uint8(real_B[:, :, :, :, i])), real=True)
-                self.val_kid_B.update(gray2rgb(norm_to_uint8(fake_B[:, :, :, :, i])), real=False)
-                self.val_sharpness_B.update(norm_to_uint8(fake_B[:, :, :, :, i]))
-                return
+                self.test_fid_B.update(gray2rgb(norm_to_uint8(real_B[:, :, :, :, i])), real=True)
+                self.test_fid_B.update(gray2rgb(norm_to_uint8(fake_B[:, :, :, :, i])), real=False)
+                self.test_kid_B.update(gray2rgb(norm_to_uint8(real_B[:, :, :, :, i])), real=True)
+                self.test_kid_B.update(gray2rgb(norm_to_uint8(fake_B[:, :, :, :, i])), real=False)
+                self.test_sharpness_B.update(norm_to_uint8(fake_B[:, :, :, :, i]))
+            return
 
         if self.params.eval_on_align:
             self.test_ssim_B.update(real_B, fake_B)

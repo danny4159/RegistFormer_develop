@@ -2,6 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+def get_layer_by_dim(is_3d):
+    dim = 3 if is_3d else 2
+    Conv = getattr(nn, f'Conv{dim}d')
+    Norm = getattr(nn, f'InstanceNorm{dim}d')
+    return Conv, Norm, dim
+
 class ProposedSynthesisModule(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
@@ -11,40 +17,40 @@ class ProposedSynthesisModule(nn.Module):
             self.output_nc = kwargs['output_nc']
             self.demodulate = kwargs['demodulate']
             self.use_multiple_outputs = kwargs.get('use_multiple_outputs', None)
+            self.is_3d = kwargs.get('is_3d', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
         
-        if self.use_multiple_outputs: # For channel multiply
-            ch = 2
-        else:
-            ch = 1
-        
+        Conv, _, _ = get_layer_by_dim(self.is_3d)
+
+        ch = 2 if self.use_multiple_outputs else 1
+
         # 일부분에만 style_denorm -> 21, 22, 31, 32에만 적용 #TODO: feat_ch에 ref ch만큼 배수로
         self.conv0 = StyleConv(self.input_nc, self.feat_ch * ch, kernel_size=3,
-                                                 activate=True, demodulate=self.demodulate, ch=ch)
+                                                 activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
         self.conv11 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch)
+                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
         self.conv12 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch)
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
         self.conv21 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch)
+                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
         self.conv22 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch)
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
         self.conv31 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch)
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
         self.conv32 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch)
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
         self.conv41 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, #feat_ch *4는 변치않게
-                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch)
+                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
         self.conv42 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch)
+                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
         self.conv51 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch)
+                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
         self.conv52 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch)
+                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
         self.conv6 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                activate=True, demodulate=self.demodulate, ch=ch) # 이걸 빠트렸었어.
+                                activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d) # 이걸 빠트렸었어.
                                 # activate=False, demodulate=self.demodulate)
         
         ## Added for checkerboard artifact
@@ -65,16 +71,18 @@ class ProposedSynthesisModule(nn.Module):
         #     self.conv_final_2 = nn.Conv2d(self.feat_ch * ch // 8, self.output_nc // 2, kernel_size=3, padding=1)
         # else:
         #     self.conv_final = nn.Conv2d(self.feat_ch * ch // 4, self.output_nc, kernel_size=3, padding=1)
-        self.conv_final = nn.Conv2d(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
+        self.conv_final = Conv(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
 
     def forward(self, merged_input, layers=[], encode_only=False):
 
-        x = merged_input[:, :1, :, :]
-        ref = merged_input[:, 1:, :, :]
+        x = merged_input[:, :1, ...]
+        ref = merged_input[:, 1:, ...]
         
-        if self.training: # H,W = 128,128
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest')
-        else: # H,W = 256,256
+        if self.is_3d:
+            ref = ref.permute(0, 1, 4, 2, 3)
+            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
+            style_guidance_1 = style_guidance_1.permute(0, 1, 3, 4, 2)
+        else:
             style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯 
         
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
@@ -98,19 +106,8 @@ class ProposedSynthesisModule(nn.Module):
         out = torch.tanh(out)
 
         if encode_only:
-            # Collect intermediate features based on specified layers
-            layers_dict = {
-                0: feat0,
-                1: feat1,
-                2: feat2,
-                3: feat3,
-                4: feat4,
-                5: feat5,
-                6: feat6,
-            }
-            for i in layers:
-                feats.append(layers_dict[i])
-            return feats
+            layers_dict = {0: feat0, 1: feat1, 2: feat2, 3: feat3, 4: feat4, 5: feat5, 6: feat6}
+            return [layers_dict[i] for i in layers]
         
         return out
 
@@ -127,7 +124,9 @@ class StyleConv(nn.Module):
                  demodulate=True,
                  style_denorm=True,
                  eps=1e-8,
-                 ch=1):
+                 ch=1,
+                 is_3d=False):
+        
         super(StyleConv, self).__init__()
         self.eps = eps
         self.input_nc = input_nc
@@ -139,53 +138,47 @@ class StyleConv(nn.Module):
         self.kernel_size = kernel_size
         self.padding = kernel_size // 2
         self.style_denorm = style_denorm
+        self.is_3d = is_3d
+
+        Conv, Norm, dim = get_layer_by_dim(is_3d)
+
+        mode = 'trilinear' if is_3d else 'nearest'
 
         if self.upsample:
-            # factor = 2
-            # p = (len(blur_kernel) - factor) - (kernel_size - 1)
-            # pad0 = (p + 1) // 2 + factor - 1
-            # pad1 = p // 2 + 1
-            # self.blur = Blur(blur_kernel, (pad0, pad1), upsample_factor=factor)
             self.up = nn.Sequential(
-                nn.Upsample(scale_factor=2),
-                nn.Conv2d(input_nc, feat_ch, kernel_size=3, padding=1)
+                nn.Upsample(scale_factor=2, mode=mode),
+                Conv(input_nc, feat_ch, kernel_size=3, padding=1)
             )
         
         elif self.downsample:
-            # factor = 2
-            # p = (len(blur_kernel) - factor) + (kernel_size - 1)
-            # pad0 = (p + 1) // 2
-            # pad1 = p // 2
-            # self.blur = Blur(blur_kernel, (pad0, pad1))
-            self.down = nn.Sequential(
-                nn.Conv2d(input_nc, feat_ch, stride=2, kernel_size=1, padding=0)
-            )
+            self.down = Conv(input_nc, feat_ch, stride=2, kernel_size=1, padding=0)
         else:
-            self.conv = nn.Conv2d(input_nc, feat_ch, kernel_size=3, padding=1)
+            self.conv = Conv(input_nc, feat_ch, kernel_size=3, padding=1)
             
         # self.batch_norm = nn.BatchNorm2d(feat_ch, affine=False)
-        self.normalize = nn.InstanceNorm2d(feat_ch, affine=False)
+        self.normalize = Norm(feat_ch, affine=False)
         # self.batch_norm = nn.SyncBatchNorm(feat_ch, affine=False)
 
         nhidden = 512
+
         if ch == 1:
             self.mlp_shared = nn.Sequential( 
-                nn.Conv2d(1, nhidden, kernel_size=3, padding=1),
+                Conv(1, nhidden, kernel_size=3, padding=1),
                 nn.ReLU())
-            self.mlp_gamma = nn.Conv2d(nhidden, feat_ch, kernel_size=3, padding=1)
-            self.mlp_beta = nn.Conv2d(nhidden, feat_ch, kernel_size=3, padding=1)
+            self.mlp_gamma = Conv(nhidden, feat_ch, kernel_size=3, padding=1)
+            self.mlp_beta = Conv(nhidden, feat_ch, kernel_size=3, padding=1)
         elif ch == 2:
             self.mlp_shared = nn.Sequential( 
-                nn.Conv2d(1, nhidden, kernel_size=3, padding=1),
+                Conv(1, nhidden, kernel_size=3, padding=1),
                 nn.ReLU())
-            self.mlp_gamma = nn.Conv2d(nhidden, feat_ch//2, kernel_size=3, padding=1)
-            self.mlp_beta = nn.Conv2d(nhidden, feat_ch//2, kernel_size=3, padding=1)
+            self.mlp_gamma = Conv(nhidden, feat_ch//2, kernel_size=3, padding=1)
+            self.mlp_beta = Conv(nhidden, feat_ch//2, kernel_size=3, padding=1)
 
             self.mlp_shared_2 = nn.Sequential(
-                nn.Conv2d(1, nhidden, kernel_size=3, padding=1),
+                Conv(1, nhidden, kernel_size=3, padding=1),
                 nn.ReLU())
-            self.mlp_gamma_2 = nn.Conv2d(nhidden, feat_ch//2, kernel_size=3, padding=1)
-            self.mlp_beta_2 = nn.Conv2d(nhidden, feat_ch//2, kernel_size=3, padding=1)
+            self.mlp_gamma_2 = Conv(nhidden, feat_ch//2, kernel_size=3, padding=1)
+            self.mlp_beta_2 = Conv(nhidden, feat_ch//2, kernel_size=3, padding=1)
 
         self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
@@ -224,7 +217,8 @@ class StyleConv(nn.Module):
         x = x + noise
         if self.style_denorm:
             # 1. style을 x의 크기와 맞게 interpolation 
-            style = F.interpolate(style, size=x.size()[2:], mode='nearest') # TODO: bilinear 도 시도
+            mode = 'trilinear' if self.is_3d else 'nearest'
+            style = F.interpolate(style, size=x.size()[2:], mode=mode) # TODO: bilinear 도 시도
             # 2. style을 x의 C과 맞게 mlp
             if style.shape[1] == 1:
                 actv = self.mlp_shared(style)
@@ -250,27 +244,27 @@ class StyleConv(nn.Module):
     
 
     
-class Blur(nn.Module):
-    def __init__(self, kernel, pad, upsample_factor=1):
-        super(Blur, self).__init__()
-        kernel = _make_kernel(kernel)
-        if upsample_factor > 1:
-            kernel = kernel * (upsample_factor**2)
+# class Blur(nn.Module):
+#     def __init__(self, kernel, pad, upsample_factor=1):
+#         super(Blur, self).__init__()
+#         kernel = _make_kernel(kernel)
+#         if upsample_factor > 1:
+#             kernel = kernel * (upsample_factor**2)
 
-        self.register_buffer('kernel', kernel)
-        self.pad = pad
+#         self.register_buffer('kernel', kernel)
+#         self.pad = pad
 
-    def forward(self, x):
-        orig_dtype = x.dtype
-        x = x.float()
-        out = upfirdn2d(x, self.kernel, padding=self.pad)
-        return out.to(orig_dtype)
+#     def forward(self, x):
+#         orig_dtype = x.dtype
+#         x = x.float()
+#         out = upfirdn2d(x, self.kernel, padding=self.pad)
+#         return out.to(orig_dtype)
 
-def _make_kernel(k):
-    k = torch.tensor(k, dtype=torch.float32)
-    if k.ndim == 1:
-        k = k[None, :] * k[:, None]
+# def _make_kernel(k):
+#     k = torch.tensor(k, dtype=torch.float32)
+#     if k.ndim == 1:
+#         k = k[None, :] * k[:, None]
 
-    k /= k.sum()
+#     k /= k.sum()
 
-    return k
+#     return k

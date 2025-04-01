@@ -931,7 +931,7 @@ class MultiheadAttention(nn.Module):
         k = self.w_ks(k)
         v = self.w_vs(v)  # [2, 14, 24, 24]
         if k_2 is not None:
-            k_2 = self.w_ks_2(k_2)
+            k_2 = self.w_ks_2(k_2) #FIXME: 이거 K,V를 하나로 통합해보기
             v_2 = self.w_vs_2(v_2)
 
         n, c, h, w = q.shape
