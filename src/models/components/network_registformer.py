@@ -899,8 +899,8 @@ class MultiheadAttention(nn.Module):
         self.w_qs = nn.Conv2d(feat_dim, n_head * d_k, 1, bias=False)
         self.w_ks = nn.Conv2d(feat_dim, n_head * d_k, 1, bias=False)
         self.w_vs = nn.Conv2d(feat_dim, n_head * d_v, 1, bias=False)
-        self.w_ks_2 = nn.Conv2d(feat_dim, n_head * d_k, 1, bias=False)
-        self.w_vs_2 = nn.Conv2d(feat_dim, n_head * d_v, 1, bias=False)
+        # self.w_ks_2 = nn.Conv2d(feat_dim, n_head * d_k, 1, bias=False)
+        # self.w_vs_2 = nn.Conv2d(feat_dim, n_head * d_v, 1, bias=False)
 
         # after-attention combine heads
         self.fc = nn.Conv2d(n_head * d_v, feat_dim, 1, bias=False)

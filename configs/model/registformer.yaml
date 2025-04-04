@@ -57,13 +57,14 @@ netD_A:
   # n_layers_D: 3
   init_type: 'normal'
 
-netD_B:
-  _target_: src.models.components.networks_define.define_D
-  input_nc: 1
-  ndf: 64
-  # norm: 'instance'
-  # n_layers_D: 3
-  init_type: 'normal'
+  # Multi contrast할때 이거 활성화. RegistFormerModule에서도. w_ks_2 도 활성화 
+# netD_B:
+#   _target_: src.models.components.networks_define.define_D
+#   input_nc: 1
+#   ndf: 64
+#   # norm: 'instance'
+#   # n_layers_D: 3
+#   init_type: 'normal'
 
 netF_A: # For PatchNCELoss
   _target_: src.models.components.networks_define.define_F
@@ -88,7 +89,7 @@ params: # Other params
   eval_on_align: ${data.eval_on_align}
   use_sliding_inference: ${data.use_sliding_inference}
   use_multiple_outputs: ${data.use_multiple_outputs} # Set True if data_group_3 is exist
-
+  use_misalign_simul: ${data.use_misalign_simul}
 
   #Ablation
   ran_shift: 10 #null # "Put null or Interger" / random shift to ground truth when calculating Contextual Loss

@@ -21,7 +21,7 @@ class RegistFormerModule(BaseModule_AtoB):
         self,
         netG_A: torch.nn.Module,
         netD_A: torch.nn.Module,
-        netD_B: torch.nn.Module,
+        # netD_B: torch.nn.Module,
         netF_A: torch.nn.Module,
         optimizer,
         params,
@@ -31,7 +31,7 @@ class RegistFormerModule(BaseModule_AtoB):
         super().__init__(params, *args, **kwargs)
         self.netG_A = netG_A
         self.netD_A = netD_A
-        self.netD_B = netD_B
+        # self.netD_B = netD_B
         self.netF_A = netF_A
         self.save_hyperparameters(logger=False, ignore=["netG_A", "netD_A"])
         self.automatic_optimization = False  # perform manual
@@ -262,3 +262,14 @@ class RegistFormerModule(BaseModule_AtoB):
                 return optimizers, schedulers
         
         return optimizers 
+    
+    # def load_state_dict(self, state_dict, strict: bool = True):
+    #     # 1. DAM 파트는 strict=False로 따로 로딩
+    #     if "DAM" in self.model.__dict__:
+    #         dam_keys = [k for k in state_dict.keys() if "DAM" in k]
+    #         dam_state = {k.replace("model.", ""): state_dict[k] for k in dam_keys}
+    #         _ = self.model.DAM.load_state_dict(dam_state, strict=False)
+
+    #     # 2. 나머지는 원래대로
+    #     new_state = {k: v for k, v in state_dict.items() if "DAM" not in k}
+    #     return super().load_state_dict(new_state, strict)
