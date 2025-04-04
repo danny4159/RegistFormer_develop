@@ -26,6 +26,15 @@ class ProposedSynthesisModule(nn.Module):
 
         ch = 2 if self.use_multiple_outputs else 1
 
+        self.guide_net = nn.Sequential(
+            nn.Conv2d(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(int(self.feat_ch / 8), int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(int(self.feat_ch / 8), int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+        
         # 일부분에만 style_denorm -> 21, 22, 31, 32에만 적용 #TODO: feat_ch에 ref ch만큼 배수로
         self.conv0 = StyleConv(self.input_nc, self.feat_ch * ch, kernel_size=3,
                                                  activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
@@ -120,7 +129,7 @@ class StyleConv(nn.Module):
                  upsample=False,
                  downsample=False,
                  activate=False,
-                #  blur_kernel=[1, 1.5, 1.5, 1],
+                 blur_kernel=[1, 1.5, 1.5, 1],
                  demodulate=True,
                  style_denorm=True,
                  eps=1e-8,
@@ -145,13 +154,25 @@ class StyleConv(nn.Module):
         mode = 'trilinear' if is_3d else 'nearest'
 
         if self.upsample:
+            factor = 2
+            p = (len(blur_kernel) - factor) - (kernel_size - 1)
+            pad0 = (p + 1) // 2 + factor - 1
+            pad1 = p // 2 + 1
+            self.blur = Blur(blur_kernel, (pad0, pad1), upsample_factor=factor)
             self.up = nn.Sequential(
                 nn.Upsample(scale_factor=2, mode=mode),
                 Conv(input_nc, feat_ch, kernel_size=3, padding=1)
             )
         
         elif self.downsample:
-            self.down = Conv(input_nc, feat_ch, stride=2, kernel_size=1, padding=0)
+            factor = 2
+            p = (len(blur_kernel) - factor) - (kernel_size - 1)
+            pad0 = (p + 1) // 2
+            pad1 = p // 2
+            self.blur = Blur(blur_kernel, (pad0, pad1))
+            self.down = nn.Sequential(
+                Conv(input_nc, feat_ch, stride=2, kernel_size=1, padding=0)
+                )
         else:
             self.conv = Conv(input_nc, feat_ch, kernel_size=3, padding=1)
             
@@ -244,27 +265,27 @@ class StyleConv(nn.Module):
     
 
     
-# class Blur(nn.Module):
-#     def __init__(self, kernel, pad, upsample_factor=1):
-#         super(Blur, self).__init__()
-#         kernel = _make_kernel(kernel)
-#         if upsample_factor > 1:
-#             kernel = kernel * (upsample_factor**2)
+class Blur(nn.Module):
+    def __init__(self, kernel, pad, upsample_factor=1):
+        super(Blur, self).__init__()
+        kernel = _make_kernel(kernel)
+        if upsample_factor > 1:
+            kernel = kernel * (upsample_factor**2)
 
-#         self.register_buffer('kernel', kernel)
-#         self.pad = pad
+        self.register_buffer('kernel', kernel)
+        self.pad = pad
 
-#     def forward(self, x):
-#         orig_dtype = x.dtype
-#         x = x.float()
-#         out = upfirdn2d(x, self.kernel, padding=self.pad)
-#         return out.to(orig_dtype)
+    def forward(self, x):
+        orig_dtype = x.dtype
+        x = x.float()
+        out = upfirdn2d(x, self.kernel, padding=self.pad)
+        return out.to(orig_dtype)
 
-# def _make_kernel(k):
-#     k = torch.tensor(k, dtype=torch.float32)
-#     if k.ndim == 1:
-#         k = k[None, :] * k[:, None]
+def _make_kernel(k):
+    k = torch.tensor(k, dtype=torch.float32)
+    if k.ndim == 1:
+        k = k[None, :] * k[:, None]
 
-#     k /= k.sum()
+    k /= k.sum()
 
-#     return k
+    return k
