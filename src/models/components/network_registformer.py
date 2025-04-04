@@ -8,7 +8,7 @@ import os
 from flash_attn import flash_attn_func
 from src.models.components.network_voxelmorph_original import VecInt
 from src.models.components.performer import CrossAttention
-
+import copy
 
 class RegistFormer(nn.Module):
     def __init__(self, **kwargs):
@@ -77,6 +77,9 @@ class RegistFormer(nn.Module):
             self.flow_estimator.load_state_dict(adjusted_state_dict, strict=False)
             self.flow_estimator.eval()
 
+            self._regist_net_backup_weights = copy.deepcopy(self.flow_estimator.state_dict()) 
+
+
             if self.params.use_multiple_outputs: # FIXME: 나중에 수정
                 self.flow_estimator_2 = VxmDense(inshape=self.flow_size,
                                                 nb_unet_features=[[16, 32, 32, 32], [32, 32, 32, 32, 32, 16, 16]],
@@ -95,6 +98,8 @@ class RegistFormer(nn.Module):
                 adjusted_state_dict = {k.replace("netR_A.", ""): v for k, v in model_state_dict.items()}
                 self.flow_estimator_2.load_state_dict(adjusted_state_dict, strict=False)
                 self.flow_estimator_2.eval()
+
+                self._flow_net_backup_weights = copy.deepcopy(self.flow_estimator_2.state_dict()) 
 
 
         elif self.flow_type == "grad_icon":
@@ -139,6 +144,8 @@ class RegistFormer(nn.Module):
             self.DAM.eval()
             for param in self.DAM.parameters():
                 param.requires_grad = self.dam_ft
+
+            self._DAM_net_backup_weights = copy.deepcopy(self.DAM.state_dict()) 
 
             if self.params.use_multiple_outputs: # FIXME: 나중에 수정
                 self.DAM_2 = ProposedSynthesisModule(input_nc=1, feat_ch=256, output_nc=1, demodulate=True)
@@ -258,6 +265,7 @@ class RegistFormer(nn.Module):
         moved = None
 
         if self.dam_type == "dam" or self.dam_type == "proposed_synthesis":
+            self.DAM.load_state_dict(self._DAM_net_backup_weights)
             src_origin = src
             merged_input = torch.cat((src, ref), dim=1)
             src = self.DAM(merged_input)  # [4, 3, 256, 256] #FIXME: 나중에 수정
@@ -297,6 +305,7 @@ class RegistFormer(nn.Module):
         width_multiple = self.flow_size[1] if self.flow_size else 576
 
         if self.flow_type in ["voxelmorph", "zero","voxelmorph_lightning"]:
+            self.flow_estimator.load_state_dict(self._regist_net_backup_weights)
             if self.dam_type == "synthesis_meta" or self.dam_type == "dam" or self.dam_type == "proposed_synthesis" or self.dam_type == "munit":
                 src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=height_multiple, width_multiple=width_multiple)
                 ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=height_multiple, width_multiple=width_multiple)
