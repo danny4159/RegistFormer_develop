@@ -90,6 +90,7 @@ params: # Other params
   use_sliding_inference: ${data.use_sliding_inference}
   use_multiple_outputs: ${data.use_multiple_outputs} # Set True if data_group_3 is exist
   use_misalign_simul: ${data.use_misalign_simul}
+  is_3d: ${data.is_3d}
 
   #Ablation
   ran_shift: 10 #null # "Put null or Interger" / random shift to ground truth when calculating Contextual Loss

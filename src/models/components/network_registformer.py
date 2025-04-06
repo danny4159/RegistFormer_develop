@@ -180,13 +180,13 @@ class RegistFormer(nn.Module):
         # Define feature extractor.
         # self.unet_q = Unet(src_ch, feat_dim, feat_dim)
         if self.params.use_multiple_outputs:
-            self.unet_q = Unet(self.src_ch * 3, self.feat_dim, self.feat_dim)
+            self.unet_q = Unet(self.src_ch * 3, self.feat_dim, self.feat_dim, self.params.is_3d)
         else:
-            self.unet_q = Unet(self.src_ch * 2, self.feat_dim, self.feat_dim)
+            self.unet_q = Unet(self.src_ch * 2, self.feat_dim, self.feat_dim, self.params.is_3d)
 
-        self.unet_k = Unet(self.ref_ch, self.feat_dim, self.feat_dim)
+        self.unet_k = Unet(self.ref_ch, self.feat_dim, self.feat_dim, self.params.is_3d)
         if self.params.use_multiple_outputs:
-            self.unet_k_2 = Unet(self.ref_ch, self.feat_dim, self.feat_dim)
+            self.unet_k_2 = Unet(self.ref_ch, self.feat_dim, self.feat_dim, self.params.is_3d)
 
         # Define GAM.
         self.trans_unit = nn.ModuleList(
@@ -199,6 +199,7 @@ class RegistFormer(nn.Module):
                     self.k_size,
                     self.attn_type,
                     self.fuse_type,
+                    self.params.is_3d,
                 ),
                 TransformerUnit(
                     self.feat_dim,
@@ -208,6 +209,7 @@ class RegistFormer(nn.Module):
                     self.k_size,
                     self.attn_type,
                     self.fuse_type,
+                    self.params.is_3d,
                 ),
                 TransformerUnit(
                     self.feat_dim,
@@ -217,19 +219,25 @@ class RegistFormer(nn.Module):
                     self.k_size,
                     self.attn_type,
                     self.fuse_type,
+                    self.params.is_3d,
                 ),
             ]
         )
 
-        self.conv0 = double_conv(self.feat_dim, self.feat_dim)
-        self.conv1 = double_conv_down(self.feat_dim, self.feat_dim)
-        self.conv2 = double_conv_down(self.feat_dim, self.feat_dim)
-        self.conv3 = double_conv(self.feat_dim, self.feat_dim)
-        self.conv4 = double_conv_up(self.feat_dim, self.feat_dim)
-        self.conv5 = double_conv_up(self.feat_dim, self.feat_dim)
-        self.conv6 = nn.Sequential(
-            single_conv(self.feat_dim, self.feat_dim), nn.Conv2d(self.feat_dim, self.out_ch, 3, 1, 1)
-        )
+        self.conv0 = double_conv(self.feat_dim, self.feat_dim, self.params.is_3d)
+        self.conv1 = double_conv_down(self.feat_dim, self.feat_dim, self.params.is_3d)
+        self.conv2 = double_conv_down(self.feat_dim, self.feat_dim, self.params.is_3d)
+        self.conv3 = double_conv(self.feat_dim, self.feat_dim, self.params.is_3d)
+        self.conv4 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
+        self.conv5 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
+        if self.params.is_3d:
+            self.conv6 = nn.Sequential(
+                single_conv(self.feat_dim, self.feat_dim, self.params.is_3d), nn.Conv3d(self.feat_dim, self.out_ch, 3, 1, 1)
+            )
+        else:
+            self.conv6 = nn.Sequential(
+                single_conv(self.feat_dim, self.feat_dim, self.params.is_3d), nn.Conv2d(self.feat_dim, self.out_ch, 3, 1, 1)
+            )
 
         if not self.main_ft:
             self.eval()
@@ -250,202 +258,269 @@ class RegistFormer(nn.Module):
     # def forward(self, src, ref, mask=None, for_nce=False, for_src=False):
     def forward(self, merged_input, mask=None, for_nce=False, for_src=False):
 
-        src = merged_input[:, :1, :, :]
-        if self.params.use_multiple_outputs:
-            ref = merged_input[:, 1:2, :, :]
-            ref_2 = merged_input[:, 2:3, :, :]
-        else:
-            ref = merged_input[:, 1:, :, :]
+        if self.params.is_3d:
+            src = merged_input[:, :1, :, :, :]
+            ref = merged_input[:, 1:, :, :, :]
+            assert src.shape == ref.shape, "Shapes of source and reference images mismatch."
+            device = src.device
+            self.flow_estimator.to(device)
+            moved = None
 
-        assert (
-            src.shape == ref.shape
-        ), "Shapes of source and reference images mismatch. Source shape: {src.shape}, Reference shape: {ref.shape}"
-        device = src.device
-        self.flow_estimator.to(device)
-        moved = None
+            if self.dam_type == "proposed_synthesis":
+                self.DAM.load_state_dict(self._DAM_net_backup_weights)
+                src_origin = src
+                src_slices = []
+                for d in range(src.shape[-1]):
+                    src_slice = src[:, :, :, :, d]
+                    ref_slice = ref[:, :, :, :, d]
+                    merged_input_slice = torch.cat((src_slice, ref_slice), dim=1)
+                    src_slices.append(self.DAM(merged_input_slice))
+                src = torch.stack(src_slices, dim=-1)
 
-        if self.dam_type == "dam" or self.dam_type == "proposed_synthesis":
-            self.DAM.load_state_dict(self._DAM_net_backup_weights)
-            src_origin = src
-            merged_input = torch.cat((src, ref), dim=1)
-            src = self.DAM(merged_input)  # [4, 3, 256, 256] #FIXME: 나중에 수정
-            if self.params.use_multiple_outputs:
-                merged_input_2 = torch.cat((src, ref_2), dim=1)
-                src_2 = self.DAM_2(merged_input_2)
-        elif self.dam_type == "synthesis_meta":
-            src_origin = src
-            src = self.DAM(src)
-        elif self.dam_type == "dam_misalign":
-            src_origin = src
-            ref_to_src = self.DAM_MR_CT(ref, src)
-            src = self.DAM(src, ref)
-        # elif self.dam_type == 'dam_misalign':
-        #     src = self.DAM.netG_B(src, ref)
-        elif self.dam_type == "munit":
-            src_origin = src
-            c_a, s_a = self.DAM_A.encode(src)
-            c_b, s_b = self.DAM_B.encode(ref)
-            src = self.DAM_B.decode(c_a, s_b)
-        else:
-            raise ValueError(
-                "Invalid dam_type provided. Expected 'dam' or 'synthesis_meta'."
-            )
+            height_multiple = self.flow_size[0] if self.flow_size else 384 # FIXME: 나중에 수정
+            width_multiple = self.flow_size[1] if self.flow_size else 320
+            depth_multiple = self.flow_size[2] if self.flow_size else 128
 
-        if for_nce: # NetG를 NCE에 사용할 때 쓰이는 부분
-            if for_src:
-                src_lq_concat = torch.cat((src_origin, src), dim=1)
-                q_feat = self.unet_q(src_lq_concat, for_nce=True)
-                return q_feat
+            if self.flow_type == "voxelmorph_lightning":
+                src, moving_padding = self.pad_tensor_to_multiple_3d(src, height_multiple=height_multiple, width_multiple=width_multiple, depth_multiple=depth_multiple)
+                ref, fixed_padding = self.pad_tensor_to_multiple_3d(ref, height_multiple=height_multiple, width_multiple=width_multiple, depth_multiple=depth_multiple)
+                _, flow = self.flow_estimator(src, ref, registration=True)
+                src = self.crop_tensor_to_original_3d(src, fixed_padding)
+                ref = self.crop_tensor_to_original_3d(ref, fixed_padding)
+                flow = self.crop_tensor_to_original_3d(flow, fixed_padding)
+
+            src_lq_concat = torch.cat((src_origin, src), dim=1)
+            q_feat = self.unet_q(src_lq_concat)
+            k_feat = self.unet_k(ref)
+
+            outputs = []
+            for i in range(3):
+                outputs.append(self.trans_unit[i](q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow))
+
+            if self.daca_loc == "end":
+                f0 = self.conv0(outputs[0])
+                f1 = self.conv1(f0)
+                f2 = self.conv2(f1)
+                f3 = self.conv3(f2)
+                f3 = f3 + f2
+                f4 = self.conv4(f3)
+                f4 = f4 + f1
+                f5 = self.conv5(f4)
+                f5 = f5 + outputs[0] + f0
             else:
-                q_feat = self.unet_k(ref, for_nce=True)
-                return q_feat
+                f0 = self.conv0(outputs[2])
+                f1 = self.conv1(f0)
+                f1 = f1 + outputs[1]
+                f2 = self.conv2(f1)
+                f2 = f2 + outputs[0]
+                f3 = self.conv3(f2)
+                f3 = f3 + outputs[0] + f2
+                f4 = self.conv4(f3)
+                f4 = f4 + outputs[1] + f1
+                f5 = self.conv5(f4)
+                f5 = f5 + outputs[2] + f0
 
+            out = self.conv6(f5)
+            out = torch.tanh(out)
+            return out
+        
+        else:
+            src = merged_input[:, :1, :, :]
+            if self.params.use_multiple_outputs:
+                ref = merged_input[:, 1:2, :, :]
+                ref_2 = merged_input[:, 2:3, :, :]
+            else:
+                ref = merged_input[:, 1:, :, :]
 
-        height_multiple = self.flow_size[0] if self.flow_size else 768 # FIXME: 나중에 수정
-        width_multiple = self.flow_size[1] if self.flow_size else 576
+            assert (
+                src.shape == ref.shape
+            ), "Shapes of source and reference images mismatch. Source shape: {src.shape}, Reference shape: {ref.shape}"
+            device = src.device
+            self.flow_estimator.to(device)
+            moved = None
 
-        if self.flow_type in ["voxelmorph", "zero","voxelmorph_lightning"]:
-            self.flow_estimator.load_state_dict(self._regist_net_backup_weights)
-            if self.dam_type == "synthesis_meta" or self.dam_type == "dam" or self.dam_type == "proposed_synthesis" or self.dam_type == "munit":
-                src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=height_multiple, width_multiple=width_multiple)
-                ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=height_multiple, width_multiple=width_multiple)
+            if self.dam_type == "dam" or self.dam_type == "proposed_synthesis":
+                self.DAM.load_state_dict(self._DAM_net_backup_weights)
+                src_origin = src
+                merged_input = torch.cat((src, ref), dim=1)
+                src = self.DAM(merged_input)  # [4, 3, 256, 256] #FIXME: 나중에 수정
                 if self.params.use_multiple_outputs:
-                    src_2, moving_padding_2 = self.pad_tensor_to_multiple(src_2, height_multiple=height_multiple, width_multiple=width_multiple)
-                    ref_2, fixed_padding_2 = self.pad_tensor_to_multiple(ref_2, height_multiple=height_multiple, width_multiple=width_multiple)
-                if self.flow_type == "zero":
-                    moved, flow = self.flow_estimator(ref, src, registration=True)  # Zeroflow version
-                else:
-                    _, flow = self.flow_estimator(src, ref, registration=True)  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
-                    if self.params.use_multiple_outputs:
-                        _, flow_2 = self.flow_estimator(src_2, ref_2, registration=True)
-                    # flow = self.vecint(flow) #TODO: modified
+                    merged_input_2 = torch.cat((src, ref_2), dim=1)
+                    src_2 = self.DAM_2(merged_input_2)
+            elif self.dam_type == "synthesis_meta":
+                src_origin = src
+                src = self.DAM(src)
+            elif self.dam_type == "dam_misalign":
+                src_origin = src
+                ref_to_src = self.DAM_MR_CT(ref, src)
+                src = self.DAM(src, ref)
+            # elif self.dam_type == 'dam_misalign':
+            #     src = self.DAM.netG_B(src, ref)
+            elif self.dam_type == "munit":
+                src_origin = src
+                c_a, s_a = self.DAM_A.encode(src)
+                c_b, s_b = self.DAM_B.encode(ref)
+                src = self.DAM_B.decode(c_a, s_b)
+            else:
+                raise ValueError(
+                    "Invalid dam_type provided. Expected 'dam' or 'synthesis_meta'."
+                )
 
+            if for_nce: # NetG를 NCE에 사용할 때 쓰이는 부분
+                if for_src:
+                    src_lq_concat = torch.cat((src_origin, src), dim=1)
+                    q_feat = self.unet_q(src_lq_concat, for_nce=True)
+                    return q_feat
+                else:
+                    q_feat = self.unet_k(ref, for_nce=True)
+                    return q_feat
+
+
+            height_multiple = self.flow_size[0] if self.flow_size else 768 # FIXME: 나중에 수정
+            width_multiple = self.flow_size[1] if self.flow_size else 576
+
+            if self.flow_type in ["voxelmorph", "zero","voxelmorph_lightning"]:
+                self.flow_estimator.load_state_dict(self._regist_net_backup_weights)
+                if self.dam_type == "synthesis_meta" or self.dam_type == "dam" or self.dam_type == "proposed_synthesis" or self.dam_type == "munit":
+                    src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=height_multiple, width_multiple=width_multiple)
+                    ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=height_multiple, width_multiple=width_multiple)
+                    if self.params.use_multiple_outputs:
+                        src_2, moving_padding_2 = self.pad_tensor_to_multiple(src_2, height_multiple=height_multiple, width_multiple=width_multiple)
+                        ref_2, fixed_padding_2 = self.pad_tensor_to_multiple(ref_2, height_multiple=height_multiple, width_multiple=width_multiple)
+                    if self.flow_type == "zero":
+                        moved, flow = self.flow_estimator(ref, src, registration=True)  # Zeroflow version
+                    else:
+                        _, flow = self.flow_estimator(src, ref, registration=True)  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
+                        if self.params.use_multiple_outputs:
+                            _, flow_2 = self.flow_estimator(src_2, ref_2, registration=True)
+                        # flow = self.vecint(flow) #TODO: modified
+
+                    src = self.crop_tensor_to_original(src, fixed_padding)
+                    ref = self.crop_tensor_to_original(ref, fixed_padding)
+                    flow = self.crop_tensor_to_original(flow, fixed_padding)
+                    if self.params.use_multiple_outputs:
+                        src_2 = self.crop_tensor_to_original(src_2, fixed_padding)
+                        ref_2 = self.crop_tensor_to_original(ref_2, fixed_padding)
+                        flow_2 = self.crop_tensor_to_original(flow_2, fixed_padding)
+                    if self.flow_type == "zero":
+                        flow = torch.zeros_like(flow)  # Zeroflow version
+                    if self.is_moved_feat: # Comparison
+                        moved = self.crop_tensor_to_original(moved, fixed_padding)
+
+                elif self.dam_type == "dam_misalign":
+                    src_origin, moving_padding = self.pad_tensor_to_multiple(src_origin, height_multiple=height_multiple, width_multiple=width_multiple)
+                    ref_to_src, fixed_padding = self.pad_tensor_to_multiple(ref_to_src, height_multiple=height_multiple, width_multiple=width_multiple)
+                    ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=height_multiple, width_multiple=width_multiple)
+
+                    _, flow = self.flow_estimator(src_origin, ref_to_src, registration=True)
+                    _, flow_mr = self.flow_estimator(ref_to_src, src_origin, registration=True)
+                    ref = self.crop_tensor_to_original(ref, fixed_padding)
+                    flow = self.crop_tensor_to_original(flow, fixed_padding)
+                else:
+                    raise ValueError("Invalid dam_type")
+            elif self.flow_type == 'grad_icon':
+                height = src.shape[2]
+                batch_size = src.shape[0]
+                flows = []
+                src = self.pad_height_to_384(src)
+                ref = self.pad_height_to_384(ref)
+                src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=384, width_multiple=320)
+                ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=384, width_multiple=320)
+                for i in range(batch_size): #Because of flow_estimator is trained on batch 1
+                    src_i = src[i:i+1]
+                    ref_i = ref[i:i+1]
+                    _, flow_i, _ = self.flow_estimator(src_i, ref_i)
+                    flows.append(flow_i)
+                flow = torch.cat(flows, dim=0)
+                src = self.crop_height_to_original(src, height)
+                ref = self.crop_height_to_original(ref, height)
+                flow = self.crop_height_to_original(flow, height)
                 src = self.crop_tensor_to_original(src, fixed_padding)
                 ref = self.crop_tensor_to_original(ref, fixed_padding)
                 flow = self.crop_tensor_to_original(flow, fixed_padding)
-                if self.params.use_multiple_outputs:
-                    src_2 = self.crop_tensor_to_original(src_2, fixed_padding)
-                    ref_2 = self.crop_tensor_to_original(ref_2, fixed_padding)
-                    flow_2 = self.crop_tensor_to_original(flow_2, fixed_padding)
-                if self.flow_type == "zero":
-                    flow = torch.zeros_like(flow)  # Zeroflow version
-                if self.is_moved_feat: # Comparison
-                    moved = self.crop_tensor_to_original(moved, fixed_padding)
-
-            elif self.dam_type == "dam_misalign":
-                src_origin, moving_padding = self.pad_tensor_to_multiple(src_origin, height_multiple=height_multiple, width_multiple=width_multiple)
-                ref_to_src, fixed_padding = self.pad_tensor_to_multiple(ref_to_src, height_multiple=height_multiple, width_multiple=width_multiple)
-                ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=height_multiple, width_multiple=width_multiple)
-
-                _, flow = self.flow_estimator(src_origin, ref_to_src, registration=True)
-                _, flow_mr = self.flow_estimator(ref_to_src, src_origin, registration=True)
-                ref = self.crop_tensor_to_original(ref, fixed_padding)
-                flow = self.crop_tensor_to_original(flow, fixed_padding)
             else:
-                raise ValueError("Invalid dam_type")
-        elif self.flow_type == 'grad_icon':
-            height = src.shape[2]
-            batch_size = src.shape[0]
-            flows = []
-            src = self.pad_height_to_384(src)
-            ref = self.pad_height_to_384(ref)
-            src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=384, width_multiple=320)
-            ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=384, width_multiple=320)
-            for i in range(batch_size): #Because of flow_estimator is trained on batch 1
-                src_i = src[i:i+1]
-                ref_i = ref[i:i+1]
-                _, flow_i, _ = self.flow_estimator(src_i, ref_i)
-                flows.append(flow_i)
-            flow = torch.cat(flows, dim=0)
-            src = self.crop_height_to_original(src, height)
-            ref = self.crop_height_to_original(ref, height)
-            flow = self.crop_height_to_original(flow, height)
-            src = self.crop_tensor_to_original(src, fixed_padding)
-            ref = self.crop_tensor_to_original(ref, fixed_padding)
-            flow = self.crop_tensor_to_original(flow, fixed_padding)
-        else:
-            flow = self.flow_estimator(src, ref)  # src가 이동 ref가 고정
+                flow = self.flow_estimator(src, ref)  # src가 이동 ref가 고정
 
-        if self.params.use_multiple_outputs:
-            src_lq_concat = torch.cat((src_origin, src, src_2), dim=1)
-        else:
-            src_lq_concat = torch.cat((src_origin, src), dim=1)
-        # q_feat = self.unet_q(src)
-        q_feat = self.unet_q(src_lq_concat)  # 발전시킨것
-
-        if self.is_moved_feat:
-            k_feat = self.unet_k(moved) # 이건 zeroflow와 함께. moved를 key,value로 쓰기위해. 결과 꽤 좋더라?
-        else:
             if self.params.use_multiple_outputs:
-                k_feat = self.unet_k(ref)
-                k_feat_2 = self.unet_k_2(ref_2)
+                src_lq_concat = torch.cat((src_origin, src, src_2), dim=1)
             else:
-                k_feat = self.unet_k(ref)
+                src_lq_concat = torch.cat((src_origin, src), dim=1)
+            # q_feat = self.unet_q(src)
+            q_feat = self.unet_q(src_lq_concat)  # 발전시킨것
 
-        outputs = []
-        for i in range(3):
-            # if i == 2:
-            if (
-                self.daca_loc == "end" and i != 2
-            ):  # end일땐 끝에거만 cross-attention하도록
-                continue
-
-            if mask != None:
-                mask = mask[:, 0:1, :, :]
-                outputs.append(
-                    self.trans_unit[i](
-                        q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow, mask
-                    )
-                )
+            if self.is_moved_feat:
+                k_feat = self.unet_k(moved) # 이건 zeroflow와 함께. moved를 key,value로 쓰기위해. 결과 꽤 좋더라?
             else:
                 if self.params.use_multiple_outputs:
+                    k_feat = self.unet_k(ref)
+                    k_feat_2 = self.unet_k_2(ref_2)
+                else:
+                    k_feat = self.unet_k(ref)
+
+            outputs = []
+            for i in range(3):
+                # if i == 2:
+                if (
+                    self.daca_loc == "end" and i != 2
+                ):  # end일땐 끝에거만 cross-attention하도록
+                    continue
+
+                if mask != None:
+                    mask = mask[:, 0:1, :, :]
                     outputs.append(
                         self.trans_unit[i](
-                            q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow, None, k_feat_2[i + 3], k_feat_2[i + 3], flow_2
+                            q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow, mask
                         )
                     )
                 else:
-                    outputs.append(
-                        self.trans_unit[i](
-                            q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow
+                    if self.params.use_multiple_outputs:
+                        outputs.append(
+                            self.trans_unit[i](
+                                q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow, None, k_feat_2[i + 3], k_feat_2[i + 3], flow_2
+                            )
                         )
-                    )
+                    else:
+                        outputs.append(
+                            self.trans_unit[i](
+                                q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow
+                            )
+                        )
 
-        if self.daca_loc == "end":
-            f0 = self.conv0(outputs[0])  # H, W
-            f1 = self.conv1(f0)  # H/2, W/2
-            f2 = self.conv2(f1)  # H/4, W/4
-            f3 = self.conv3(f2)  # H/4, W/4
-            f3 = f3 + f2
-            f4 = self.conv4(f3)  # H/2, W/2
-            f4 = f4 + f1
-            f5 = self.conv5(f4)  # H, W
-            f5 = f5 + outputs[0] + f0
+            if self.daca_loc == "end":
+                f0 = self.conv0(outputs[0])  # H, W
+                f1 = self.conv1(f0)  # H/2, W/2
+                f2 = self.conv2(f1)  # H/4, W/4
+                f3 = self.conv3(f2)  # H/4, W/4
+                f3 = f3 + f2
+                f4 = self.conv4(f3)  # H/2, W/2
+                f4 = f4 + f1
+                f5 = self.conv5(f4)  # H, W
+                f5 = f5 + outputs[0] + f0
 
-        else:
-            f0 = self.conv0(outputs[2])  # H, W
-            f1 = self.conv1(f0)  # H/2, W/2
-            f1 = f1 + outputs[1]
-            f2 = self.conv2(f1)  # H/4, W/4
-            f2 = f2 + outputs[0]
-            f3 = self.conv3(f2)  # H/4, W/4
-            f3 = f3 + outputs[0] + f2
-            f4 = self.conv4(f3)  # H/2, W/2
-            f4 = f4 + outputs[1] + f1
-            f5 = self.conv5(f4)  # H, W
-            f5 = f5 + outputs[2] + f0
+            else:
+                f0 = self.conv0(outputs[2])  # H, W
+                f1 = self.conv1(f0)  # H/2, W/2
+                f1 = f1 + outputs[1]
+                f2 = self.conv2(f1)  # H/4, W/4
+                f2 = f2 + outputs[0]
+                f3 = self.conv3(f2)  # H/4, W/4
+                f3 = f3 + outputs[0] + f2
+                f4 = self.conv4(f3)  # H/2, W/2
+                f4 = f4 + outputs[1] + f1
+                f5 = self.conv5(f4)  # H, W
+                f5 = f5 + outputs[2] + f0
 
-        out = self.conv6(f5)
-        out = torch.tanh(out)  # 내가 추가한 코드
+            out = self.conv6(f5)
+            out = torch.tanh(out)  # 내가 추가한 코드
 
-        # if not self.training:
-        #     out = out[:, :, :H, :W]
+            # if not self.training:
+            #     out = out[:, :, :H, :W]
 
-        # if moved is None:
-        #     return out, src, out
-        # else:
-        #     return out, src, moved #src는 dam 결과
-        return out
+            # if moved is None:
+            #     return out, src, out
+            # else:
+            #     return out, src, moved #src는 dam 결과
+            return out
 
 
     def pad_tensor_to_multiple(self, tensor, height_multiple, width_multiple):
@@ -460,9 +535,26 @@ class RegistFormer(nn.Module):
 
         return padded_tensor, (h_pad, w_pad)
 
+    def pad_tensor_to_multiple_3d(self, tensor, height_multiple, width_multiple, depth_multiple):
+        _, _, h, w, d = tensor.shape
+        h_pad = (height_multiple - h % height_multiple) % height_multiple
+        w_pad = (width_multiple - w % width_multiple) % width_multiple
+        d_pad = (depth_multiple - d % depth_multiple) % depth_multiple  
+
+        padded_tensor = F.pad(
+            tensor, (0, d_pad, 0, w_pad, 0, h_pad), mode="constant", value=-1
+        )
+
+        return padded_tensor, (h_pad, w_pad, d_pad)
+        
+
     def crop_tensor_to_original(self, tensor, padding):
         h_pad, w_pad = padding
         return tensor[:, :, : tensor.shape[2] - h_pad, : tensor.shape[3] - w_pad]
+    
+    def crop_tensor_to_original_3d(self, tensor, padding):
+        h_pad, w_pad, d_pad = padding
+        return tensor[:, :, : tensor.shape[2] - h_pad, : tensor.shape[3] - w_pad, : tensor.shape[4] - d_pad]
         
     def pad_height_to_384(self, tensor, padding_value=-1):
         # tensor shape: [batch, channel, height, width, slice]
@@ -540,6 +632,29 @@ def resize_flow(flow, size_type, sizes, interp_mode="bilinear", align_corners=Fa
     )
     return resized_flow
 
+def resize_flow_3d(flow, size_type, sizes, interp_mode="trilinear", align_corners=False):    
+    _, _, h, w, d = flow.shape
+    if size_type == "ratio":
+        output_h, output_w, output_d = int(h * sizes[0]), int(w * sizes[1]), int(d * sizes[2])
+    elif size_type == "shape":
+        output_h, output_w, output_d = sizes[0], sizes[1], sizes[2]     
+
+    input_flow = flow.clone()
+    ratio_h = output_h / h
+    ratio_w = output_w / w
+    ratio_d = output_d / d
+    input_flow[:, 0, :, :, :] *= ratio_w
+    input_flow[:, 1, :, :, :] *= ratio_h
+    input_flow[:, 2, :, :, :] *= ratio_d
+
+    resized_flow = F.interpolate(
+        input=input_flow,
+        size=(output_h, output_w, output_d),
+        mode=interp_mode,
+        align_corners=align_corners,
+    )
+
+    return resized_flow
 
 def softmax_attention(q, k, v):
     # n x 1(k^2) x nhead x d x h x w
@@ -561,6 +676,26 @@ def softmax_attention(q, k, v):
 
     return output, attn
 
+def softmax_attention_3d(q, k, v):
+    # n x 1(k^3) x nhead x d x h x w
+    h, w, d = q.shape[-3], q.shape[-2], q.shape[-1]
+
+    q = q.permute(0, 2, 4, 5, 6, 1, 3)  # n, nhead, h, w, d, 1, k^3
+
+    k = k.permute(0, 2, 4, 5, 6, 3, 1)  # n, nhead, h, w, d, k^3, d
+    v = v.permute(0, 2, 4, 5, 6, 1, 3)  # n, nhead, h, w, d, k^3, d
+
+    N = q.shape[-1]  # scaled attention
+    attn = torch.matmul(
+        q / N**0.5, k
+    )  # TODO: 이때 validation 튄다 
+
+    output = torch.matmul(attn, v) # n, nhead, h, w, d, 1, d
+
+    output = output.permute(0, 5, 1, 6, 2, 3, 4).squeeze(1) # n, nhead, d, h, w
+    attn = attn.permute(0, 5, 1, 6, 2, 3, 4).squeeze(1) 
+
+    return output, attn
 
 # temporal for global attention.
 def dotproduct_attention(q, k, v):
@@ -653,55 +788,86 @@ def flash_attention(q, k, v):
     return output
 
 class single_conv(nn.Module):
-    def __init__(self, in_ch, out_ch):
+    def __init__(self, in_ch, out_ch, is_3d=False):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, stride=1, padding=1),
-            nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        )
+        if is_3d:
+            self.conv = nn.Sequential(
+                nn.Conv3d(in_ch, out_ch, 3, stride=1, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            )
+        else:
+            self.conv = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 3, stride=1, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            )
 
     def forward(self, x):
         return self.conv(x)
 
 
 class double_conv(nn.Module):
-    def __init__(self, in_ch, out_ch):
+    def __init__(self, in_ch, out_ch, is_3d=False):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, stride=1, padding=1),
-            nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1),
-            nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        )
+        if is_3d:
+            self.conv = nn.Sequential(
+                nn.Conv3d(in_ch, out_ch, 3, stride=1, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                nn.Conv3d(out_ch, out_ch, 3, stride=1, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            )
+        else:
+            self.conv = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 3, stride=1, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            )
 
     def forward(self, x):
         return self.conv(x)
 
 
 class double_conv_down(nn.Module):
-    def __init__(self, in_ch, out_ch):
+    def __init__(self, in_ch, out_ch, is_3d=False):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, stride=2, padding=1),
-            nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1),
-            nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        )
+        if is_3d:
+            self.conv = nn.Sequential(
+                nn.Conv3d(in_ch, out_ch, 3, stride=2, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                nn.Conv3d(out_ch, out_ch, 3, stride=1, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            )
+        else:
+            self.conv = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 3, stride=2, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            )
 
     def forward(self, x):
         return self.conv(x)
 
 
 class double_conv_up(nn.Module):
-    def __init__(self, in_ch, out_ch):
+    def __init__(self, in_ch, out_ch, is_3d=False):
         super(double_conv_up, self).__init__()
-        self.conv = nn.Sequential(
-            nn.UpsamplingNearest2d(scale_factor=2),
-            nn.Conv2d(in_ch, out_ch, 3, stride=1, padding=1),
-            nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1),
-            nn.LeakyReLU(negative_slope=0.2, inplace=True),
-        )
+        if is_3d:
+            self.conv = nn.Sequential(
+                nn.Upsample(scale_factor=2, mode='nearest'),
+                nn.Conv3d(in_ch, out_ch, 3, stride=1, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                nn.Conv3d(out_ch, out_ch, 3, stride=1, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            )
+        else:
+            self.conv = nn.Sequential(
+                nn.UpsamplingNearest2d(scale_factor=2),
+                nn.Conv2d(in_ch, out_ch, 3, stride=1, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            )
 
     def forward(self, x):
         return self.conv(x)
@@ -751,14 +917,19 @@ class MLP(nn.Module):
     conv-based MLP layers.
     """
 
-    def __init__(self, in_features, hidden_features=None, out_features=None):
+    def __init__(self, in_features, hidden_features=None, out_features=None, is_3d=False):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
 
-        self.linear1 = nn.Conv2d(in_features, hidden_features, 1)
-        self.act = nn.LeakyReLU(negative_slope=0.2, inplace=True)
-        self.linear2 = nn.Conv2d(hidden_features, out_features, 1)
+        if is_3d:
+            self.linear1 = nn.Conv3d(in_features, hidden_features, 1)
+            self.act = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+            self.linear2 = nn.Conv3d(hidden_features, out_features, 1)
+        else:   
+            self.linear1 = nn.Conv2d(in_features, hidden_features, 1)
+            self.act = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+            self.linear2 = nn.Conv2d(hidden_features, out_features, 1)
 
     def forward(self, x):
         x = self.linear1(x)
@@ -777,30 +948,36 @@ class TransformerUnit(nn.Module):
         k_size=5,
         attn_type="softmax",
         fuse_type=None,
+        is_3d=False,
     ):
         super().__init__()
         self.feat_dim = feat_dim
         self.attn_type = attn_type
         self.fuse_type = fuse_type
         self.pos_en_flag = pos_en_flag
+        self.is_3d = is_3d
 
         self.pos_en = PosEnSine(self.feat_dim // 2)
-        self.attn = MultiheadAttention(feat_dim, n_head, k_size=k_size, attn_type=self.attn_type)
+        self.attn = MultiheadAttention(feat_dim, n_head, k_size=k_size, attn_type=self.attn_type, is_3d=self.is_3d)
 
         mlp_hidden_dim = int(feat_dim * mlp_ratio)
-        self.mlp = MLP(in_features=feat_dim, hidden_features=mlp_hidden_dim)
+        self.mlp = MLP(in_features=feat_dim, hidden_features=mlp_hidden_dim, is_3d=self.is_3d)
         self.norm = nn.GroupNorm(1, self.feat_dim)
 
         if fuse_type:
             if fuse_type == "conv":
-                self.fuse_conv = double_conv(in_ch=feat_dim, out_ch=feat_dim)
+                self.fuse_conv = double_conv(in_ch=feat_dim, out_ch=feat_dim, is_3d=self.is_3d)
             elif fuse_type == "mask":
-                self.fuse_conv = double_conv(in_ch=feat_dim, out_ch=feat_dim)
+                self.fuse_conv = double_conv(in_ch=feat_dim, out_ch=feat_dim, is_3d=self.is_3d)
 
     def forward(self, q, k, v, flow, mask=None, k_2=None, v_2=None, flow_2=None):
         if q.shape[-2:] != flow.shape[-2:]:
             # pdb.set_trace()
-            flow = resize_flow(flow, "shape", q.shape[-2:])
+            if flow.ndim == 4:
+                flow = resize_flow(flow, "shape", q.shape[-2:])
+            elif flow.ndim == 5:
+                flow = resize_flow_3d(flow, "shape", q.shape[-3:])
+
             if flow_2 is not None:                              # FIXME: 나중에 필요하면 수정
                 flow_2 = resize_flow(flow_2, "shape", q.shape[-2:])
         if mask != None and q.shape[-2:] != mask.shape[-2:]:
@@ -855,16 +1032,16 @@ class TransformerUnit(nn.Module):
 
 
 class Unet(nn.Module):
-    def __init__(self, in_ch, feat_ch, out_ch):
+    def __init__(self, in_ch, feat_ch, out_ch, is_3d=False):
         super().__init__()
-        self.conv_in = single_conv(in_ch, feat_ch)
+        self.conv_in = single_conv(in_ch, feat_ch, is_3d)
 
-        self.conv1 = double_conv_down(feat_ch, feat_ch)
-        self.conv2 = double_conv_down(feat_ch, feat_ch)
-        self.conv3 = double_conv(feat_ch, feat_ch)
-        self.conv4 = double_conv_up(feat_ch, feat_ch)
-        self.conv5 = double_conv_up(feat_ch, feat_ch)
-        self.conv6 = double_conv(feat_ch, out_ch)
+        self.conv1 = double_conv_down(feat_ch, feat_ch, is_3d)
+        self.conv2 = double_conv_down(feat_ch, feat_ch, is_3d)
+        self.conv3 = double_conv(feat_ch, feat_ch, is_3d)
+        self.conv4 = double_conv_up(feat_ch, feat_ch, is_3d)
+        self.conv5 = double_conv_up(feat_ch, feat_ch, is_3d)
+        self.conv6 = double_conv(feat_ch, out_ch, is_3d)
 
     def forward(self, x, for_nce=False):
         feat0 = self.conv_in(x)  # H, W
@@ -883,7 +1060,7 @@ class Unet(nn.Module):
 
 
 class MultiheadAttention(nn.Module):
-    def __init__(self, feat_dim, n_head, k_size=5, d_k=None, d_v=None, attn=None, attn_type="softmax"):
+    def __init__(self, feat_dim, n_head, k_size=5, d_k=None, d_v=None, attn=None, attn_type="softmax", is_3d=False):
         super().__init__()
         if d_k is None:
             d_k = feat_dim // n_head
@@ -894,16 +1071,25 @@ class MultiheadAttention(nn.Module):
         self.k_size = k_size
         self.d_k = d_k
         self.d_v = d_v
+        self.is_3d = is_3d
 
         # pre-attention projection
-        self.w_qs = nn.Conv2d(feat_dim, n_head * d_k, 1, bias=False)
-        self.w_ks = nn.Conv2d(feat_dim, n_head * d_k, 1, bias=False)
-        self.w_vs = nn.Conv2d(feat_dim, n_head * d_v, 1, bias=False)
+        if is_3d:
+            self.w_qs = nn.Conv3d(feat_dim, n_head * d_k, 1, bias=False)
+            self.w_ks = nn.Conv3d(feat_dim, n_head * d_k, 1, bias=False)
+            self.w_vs = nn.Conv3d(feat_dim, n_head * d_v, 1, bias=False)
+        else:
+            self.w_qs = nn.Conv2d(feat_dim, n_head * d_k, 1, bias=False)
+            self.w_ks = nn.Conv2d(feat_dim, n_head * d_k, 1, bias=False)
+            self.w_vs = nn.Conv2d(feat_dim, n_head * d_v, 1, bias=False)
         # self.w_ks_2 = nn.Conv2d(feat_dim, n_head * d_k, 1, bias=False)
         # self.w_vs_2 = nn.Conv2d(feat_dim, n_head * d_v, 1, bias=False)
 
         # after-attention combine heads
-        self.fc = nn.Conv2d(n_head * d_v, feat_dim, 1, bias=False)
+        if is_3d:
+            self.fc = nn.Conv3d(n_head * d_v, feat_dim, 1, bias=False)
+        else:
+            self.fc = nn.Conv2d(n_head * d_v, feat_dim, 1, bias=False)
 
         # Performer
         if attn_type == "performer":
@@ -930,93 +1116,125 @@ class MultiheadAttention(nn.Module):
         # )
 
     def forward(self, q, k, v, flow, attn_type="softmax", k_2=None, v_2=None, flow_2=None):
-        # input: n x c x h x w
-        # flow: n x 2 x h x w
-        d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
+        if self.is_3d:
+            # input: n x c x h x w x d
+            # flow: n x 2 x h x w x d
+            d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
 
-        # Pass through the pre-attention projection:
-        # n x c x h x w   ---->   n x (nhead*dk) x h x w  (c = nhead*dk)
-        q = self.w_qs(q)  # [2, 14, 24, 24]
-        k = self.w_ks(k)
-        v = self.w_vs(v)  # [2, 14, 24, 24]
-        if k_2 is not None:
-            k_2 = self.w_ks_2(k_2) #FIXME: 이거 K,V를 하나로 통합해보기
-            v_2 = self.w_vs_2(v_2)
+            q = self.w_qs(q)
+            k = self.w_ks(k)
+            v = self.w_vs(v)    
 
-        n, c, h, w = q.shape
+            n, c, h, w, d = q.shape
 
-        # ------ Sampling K and V features ---------
-        sampling_grid = flow_to_grid(flow, self.k_size)  # return: src에서 각 local grid가 어떻게 움직여야 ref local grid가 되는지 # n x k**2, h, w, 2  # # [100, 48, 48, 2]
-        # sampled feature
-        # n x k^2 x c x h x w
-        sample_k_feat = flow_guide_sampler(k, sampling_grid, k_size=self.k_size)  # [4, 25, 64, 48, 48] # ref에서 feature map의 local grid
-        sample_v_feat = flow_guide_sampler(v, sampling_grid, k_size=self.k_size)
-        if k_2 is not None:
-            sampling_grid_2 = flow_to_grid(flow_2, self.k_size)
-            sample_k_feat_2 = flow_guide_sampler(k_2, sampling_grid_2, k_size=self.k_size)
-            sample_v_feat_2 = flow_guide_sampler(v_2, sampling_grid_2, k_size=self.k_size)
+            sample_grid = flow_to_grid_3d(flow, self.k_size)
 
-            sample_k_feat = torch.cat([sample_k_feat, sample_k_feat_2], dim=1)
-            sample_v_feat = torch.cat([sample_v_feat, sample_v_feat_2], dim=1)
+            sample_k_feat = flow_guide_sampler_3d(k, sample_grid, k_size=self.k_size)
+            sample_v_feat = flow_guide_sampler_3d(v, sample_grid, k_size=self.k_size)
 
-        # Reshape for multi-head attention.
-        # q: n x 1 x nhead x dk x h x w
-        # k,v: n x k^2 x nhead x dk x h x w
-        q = q.view(n, 1, n_head, d_k, h, w)  # [2, 1, 2, 7, 24, 24]
-        if k_2 is not None:
-            k = sample_k_feat.view(n, self.k_size**2*2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
-            v = sample_v_feat.view(n, self.k_size**2*2, n_head, d_v, h, w)
-        else:
-            k = sample_k_feat.view(n, self.k_size**2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
-            v = sample_v_feat.view(n, self.k_size**2, n_head, d_v, h, w)
+            q = q.view(n, 1, n_head, d_k, h, w, d)
+            k = sample_k_feat.view(n, self.k_size**3, n_head, d_k, h, w, d)
+            v = sample_v_feat.view(n, self.k_size**3, n_head, d_v, h, w, d)
 
-    
-        #############################################################################################
-        # TODO: Ver1. linear
-        # # k 차원 축소
-        # k = self.linear_k_reduce(k.permute(0, 2, 3, 4, 5, 1))  # [n, h, w, n_head, d_k, 392]
-        # k = k.permute(0, 5, 1, 2, 3, 4)  # [n, 392, n_head, d_k, h, w]
+            if attn_type == "softmax":
+                q, attn = softmax_attention_3d(q, k, v)
+            else:
+                raise NotImplementedError(f"Unknown attention type {attn_type}")
 
-        # # v 차원 축소
-        # v = self.linear_v_reduce(v.permute(0, 2, 3, 4, 5, 1))  # [n, h, w, n_head, d_v, 392]
-        # v = v.permute(0, 5, 1, 2, 3, 4)  # [n, 392, n_head, d_v, h, w]
-        #############################################################################################
-        # TODO: Ver2. conv -> 이거하면 그냥 ref를 그대로 복제한다. NCE를 안만 높여도. 이걸 줄이는게 왜 원본 복제를 하게할까
-        # k = k.permute(0, 2, 3, 1, 4, 5).reshape(n * n_head * d_k, self.k_size**2, h, w)
-        # v = v.permute(0, 2, 3, 1, 4, 5).reshape(n * n_head * d_k, self.k_size**2, h, w)
+            q = q.reshape(n, -1, h, w, d)
+            q = q.float()
+            q = self.fc(q)
 
-        # # Apply independent reductions
-        # # n * nhead * dk, k^2/?, h, w
-        # k = self.k_reduce_conv(k)
-        # v = self.v_reduce_conv(v)
+            return q, attn  
 
-        # # Restore original batch structure
-        # k = k.reshape(n, n_head, d_k, self.k_size**2 // 4, h, w).permute(0, 3, 1, 2, 4, 5)
-        # v = v.reshape(n, n_head, d_k, self.k_size**2 // 4, h, w).permute(0, 3, 1, 2, 4, 5)
-        #############################################################################################
+        else: # 2d
+            # input: n x c x h x w
+            # flow: n x 2 x h x w
+            d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
 
-        # -------------- Attention ----------------- (여기서 10GB 정도나 먹어) 나머지에서 이미 12GB를 먹는다는 얘기. 나머지에서도 메모리 소비가 이미 크다.
-        if attn_type == "softmax":
-            # n x 1 x nhead x dk x h x w --> n x nhead x dv x h x w
-            q, attn = softmax_attention(q, k, v)
-        elif attn_type == "dot":
-            q, attn = dotproduct_attention(q, k, v)
-        elif attn_type == "performer":
-            q = performer_attention(q, k, v, performer_cross_attn=self.performer_cross_attn)
-            attn = None
-        elif attn_type == "flash":
-            q = flash_attention(q, k, v)
-            attn = None
-        else:
-            raise NotImplementedError(f"Unknown attention type {attn_type}")
+            # Pass through the pre-attention projection:
+            # n x c x h x w   ---->   n x (nhead*dk) x h x w  (c = nhead*dk)
+            q = self.w_qs(q)  # [2, 14, 24, 24]
+            k = self.w_ks(k)
+            v = self.w_vs(v)  # [2, 14, 24, 24]
+            if k_2 is not None:
+                k_2 = self.w_ks_2(k_2) #FIXME: 이거 K,V를 하나로 통합해보기
+                v_2 = self.w_vs_2(v_2)
 
-        # Concatenate all the heads together
-        # n x (nhead*dv) x h x w
-        q = q.reshape(n, -1, h, w)
-        q = q.float()
-        q = self.fc(q)  # n x c x h x w
+            n, c, h, w = q.shape
 
-        return q, attn
+            # ------ Sampling K and V features ---------
+            sampling_grid = flow_to_grid(flow, self.k_size)  # return: src에서 각 local grid가 어떻게 움직여야 ref local grid가 되는지 # n x k**2, h, w, 2  # # [100, 48, 48, 2]
+            # sampled feature
+            # n x k^2 x c x h x w
+            sample_k_feat = flow_guide_sampler(k, sampling_grid, k_size=self.k_size)  # [4, 25, 64, 48, 48] # ref에서 feature map의 local grid
+            sample_v_feat = flow_guide_sampler(v, sampling_grid, k_size=self.k_size)
+            if k_2 is not None:
+                sampling_grid_2 = flow_to_grid(flow_2, self.k_size)
+                sample_k_feat_2 = flow_guide_sampler(k_2, sampling_grid_2, k_size=self.k_size)
+                sample_v_feat_2 = flow_guide_sampler(v_2, sampling_grid_2, k_size=self.k_size)
+
+                sample_k_feat = torch.cat([sample_k_feat, sample_k_feat_2], dim=1)
+                sample_v_feat = torch.cat([sample_v_feat, sample_v_feat_2], dim=1)
+
+            # Reshape for multi-head attention.
+            # q: n x 1 x nhead x dk x h x w
+            # k,v: n x k^2 x nhead x dk x h x w
+            q = q.view(n, 1, n_head, d_k, h, w)  # [2, 1, 2, 7, 24, 24]
+            if k_2 is not None:
+                k = sample_k_feat.view(n, self.k_size**2*2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
+                v = sample_v_feat.view(n, self.k_size**2*2, n_head, d_v, h, w)
+            else:
+                k = sample_k_feat.view(n, self.k_size**2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
+                v = sample_v_feat.view(n, self.k_size**2, n_head, d_v, h, w)
+
+        
+            #############################################################################################
+            # TODO: Ver1. linear
+            # # k 차원 축소
+            # k = self.linear_k_reduce(k.permute(0, 2, 3, 4, 5, 1))  # [n, h, w, n_head, d_k, 392]
+            # k = k.permute(0, 5, 1, 2, 3, 4)  # [n, 392, n_head, d_k, h, w]
+
+            # # v 차원 축소
+            # v = self.linear_v_reduce(v.permute(0, 2, 3, 4, 5, 1))  # [n, h, w, n_head, d_v, 392]
+            # v = v.permute(0, 5, 1, 2, 3, 4)  # [n, 392, n_head, d_v, h, w]
+            #############################################################################################
+            # TODO: Ver2. conv -> 이거하면 그냥 ref를 그대로 복제한다. NCE를 안만 높여도. 이걸 줄이는게 왜 원본 복제를 하게할까
+            # k = k.permute(0, 2, 3, 1, 4, 5).reshape(n * n_head * d_k, self.k_size**2, h, w)
+            # v = v.permute(0, 2, 3, 1, 4, 5).reshape(n * n_head * d_k, self.k_size**2, h, w)
+
+            # # Apply independent reductions
+            # # n * nhead * dk, k^2/?, h, w
+            # k = self.k_reduce_conv(k)
+            # v = self.v_reduce_conv(v)
+
+            # # Restore original batch structure
+            # k = k.reshape(n, n_head, d_k, self.k_size**2 // 4, h, w).permute(0, 3, 1, 2, 4, 5)
+            # v = v.reshape(n, n_head, d_k, self.k_size**2 // 4, h, w).permute(0, 3, 1, 2, 4, 5)
+            #############################################################################################
+
+            # -------------- Attention ----------------- (여기서 10GB 정도나 먹어) 나머지에서 이미 12GB를 먹는다는 얘기. 나머지에서도 메모리 소비가 이미 크다.
+            if attn_type == "softmax":
+                # n x 1 x nhead x dk x h x w --> n x nhead x dv x h x w
+                q, attn = softmax_attention(q, k, v)
+            elif attn_type == "dot":
+                q, attn = dotproduct_attention(q, k, v)
+            elif attn_type == "performer":
+                q = performer_attention(q, k, v, performer_cross_attn=self.performer_cross_attn)
+                attn = None
+            elif attn_type == "flash":
+                q = flash_attention(q, k, v)
+                attn = None
+            else:
+                raise NotImplementedError(f"Unknown attention type {attn_type}")
+
+            # Concatenate all the heads together
+            # n x (nhead*dv) x h x w
+            q = q.reshape(n, -1, h, w)
+            q = q.float()
+            q = self.fc(q)  # n x c x h x w
+
+            return q, attn
 
 
 def flow_to_grid(flow, k_size=5):
@@ -1060,6 +1278,50 @@ def flow_to_grid(flow, k_size=5):
     # vgrid_scaled.requires_grad = False
     return vgrid_scaled  # n x k^2, h, w, 2  # [100, 48, 48, 2]
 
+def flow_to_grid_3d(flow, k_size=5):
+    # flow (Tensor): Tensor with size (n, 3, h, w, d), normal value.
+    # samples = flow + grid + shift
+    # n, h, w, d, _ = flow.size()
+    n, _, h, w, d = flow.size()  # [4, 2, 48, 48, 48]
+
+    padding = (k_size - 1) // 2
+
+    grid_y, grid_x, grid_z = torch.meshgrid( # grid_x, grid_y = h, w
+        torch.arange(0, h), torch.arange(0, w), torch.arange(0, d)
+    )  # [48, 48] , [48, 48]
+    grid_y = grid_y[None, ...].expand(k_size**3, -1, -1, -1).type_as(flow) # [k^2, 48, 48] # 복제하여 grid를 확장
+    grid_x = grid_x[None, ...].expand(k_size**3, -1, -1, -1).type_as(flow) # [k^2, 48, 48]
+    grid_z = grid_z[None, ...].expand(k_size**3, -1, -1, -1).type_as(flow) # [k^2, 48, 48]
+    
+    shift = torch.arange(0, k_size).type_as(flow) - padding  # [k] -> -2,-1,0,1,2 (if k=5)
+    shift_y, shift_x, shift_z = torch.meshgrid(shift, shift, shift)  # [k, k, k]
+    shift_y = shift_y.reshape(-1, 1, 1, 1).expand(-1, h, w, d)  # k^2, h, w, d  # [25, 48, 48, 48] # 첫번째 차원의 값에 따라 x,y방향으로 얼만큼씩 이동해야하는지. 일괄적으로 -2~2만큼 이동
+    shift_x = shift_x.reshape(-1, 1, 1, 1).expand(-1, h, w, d)  # k^2, h, w
+    shift_z = shift_z.reshape(-1, 1, 1, 1).expand(-1, h, w, d)  # k^2, h, w 
+    
+    samples_y = grid_y + shift_y  # k^2, h, w, d  # [25, 48, 48, 48]
+    samples_x = grid_x + shift_x  # k^2, h, w, d
+    samples_z = grid_z + shift_z  # k^2, h, w, d
+    
+    samples_grid = torch.stack( 
+        (samples_x, samples_y, samples_z), 4
+    )  # k^2, h, w, d, 3 # [25, 48, 48, 48, 3]
+    
+    samples_grid = samples_grid[None, ...].expand(
+        n, -1, -1, -1, -1, -1
+    )  # n, k^2, h, w, d, 3 # [4, 25, 48, 48, 48, 3]
+    
+    flow = flow.permute(0, 2, 3, 4, 1)[:, None, ...].expand(
+        -1, k_size**3, -1, -1, -1, -1
+    )  # [4, 25, 48, 48, 48, 2] 
+
+    vgrid = samples_grid + flow  ## [4, 25, 48, 48, 48, 2]  [4, 25, 48, 48, 48, 2]
+    # scale grid to [-1,1]
+    vgrid_x = 2.0 * vgrid[..., 0] / max(w - 1, 1) - 1.0
+    vgrid_y = 2.0 * vgrid[..., 1] / max(h - 1, 1) - 1.0
+    vgrid_z = 2.0 * vgrid[..., 2] / max(d - 1, 1) - 1.0
+    vgrid_scaled = torch.stack((vgrid_x, vgrid_y, vgrid_z), dim=5).view(-1, h, w, d, 3)
+    return vgrid_scaled  # n x k^2, h, w, d, 2  # [100, 48, 48, 48, 2]
 
 def flow_guide_sampler(
     feat,
@@ -1086,3 +1348,25 @@ def flow_guide_sampler(
     )  # [4, 25, 64, 48, 48]
     return sample_feat
 
+def flow_guide_sampler_3d(
+    feat,
+    vgrid_scaled,
+    k_size=5,
+    interp_mode="bilinear",
+    padding_mode="zeros",
+    align_corners=True,
+):
+    n, c, h, w, d = feat.size()
+    feat = (
+        feat.view(n, 1, c, h, w, d).expand(-1, k_size**3, -1, -1, -1, -1).reshape(-1, c, h, w, d)
+    )  # (nk^2, c, h, w, d)
+    sample_feat = F.grid_sample(
+        feat,
+        vgrid_scaled,
+        mode=interp_mode,
+        padding_mode=padding_mode,
+        align_corners=align_corners,
+    ).view(
+        n, k_size**3, c, h, w, d
+    )  # [4, 25, 64, 48, 48, 48]
+    return sample_feat

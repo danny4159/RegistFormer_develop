@@ -89,10 +89,15 @@ class BaseModule_AtoB(LightningModule):  # single direction
             merged_input = torch.cat((a, b), dim=1)
             
             # Sliding window on inference
-            if self.params.use_sliding_inference and not self.training:
-                inferer = SlidingWindowInferer(roi_size=(128,128), mode='gaussian') # 128,128
-                pred = inferer(inputs=merged_input, network=self.netG_A) #inputs 손봐야해
+            if self.params.is_3d and not self.training:
+                inferer = SlidingWindowInferer(roi_size=(64,64,16), mode='gaussian') # TODO: 가능한 가로 세로는 많이
+                pred = inferer(inputs=merged_input, network=self.netG_A)
                 return pred
+            else:
+                if self.params.use_sliding_inference and not self.training:
+                    inferer = SlidingWindowInferer(roi_size=(128,128), mode='gaussian') # 128,128
+                    pred = inferer(inputs=merged_input, network=self.netG_A) #inputs 손봐야해
+                    return pred
         
             return self.netG_A(merged_input)
         

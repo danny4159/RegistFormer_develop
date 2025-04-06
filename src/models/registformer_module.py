@@ -161,6 +161,73 @@ class RegistFormerModule(BaseModule_AtoB):
             loss_G += loss_L1
 
         return loss_G
+    
+    def backward_G_3D(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d):
+        loss_G = 0.0
+        D = real_a.shape[-1]
+
+        for d in range(D):
+            ra = real_a[..., d]
+            rb = real_b[..., d]
+            fb = fake_b[..., d]
+
+            # Random translation to Ground truth   
+            if self.criterionCTX:
+                if self.params.ran_shift > 0:
+                    shift_range_x, shift_range_y = 0, 0
+                    while shift_range_x == 0 and shift_range_y == 0:
+                        shift_range_x = torch.randint(-self.params.ran_shift, self.params.ran_shift, (1,)).item()
+                        shift_range_y = torch.randint(-self.params.ran_shift, self.params.ran_shift, (1,)).item()
+                    
+                    real_b = torch.roll(real_b, shifts=(shift_range_y,shift_range_x), dims=(2,3))
+                
+                loss_CTX_b = self.criterionCTX(fake_b, real_b) * self.params.lambda_ctx
+                loss_G += loss_CTX_b
+                self.log("CTX_b_Loss", loss_CTX_b.detach(), prog_bar=True)
+
+            if self.criterionGAN:
+                pred_fake = self.netD_A(fb)
+                loss_GAN_b = self.criterionGAN(pred_fake, True) * self.params.lambda_gan
+                self.log("GAN_b_Loss", loss_GAN_b.detach(), prog_bar=True)
+                loss_G += loss_GAN_b
+
+            if self.criterionMIND:
+                loss_MIND = self.criterionMIND(ra, fb) * self.params.lambda_mind
+                self.log("MIND_Loss", loss_MIND.detach(), prog_bar=True)
+                loss_G += loss_MIND
+
+            if self.criterionNCE:
+                if self.params.nce_on_vgg:
+                    if ra.shape[1] == 1 and fb.shape[1] == 1:
+                        real_a_rgb = ra.repeat(1, 3, 1, 1)
+                        fake_b_rgb = fb.repeat(1, 3, 1, 1)
+                        self.vgg.to(ra.device)
+                        feat_b = self.vgg(fake_b_rgb)
+                        feat_b = list(feat_b.values())
+                        
+                flipped_for_equivariance = np.random.random() < 0.5
+                if self.flip_equivariance and flipped_for_equivariance:
+                    feat_b = [torch.flip(fb, [3]) for fb in feat_b]
+
+                if self.params.nce_on_vgg:
+                    feat_a = self.vgg(real_a_rgb)
+                    feat_a = list(feat_a.values())
+
+                feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+                feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+
+                total_nce_loss = 0.0
+
+                for f_a, f_b in zip(feat_a_pool, feat_b_pool):
+                    loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce
+                    total_nce_loss += loss.mean()
+                loss_NCE = total_nce_loss / len(feat_b)
+                loss_G += loss_NCE
+                self.log("NCE_Loss", loss_NCE.detach(), prog_bar=True)
+
+            loss_G = loss_G / D
+
+        return loss_G   
 
     def training_step(self, batch: Any, batch_idx: int):
         if self.params.lambda_gan != 0:
@@ -190,7 +257,10 @@ class RegistFormerModule(BaseModule_AtoB):
             if self.params.use_multiple_outputs:
                 loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d)
             else:
-                loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None)
+                if self.params.is_3d:
+                    loss_G = self.backward_G_3D(real_a, real_b, None, None, fake_b, None, None)
+                else:
+                    loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None)
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
@@ -208,7 +278,10 @@ class RegistFormerModule(BaseModule_AtoB):
         if self.params.lambda_gan != 0:
             with optimizer_D_A.toggle_model():
                 optimizer_D_A.zero_grad()
-                loss_D_A = self.backward_D_A(real_b, fake_b)
+                if self.params.is_3d:
+                    loss_D_A = self.backward_D_A_3D(real_b, fake_b)
+                else:
+                    loss_D_A = self.backward_D_A(real_b, fake_b)
                 self.manual_backward(loss_D_A)
                 self.clip_gradients(
                     optimizer_D_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
