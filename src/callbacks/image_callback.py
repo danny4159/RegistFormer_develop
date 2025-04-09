@@ -164,7 +164,7 @@ class ImageLoggingCallback(Callback):
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         
         if len(batch[0].size()) == 5: # 3D Image
-            self.val_batch_idx = [1, 2, 3, 4, 5]
+            self.val_batch_idx = [0, 1, 2, 3, 4]
 
         if (
             batch_idx in self.val_batch_idx
@@ -180,7 +180,7 @@ class ImageLoggingCallback(Callback):
                 warped_img = warped_img[:, :, :, :, d_index].squeeze(-1)
                 self.saving_to_grid([evaluation_img, moving_img, fixed_img, warped_img])
             elif len(batch[0].size()) == 5 and pl_module.params.is_registration == False:  # 3D Image Generation
-                d_index = 30
+                d_index = 4
                 real_a, real_b, fake_b, *_ = pl_module.model_step(batch)
                 real_a = real_a[:, :, :, :, d_index].squeeze(-1)
                 real_b = real_b[:, :, :, :, d_index].squeeze(-1)
@@ -217,6 +217,9 @@ class ImageLoggingCallback(Callback):
         self.err_grid = [] 
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if len(batch[0].size()) == 5: # 3D Image
+            self.val_batch_idx = [0, 1, 2, 3, 4]
+            
         if (
             self.log_test and batch_idx in self.tst_batch_idx
         ):  # log every indexes for slice number in test set
@@ -230,7 +233,7 @@ class ImageLoggingCallback(Callback):
                 warped_img = warped_img[:, :, :, :, d_index].squeeze(-1)
                 self.saving_to_grid([evaluation_img, moving_img, fixed_img, warped_img])
             elif len(batch[0].size()) == 5 and pl_module.params.is_registration == False:  # 3D Image Generation
-                d_index = 30
+                d_index = 4
                 real_a, real_b, fake_b, *_ = pl_module.model_step(batch)
                 real_a = real_a[:, :, :, :, d_index].squeeze(-1)
                 real_b = real_b[:, :, :, :, d_index].squeeze(-1)

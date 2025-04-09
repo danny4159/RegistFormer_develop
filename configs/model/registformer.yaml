@@ -91,7 +91,9 @@ params: # Other params
   use_multiple_outputs: ${data.use_multiple_outputs} # Set True if data_group_3 is exist
   use_misalign_simul: ${data.use_misalign_simul}
   is_3d: ${data.is_3d}
-
+  use_autoencoder: False
+  crop_size: ${data.crop_size} # [128,128] or [128,128,16]
+  is_registration: False
   #Ablation
   ran_shift: 10 #null # "Put null or Interger" / random shift to ground truth when calculating Contextual Loss
   flag_occlusionCTX: False # Occlusion masked contextual loss

@@ -179,9 +179,9 @@ class RegistFormerModule(BaseModule_AtoB):
                         shift_range_x = torch.randint(-self.params.ran_shift, self.params.ran_shift, (1,)).item()
                         shift_range_y = torch.randint(-self.params.ran_shift, self.params.ran_shift, (1,)).item()
                     
-                    real_b = torch.roll(real_b, shifts=(shift_range_y,shift_range_x), dims=(2,3))
+                    rb = torch.roll(rb, shifts=(shift_range_y,shift_range_x), dims=(2,3))
                 
-                loss_CTX_b = self.criterionCTX(fake_b, real_b) * self.params.lambda_ctx
+                loss_CTX_b = self.criterionCTX(fb, rb) * self.params.lambda_ctx
                 loss_G += loss_CTX_b
                 self.log("CTX_b_Loss", loss_CTX_b.detach(), prog_bar=True)
 
@@ -226,6 +226,11 @@ class RegistFormerModule(BaseModule_AtoB):
                 self.log("NCE_Loss", loss_NCE.detach(), prog_bar=True)
 
             loss_G = loss_G / D
+
+        if self.criterionL1:
+            loss_L1 = self.criterionL1(real_b, fake_b) * self.params.lambda_l1
+            self.log("L1_Loss", loss_L1.detach(), prog_bar=True)
+            loss_G += loss_L1
 
         return loss_G   
 

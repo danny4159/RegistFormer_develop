@@ -46,11 +46,50 @@ class RegistFormer(nn.Module):
         current_dir = os.path.dirname(__file__)
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
 
+        device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu") # TODO: Put the proper number of gpu like "cuda:2"
+
         self.flow_model_path = os.path.join(project_root, self.flow_model_path)
         self.dam_path = os.path.join(project_root, self.dam_path)
         if self.params.use_multiple_outputs:
             self.flow_model_path_2 = os.path.join(project_root, self.flow_model_path_2)
             self.dam_path_2 = os.path.join(project_root, self.dam_path_2)
+
+        ############################# Autoencoder KL Maisi #############################
+        if self.params.use_autoencoder:
+            from src.models.components.networks_define import define_G
+            
+            self.netK_A = define_G(netG_type='autoencoder_maisi_monai', 
+                                spatial_dims=3, 
+                                in_channels=1, 
+                                out_channels=1, 
+                                latent_channels=4, 
+                                num_channels=[64, 128, 256], 
+                                num_res_blocks=[2, 2, 2], 
+                                norm_num_groups=32, 
+                                norm_eps=1e-06, 
+                                attention_levels=[False, False, False], 
+                                with_encoder_nonlocal_attn=False, 
+                                with_decoder_nonlocal_attn=False, 
+                                use_checkpointing=False, 
+                                use_convtranspose=False, 
+                                norm_float16=False, 
+                                num_splits=8, 
+                                dim_split=1)
+            ckpt_path = "/home/sumin/registformer/RegistFormer_develop/pretrained/maisi/autoencoder_epoch273.pt"
+            ckpt = torch.load(ckpt_path, map_location=device)
+            ckpt_state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+
+            if any(k.startswith("netK_A.") for k in ckpt_state_dict):
+                netK_A_state_dict = {k.replace("netK_A.", ""): v for k, v in ckpt_state_dict.items() if k.startswith("netK_A.")}
+            else:
+                netK_A_state_dict = ckpt_state_dict
+            self.netK_A.load_state_dict(netK_A_state_dict, strict=False)
+            self.netK_A.to(device)
+            self.netK_A.eval()
+
+            self._autoencoderKL_net_backup_weights = copy.deepcopy(self.netK_A.state_dict()) 
+        ################################################################################
+
 
         if self.flow_type == "voxelmorph":
             from src.models.components.voxelmorph import VxmDense
@@ -75,6 +114,7 @@ class RegistFormer(nn.Module):
             model_state_dict = checkpoint["state_dict"]
             adjusted_state_dict = {k.replace("netR_A.", ""): v for k, v in model_state_dict.items()}
             self.flow_estimator.load_state_dict(adjusted_state_dict, strict=False)
+            self.flow_estimator.to(device)
             self.flow_estimator.eval()
 
             self._regist_net_backup_weights = copy.deepcopy(self.flow_estimator.state_dict()) 
@@ -141,6 +181,7 @@ class RegistFormer(nn.Module):
             model_state_dict = checkpoint["state_dict"]
             adjusted_state_dict = {k.replace("netG_A.", ""): v for k, v in model_state_dict.items()}
             self.DAM.load_state_dict(adjusted_state_dict, strict=False)
+            self.DAM.to(device)
             self.DAM.eval()
             for param in self.DAM.parameters():
                 param.requires_grad = self.dam_ft
@@ -182,9 +223,16 @@ class RegistFormer(nn.Module):
         if self.params.use_multiple_outputs:
             self.unet_q = Unet(self.src_ch * 3, self.feat_dim, self.feat_dim, self.params.is_3d)
         else:
-            self.unet_q = Unet(self.src_ch * 2, self.feat_dim, self.feat_dim, self.params.is_3d)
+            if self.params.use_autoencoder:
+                self.unet_q = Unet(self.src_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
+            else:
+                self.unet_q = Unet(self.src_ch * 2, self.feat_dim, self.feat_dim, self.params.is_3d)
 
-        self.unet_k = Unet(self.ref_ch, self.feat_dim, self.feat_dim, self.params.is_3d)
+        if self.params.use_autoencoder:
+            self.unet_k = Unet(self.ref_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
+        else:
+            self.unet_k = Unet(self.ref_ch, self.feat_dim, self.feat_dim, self.params.is_3d)
+
         if self.params.use_multiple_outputs:
             self.unet_k_2 = Unet(self.ref_ch, self.feat_dim, self.feat_dim, self.params.is_3d)
 
@@ -231,9 +279,14 @@ class RegistFormer(nn.Module):
         self.conv4 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
         self.conv5 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
         if self.params.is_3d:
-            self.conv6 = nn.Sequential(
-                single_conv(self.feat_dim, self.feat_dim, self.params.is_3d), nn.Conv3d(self.feat_dim, self.out_ch, 3, 1, 1)
-            )
+            if self.params.use_autoencoder:
+                self.conv6 = nn.Sequential(
+                    single_conv(self.feat_dim, self.feat_dim, self.params.is_3d), nn.Conv3d(self.feat_dim, self.out_ch*4, 3, 1, 1)
+                )
+            else:   
+                self.conv6 = nn.Sequential(
+                    single_conv(self.feat_dim, self.feat_dim, self.params.is_3d), nn.Conv3d(self.feat_dim, self.out_ch, 3, 1, 1)
+                )
         else:
             self.conv6 = nn.Sequential(
                 single_conv(self.feat_dim, self.feat_dim, self.params.is_3d), nn.Conv2d(self.feat_dim, self.out_ch, 3, 1, 1)
@@ -262,8 +315,6 @@ class RegistFormer(nn.Module):
             src = merged_input[:, :1, :, :, :]
             ref = merged_input[:, 1:, :, :, :]
             assert src.shape == ref.shape, "Shapes of source and reference images mismatch."
-            device = src.device
-            self.flow_estimator.to(device)
             moved = None
 
             if self.dam_type == "proposed_synthesis":
@@ -282,6 +333,7 @@ class RegistFormer(nn.Module):
             depth_multiple = self.flow_size[2] if self.flow_size else 128
 
             if self.flow_type == "voxelmorph_lightning":
+                self.flow_estimator.load_state_dict(self._regist_net_backup_weights)
                 src, moving_padding = self.pad_tensor_to_multiple_3d(src, height_multiple=height_multiple, width_multiple=width_multiple, depth_multiple=depth_multiple)
                 ref, fixed_padding = self.pad_tensor_to_multiple_3d(ref, height_multiple=height_multiple, width_multiple=width_multiple, depth_multiple=depth_multiple)
                 _, flow = self.flow_estimator(src, ref, registration=True)
@@ -289,7 +341,17 @@ class RegistFormer(nn.Module):
                 ref = self.crop_tensor_to_original_3d(ref, fixed_padding)
                 flow = self.crop_tensor_to_original_3d(flow, fixed_padding)
 
-            src_lq_concat = torch.cat((src_origin, src), dim=1)
+            if self.params.use_autoencoder:
+                self.netK_A.load_state_dict(self._autoencoderKL_net_backup_weights)
+                src_lq_concat = src #Can't use two channel on autoencoder
+                src_lq_concat = self.netK_A.encoder(src_lq_concat)
+                ref = self.netK_A.encoder(ref)
+            else:
+                src_lq_concat = torch.cat((src_origin, src), dim=1)
+            
+            # print("src_lq_concat.shape", src_lq_concat.shape) #1,4,32,32,2 마지막 레이어 없앴더니 1,256,32,32,2
+            # print("ref.shape", ref.shape)
+
             q_feat = self.unet_q(src_lq_concat)
             k_feat = self.unet_k(ref)
 
@@ -321,6 +383,8 @@ class RegistFormer(nn.Module):
                 f5 = f5 + outputs[2] + f0
 
             out = self.conv6(f5)
+            if self.params.use_autoencoder:
+                out = self.netK_A.decoder(out)
             out = torch.tanh(out)
             return out
         
@@ -335,8 +399,6 @@ class RegistFormer(nn.Module):
             assert (
                 src.shape == ref.shape
             ), "Shapes of source and reference images mismatch. Source shape: {src.shape}, Reference shape: {ref.shape}"
-            device = src.device
-            self.flow_estimator.to(device)
             moved = None
 
             if self.dam_type == "dam" or self.dam_type == "proposed_synthesis":
@@ -692,7 +754,7 @@ def softmax_attention_3d(q, k, v):
 
     output = torch.matmul(attn, v) # n, nhead, h, w, d, 1, d
 
-    output = output.permute(0, 5, 1, 6, 2, 3, 4).squeeze(1) # n, nhead, d, h, w
+    output = output.permute(0, 5, 1, 6, 2, 3, 4).squeeze(1) # n, nhead, d, h, w, d
     attn = attn.permute(0, 5, 1, 6, 2, 3, 4).squeeze(1) 
 
     return output, attn
@@ -1305,11 +1367,11 @@ def flow_to_grid_3d(flow, k_size=5):
     
     samples_grid = torch.stack( 
         (samples_x, samples_y, samples_z), 4
-    )  # k^2, h, w, d, 3 # [25, 48, 48, 48, 3]
+    )  # k^3, h, w, d, 3 # [25, 48, 48, 48, 3]
     
     samples_grid = samples_grid[None, ...].expand(
         n, -1, -1, -1, -1, -1
-    )  # n, k^2, h, w, d, 3 # [4, 25, 48, 48, 48, 3]
+    )  # n, k^3, h, w, d, 3 # [4, 25, 48, 48, 48, 3]
     
     flow = flow.permute(0, 2, 3, 4, 1)[:, None, ...].expand(
         -1, k_size**3, -1, -1, -1, -1

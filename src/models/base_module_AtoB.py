@@ -90,12 +90,14 @@ class BaseModule_AtoB(LightningModule):  # single direction
             
             # Sliding window on inference
             if self.params.is_3d and not self.training:
-                inferer = SlidingWindowInferer(roi_size=(64,64,16), mode='gaussian') # TODO: 가능한 가로 세로는 많이
+                roi_size = tuple(self.params.crop_size)
+                inferer = SlidingWindowInferer(roi_size=roi_size, mode='gaussian') # TODO: 가능한 가로 세로는 많이
                 pred = inferer(inputs=merged_input, network=self.netG_A)
                 return pred
             else:
                 if self.params.use_sliding_inference and not self.training:
-                    inferer = SlidingWindowInferer(roi_size=(128,128), mode='gaussian') # 128,128
+                    roi_size = tuple(self.params.crop_size)
+                    inferer = SlidingWindowInferer(roi_size=roi_size, mode='gaussian') # 128,128
                     pred = inferer(inputs=merged_input, network=self.netG_A) #inputs 손봐야해
                     return pred
         
@@ -185,10 +187,10 @@ class BaseModule_AtoB(LightningModule):  # single direction
             return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref # real: GT, fake: syn by Ref
 
         else: 
-            if self.params.use_misalign_simul == False:
+            if self.params.use_misalign_simul == False: # Registformer
                 real_a, real_b = batch
-                real_a = self.pad_slice_to_128(real_a, padding_value=-1)
-                real_b = self.pad_slice_to_128(real_b, padding_value=-1)
+                # real_a = self.pad_slice_to_128(real_a, padding_value=-1)
+                # real_b = self.pad_slice_to_128(real_b, padding_value=-1)
                 fake_b = self.forward(real_a, real_b)
                 real_b_ref = None
                 return real_a, real_b, fake_b
