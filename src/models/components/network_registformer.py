@@ -46,7 +46,7 @@ class RegistFormer(nn.Module):
         current_dir = os.path.dirname(__file__)
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
 
-        device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu") # TODO: Put the proper number of gpu like "cuda:2"
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu") # TODO: Put the proper number of gpu like "cuda:2"
 
         self.flow_model_path = os.path.join(project_root, self.flow_model_path)
         self.dam_path = os.path.join(project_root, self.dam_path)
@@ -312,21 +312,24 @@ class RegistFormer(nn.Module):
     def forward(self, merged_input, mask=None, for_nce=False, for_src=False):
 
         if self.params.is_3d:
-            src = merged_input[:, :1, :, :, :]
-            ref = merged_input[:, 1:, :, :, :]
-            assert src.shape == ref.shape, "Shapes of source and reference images mismatch."
-            moved = None
+            input_img = merged_input[:, :1, :, :, :]
+            ref_img = merged_input[:, 1:2, :, :, :]
+            if self.params.skip_stage1_infer:
+                synth_img = merged_input[:, 2:3, :, :, :]
+            else:
+                synth_img = None
+            assert input_img.shape == ref_img.shape, "Shapes of source and reference images mismatch."
+            moved_img = None
 
-            if self.dam_type == "proposed_synthesis":
+            if self.dam_type == "proposed_synthesis" and self.params.skip_stage1_infer == False:
                 self.DAM.load_state_dict(self._DAM_net_backup_weights)
-                src_origin = src
                 src_slices = []
-                for d in range(src.shape[-1]):
-                    src_slice = src[:, :, :, :, d]
-                    ref_slice = ref[:, :, :, :, d]
-                    merged_input_slice = torch.cat((src_slice, ref_slice), dim=1)
+                for d in range(synth_img.shape[-1]):
+                    synth_slice = synth_img[:, :, :, :, d]
+                    ref_slice = ref_img[:, :, :, :, d]
+                    merged_input_slice = torch.cat((synth_slice, ref_slice), dim=1)
                     src_slices.append(self.DAM(merged_input_slice))
-                src = torch.stack(src_slices, dim=-1)
+                synth_img = torch.stack(src_slices, dim=-1)
 
             height_multiple = self.flow_size[0] if self.flow_size else 384 # FIXME: 나중에 수정
             width_multiple = self.flow_size[1] if self.flow_size else 320
@@ -334,26 +337,23 @@ class RegistFormer(nn.Module):
 
             if self.flow_type == "voxelmorph_lightning":
                 self.flow_estimator.load_state_dict(self._regist_net_backup_weights)
-                src, moving_padding = self.pad_tensor_to_multiple_3d(src, height_multiple=height_multiple, width_multiple=width_multiple, depth_multiple=depth_multiple)
-                ref, fixed_padding = self.pad_tensor_to_multiple_3d(ref, height_multiple=height_multiple, width_multiple=width_multiple, depth_multiple=depth_multiple)
-                _, flow = self.flow_estimator(src, ref, registration=True)
-                src = self.crop_tensor_to_original_3d(src, fixed_padding)
-                ref = self.crop_tensor_to_original_3d(ref, fixed_padding)
+                synth_img, moving_padding = self.pad_tensor_to_multiple_3d(synth_img, height_multiple=height_multiple, width_multiple=width_multiple, depth_multiple=depth_multiple)
+                ref_img, fixed_padding = self.pad_tensor_to_multiple_3d(ref_img, height_multiple=height_multiple, width_multiple=width_multiple, depth_multiple=depth_multiple)
+                _, flow = self.flow_estimator(synth_img, ref_img, registration=True)
+                synth_img = self.crop_tensor_to_original_3d(synth_img, fixed_padding)
+                ref_img = self.crop_tensor_to_original_3d(ref_img, fixed_padding)
                 flow = self.crop_tensor_to_original_3d(flow, fixed_padding)
 
             if self.params.use_autoencoder:
                 self.netK_A.load_state_dict(self._autoencoderKL_net_backup_weights)
-                src_lq_concat = src #Can't use two channel on autoencoder
-                src_lq_concat = self.netK_A.encoder(src_lq_concat)
-                ref = self.netK_A.encoder(ref)
+                input_synthOut_concat = synth_img #Can't use two channel on autoencoder
+                input_synthOut_concat = self.netK_A.encoder(input_synthOut_concat)
+                ref_img = self.netK_A.encoder(ref_img)
             else:
-                src_lq_concat = torch.cat((src_origin, src), dim=1)
+                input_synthOut_concat = torch.cat((input_img, synth_img), dim=1)
             
-            # print("src_lq_concat.shape", src_lq_concat.shape) #1,4,32,32,2 마지막 레이어 없앴더니 1,256,32,32,2
-            # print("ref.shape", ref.shape)
-
-            q_feat = self.unet_q(src_lq_concat)
-            k_feat = self.unet_k(ref)
+            q_feat = self.unet_q(input_synthOut_concat)
+            k_feat = self.unet_k(ref_img)
 
             outputs = []
             for i in range(3):
@@ -388,41 +388,37 @@ class RegistFormer(nn.Module):
             out = torch.tanh(out)
             return out
         
-        else:
-            src = merged_input[:, :1, :, :]
+        else: # 2D generation
+            input_img = merged_input[:, :1, :, :]
             if self.params.use_multiple_outputs:
-                ref = merged_input[:, 1:2, :, :]
-                ref_2 = merged_input[:, 2:3, :, :]
+                ref_img = merged_input[:, 1:2, :, :]
+                ref_img2 = merged_input[:, 2:3, :, :]
             else:
-                ref = merged_input[:, 1:, :, :]
+                ref_img = merged_input[:, 1:, :, :]
 
             assert (
-                src.shape == ref.shape
+                input_img.shape == ref_img.shape
             ), "Shapes of source and reference images mismatch. Source shape: {src.shape}, Reference shape: {ref.shape}"
-            moved = None
+            moved_img = None
 
             if self.dam_type == "dam" or self.dam_type == "proposed_synthesis":
                 self.DAM.load_state_dict(self._DAM_net_backup_weights)
-                src_origin = src
-                merged_input = torch.cat((src, ref), dim=1)
-                src = self.DAM(merged_input)  # [4, 3, 256, 256] #FIXME: 나중에 수정
+                merged_input = torch.cat((synth_img, ref_img), dim=1)
+                synth_img = self.DAM(merged_input)  # [4, 3, 256, 256] #FIXME: 나중에 수정
                 if self.params.use_multiple_outputs:
-                    merged_input_2 = torch.cat((src, ref_2), dim=1)
-                    src_2 = self.DAM_2(merged_input_2)
+                    merged_input_2 = torch.cat((synth_img, ref_img2), dim=1)
+                    synth_img2 = self.DAM_2(merged_input_2)
             elif self.dam_type == "synthesis_meta":
-                src_origin = src
-                src = self.DAM(src)
+                synth_img = self.DAM(synth_img)
             elif self.dam_type == "dam_misalign":
-                src_origin = src
-                ref_to_src = self.DAM_MR_CT(ref, src)
-                src = self.DAM(src, ref)
+                ref_to_synth = self.DAM_MR_CT(ref_img, synth_img)
+                synth_img = self.DAM(synth_img, ref_img)
             # elif self.dam_type == 'dam_misalign':
             #     src = self.DAM.netG_B(src, ref)
             elif self.dam_type == "munit":
-                src_origin = src
-                c_a, s_a = self.DAM_A.encode(src)
-                c_b, s_b = self.DAM_B.encode(ref)
-                src = self.DAM_B.decode(c_a, s_b)
+                c_a, s_a = self.DAM_A.encode(synth_img)
+                c_b, s_b = self.DAM_B.encode(ref_img)
+                synth_img = self.DAM_B.decode(c_a, s_b)
             else:
                 raise ValueError(
                     "Invalid dam_type provided. Expected 'dam' or 'synthesis_meta'."
@@ -430,11 +426,11 @@ class RegistFormer(nn.Module):
 
             if for_nce: # NetG를 NCE에 사용할 때 쓰이는 부분
                 if for_src:
-                    src_lq_concat = torch.cat((src_origin, src), dim=1)
-                    q_feat = self.unet_q(src_lq_concat, for_nce=True)
+                    input_synthOut_concat = torch.cat((input_img, synth_img), dim=1)
+                    q_feat = self.unet_q(input_synthOut_concat, for_nce=True)
                     return q_feat
                 else:
-                    q_feat = self.unet_k(ref, for_nce=True)
+                    q_feat = self.unet_k(ref_img, for_nce=True)
                     return q_feat
 
 
@@ -444,80 +440,80 @@ class RegistFormer(nn.Module):
             if self.flow_type in ["voxelmorph", "zero","voxelmorph_lightning"]:
                 self.flow_estimator.load_state_dict(self._regist_net_backup_weights)
                 if self.dam_type == "synthesis_meta" or self.dam_type == "dam" or self.dam_type == "proposed_synthesis" or self.dam_type == "munit":
-                    src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=height_multiple, width_multiple=width_multiple)
-                    ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=height_multiple, width_multiple=width_multiple)
+                    synth_img, moving_padding = self.pad_tensor_to_multiple(synth_img, height_multiple=height_multiple, width_multiple=width_multiple)
+                    ref_img, fixed_padding = self.pad_tensor_to_multiple(ref_img, height_multiple=height_multiple, width_multiple=width_multiple)
                     if self.params.use_multiple_outputs:
-                        src_2, moving_padding_2 = self.pad_tensor_to_multiple(src_2, height_multiple=height_multiple, width_multiple=width_multiple)
-                        ref_2, fixed_padding_2 = self.pad_tensor_to_multiple(ref_2, height_multiple=height_multiple, width_multiple=width_multiple)
+                        synth_img2, moving_padding_2 = self.pad_tensor_to_multiple(synth_img2, height_multiple=height_multiple, width_multiple=width_multiple)
+                        ref_img2, fixed_padding_2 = self.pad_tensor_to_multiple(ref_img2, height_multiple=height_multiple, width_multiple=width_multiple)
                     if self.flow_type == "zero":
-                        moved, flow = self.flow_estimator(ref, src, registration=True)  # Zeroflow version
+                        moved_img, flow = self.flow_estimator(ref_img, synth_img, registration=True)  # Zeroflow version
                     else:
-                        _, flow = self.flow_estimator(src, ref, registration=True)  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
+                        _, flow = self.flow_estimator(synth_img, ref_img, registration=True)  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
                         if self.params.use_multiple_outputs:
-                            _, flow_2 = self.flow_estimator(src_2, ref_2, registration=True)
+                            _, flow_2 = self.flow_estimator(synth_img2, ref_img2, registration=True)
                         # flow = self.vecint(flow) #TODO: modified
 
-                    src = self.crop_tensor_to_original(src, fixed_padding)
-                    ref = self.crop_tensor_to_original(ref, fixed_padding)
+                    synth_img = self.crop_tensor_to_original(synth_img, fixed_padding)
+                    ref_img = self.crop_tensor_to_original(ref_img, fixed_padding)
                     flow = self.crop_tensor_to_original(flow, fixed_padding)
                     if self.params.use_multiple_outputs:
-                        src_2 = self.crop_tensor_to_original(src_2, fixed_padding)
-                        ref_2 = self.crop_tensor_to_original(ref_2, fixed_padding)
+                        synth_img2 = self.crop_tensor_to_original(synth_img2, fixed_padding)
+                        ref_img2 = self.crop_tensor_to_original(ref_img2, fixed_padding)
                         flow_2 = self.crop_tensor_to_original(flow_2, fixed_padding)
                     if self.flow_type == "zero":
                         flow = torch.zeros_like(flow)  # Zeroflow version
                     if self.is_moved_feat: # Comparison
-                        moved = self.crop_tensor_to_original(moved, fixed_padding)
+                        moved_img = self.crop_tensor_to_original(moved_img, fixed_padding)
 
                 elif self.dam_type == "dam_misalign":
-                    src_origin, moving_padding = self.pad_tensor_to_multiple(src_origin, height_multiple=height_multiple, width_multiple=width_multiple)
-                    ref_to_src, fixed_padding = self.pad_tensor_to_multiple(ref_to_src, height_multiple=height_multiple, width_multiple=width_multiple)
-                    ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=height_multiple, width_multiple=width_multiple)
+                    input_img, moving_padding = self.pad_tensor_to_multiple(input_img, height_multiple=height_multiple, width_multiple=width_multiple)
+                    ref_to_synth, fixed_padding = self.pad_tensor_to_multiple(ref_to_synth, height_multiple=height_multiple, width_multiple=width_multiple)
+                    ref_img, fixed_padding = self.pad_tensor_to_multiple(ref_img, height_multiple=height_multiple, width_multiple=width_multiple)
 
-                    _, flow = self.flow_estimator(src_origin, ref_to_src, registration=True)
-                    _, flow_mr = self.flow_estimator(ref_to_src, src_origin, registration=True)
-                    ref = self.crop_tensor_to_original(ref, fixed_padding)
+                    _, flow = self.flow_estimator(input_img, ref_to_synth, registration=True)
+                    _, flow_mr = self.flow_estimator(ref_to_synth, input_img, registration=True)
+                    ref_img = self.crop_tensor_to_original(ref_img, fixed_padding)
                     flow = self.crop_tensor_to_original(flow, fixed_padding)
                 else:
                     raise ValueError("Invalid dam_type")
             elif self.flow_type == 'grad_icon':
-                height = src.shape[2]
-                batch_size = src.shape[0]
+                height = synth_img.shape[2]
+                batch_size = synth_img.shape[0]
                 flows = []
-                src = self.pad_height_to_384(src)
-                ref = self.pad_height_to_384(ref)
-                src, moving_padding = self.pad_tensor_to_multiple(src, height_multiple=384, width_multiple=320)
-                ref, fixed_padding = self.pad_tensor_to_multiple(ref, height_multiple=384, width_multiple=320)
+                synth_img = self.pad_height_to_384(synth_img)
+                ref_img = self.pad_height_to_384(ref_img)
+                synth_img, moving_padding = self.pad_tensor_to_multiple(synth_img, height_multiple=384, width_multiple=320)
+                ref_img, fixed_padding = self.pad_tensor_to_multiple(ref_img, height_multiple=384, width_multiple=320)
                 for i in range(batch_size): #Because of flow_estimator is trained on batch 1
-                    src_i = src[i:i+1]
-                    ref_i = ref[i:i+1]
+                    src_i = synth_img[i:i+1]
+                    ref_i = ref_img[i:i+1]
                     _, flow_i, _ = self.flow_estimator(src_i, ref_i)
                     flows.append(flow_i)
                 flow = torch.cat(flows, dim=0)
-                src = self.crop_height_to_original(src, height)
-                ref = self.crop_height_to_original(ref, height)
+                synth_img = self.crop_height_to_original(synth_img, height)
+                ref_img = self.crop_height_to_original(ref_img, height)
                 flow = self.crop_height_to_original(flow, height)
-                src = self.crop_tensor_to_original(src, fixed_padding)
-                ref = self.crop_tensor_to_original(ref, fixed_padding)
+                synth_img = self.crop_tensor_to_original(synth_img, fixed_padding)
+                ref_img = self.crop_tensor_to_original(ref_img, fixed_padding)
                 flow = self.crop_tensor_to_original(flow, fixed_padding)
             else:
-                flow = self.flow_estimator(src, ref)  # src가 이동 ref가 고정
+                flow = self.flow_estimator(synth_img, ref_img)  # src가 이동 ref가 고정
 
             if self.params.use_multiple_outputs:
-                src_lq_concat = torch.cat((src_origin, src, src_2), dim=1)
+                input_synthOut_concat = torch.cat((input_img, synth_img, synth_img2), dim=1)
             else:
-                src_lq_concat = torch.cat((src_origin, src), dim=1)
+                input_synthOut_concat = torch.cat((input_img, synth_img), dim=1)
             # q_feat = self.unet_q(src)
-            q_feat = self.unet_q(src_lq_concat)  # 발전시킨것
+            q_feat = self.unet_q(input_synthOut_concat)  # 발전시킨것
 
             if self.is_moved_feat:
-                k_feat = self.unet_k(moved) # 이건 zeroflow와 함께. moved를 key,value로 쓰기위해. 결과 꽤 좋더라?
+                k_feat = self.unet_k(moved_img) # 이건 zeroflow와 함께. moved를 key,value로 쓰기위해. 결과 꽤 좋더라?
             else:
                 if self.params.use_multiple_outputs:
-                    k_feat = self.unet_k(ref)
-                    k_feat_2 = self.unet_k_2(ref_2)
+                    k_feat = self.unet_k(ref_img)
+                    k_feat_2 = self.unet_k_2(ref_img2)
                 else:
-                    k_feat = self.unet_k(ref)
+                    k_feat = self.unet_k(ref_img)
 
             outputs = []
             for i in range(3):

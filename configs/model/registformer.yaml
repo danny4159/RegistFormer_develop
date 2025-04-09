@@ -94,6 +94,8 @@ params: # Other params
   use_autoencoder: False
   crop_size: ${data.crop_size} # [128,128] or [128,128,16]
   is_registration: False
+  skip_stage1_infer: False # Registformer: Use already synthesised initial output (Save inference memory, and time for training)
+
   #Ablation
   ran_shift: 10 #null # "Put null or Interger" / random shift to ground truth when calculating Contextual Loss
   flag_occlusionCTX: False # Occlusion masked contextual loss

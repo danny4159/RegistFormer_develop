@@ -82,11 +82,14 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
         return gc, nmi, fid, kid, sharpness
 
-    def forward(self, a: torch.Tensor, b: torch.Tensor):
+    def forward(self, a: torch.Tensor, b: torch.Tensor, c: Optional[torch.Tensor] = None):
         
         # Case1. Refernece guided generation
         if type(self.netG_A).__name__ in ["RegistFormer", "ProposedSynthesisModule"]:
-            merged_input = torch.cat((a, b), dim=1)
+            if c is not None:
+                merged_input = torch.cat((a, b, c), dim=1)
+            else:         
+                merged_input = torch.cat((a, b), dim=1)
             
             # Sliding window on inference
             if self.params.is_3d and not self.training:
@@ -115,7 +118,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
         # Case2. Normal generation
         return self.netG_A(a)
-
+        
     def model_step(self, batch: Any, is_3d=False):
         if type(self.netG_A).__name__ in ["AutoencoderKL", "AutoencoderKlMaisi"]:
             real_a, real_b = batch
@@ -186,14 +189,20 @@ class BaseModule_AtoB(LightningModule):  # single direction
             
             return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref # real: GT, fake: syn by Ref
 
-        else: 
+        else: # use_multiple_outputs=False, Single generation
             if self.params.use_misalign_simul == False: # Registformer
-                real_a, real_b = batch
-                # real_a = self.pad_slice_to_128(real_a, padding_value=-1)
-                # real_b = self.pad_slice_to_128(real_b, padding_value=-1)
-                fake_b = self.forward(real_a, real_b)
-                real_b_ref = None
-                return real_a, real_b, fake_b
+
+                if getattr(self.params, "skip_stage1_infer", False): # Registformer: Use already synthesised initial output (Save inference memory, and time for training)
+                    real_a, real_b, synth_b = batch
+                    fake_b = self.forward(real_a, real_b, synth_b)
+                    return real_a, real_b, fake_b
+                else:
+                    real_a, real_b = batch
+                    # real_a = self.pad_slice_to_128(real_a, padding_value=-1) # No on registformer
+                    # real_b = self.pad_slice_to_128(real_b, padding_value=-1)
+                    fake_b = self.forward(real_a, real_b)
+                    real_b_ref = None
+                    return real_a, real_b, fake_b
             else: # use_misalign_simul == True:
                 real_a, real_b, real_b_ref = batch
                 fake_b = self.forward(real_a, real_b_ref)
