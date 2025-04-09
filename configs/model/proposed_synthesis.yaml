@@ -81,4 +81,5 @@ params: # Other params
   nce_independent: false
   use_misalign_simul: ${data.use_misalign_simul}
   is_3d: ${data.is_3d}
+  crop_size: ${data.crop_size} # [128,128] or [128,128,16]
   is_registration: false
