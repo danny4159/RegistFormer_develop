@@ -161,62 +161,63 @@ class RegistFormer(nn.Module):
         if self.dam_ft:
             assert self.dam_path != None
         
-        if self.dam_type == "synthesis_meta":
-            from src.models.components.meta_synthesis import (
-                SynthesisMetaModule,
-            )   
+        if self.params.skip_stage1_infer == False:
+            if self.dam_type == "synthesis_meta":
+                from src.models.components.meta_synthesis import (
+                    SynthesisMetaModule,
+                )   
 
-            self.DAM = SynthesisMetaModule(
-                in_ch=self.src_ch,
-                feat_ch=self.dam_feat,
-                out_ch=self.src_ch,
-                load_path=self.dam_path,
-                requires_grad=self.dam_ft,
-            )
+                self.DAM = SynthesisMetaModule(
+                    in_ch=self.src_ch,
+                    feat_ch=self.dam_feat,
+                    out_ch=self.src_ch,
+                    load_path=self.dam_path,
+                    requires_grad=self.dam_ft,
+                )
 
-        elif self.dam_type == "proposed_synthesis":
-            from src.models.components.network_proposed_synthesis import ProposedSynthesisModule
-            self.DAM = ProposedSynthesisModule(input_nc=1, feat_ch=256, output_nc=1, demodulate=True)
-            checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
-            model_state_dict = checkpoint["state_dict"]
-            adjusted_state_dict = {k.replace("netG_A.", ""): v for k, v in model_state_dict.items()}
-            self.DAM.load_state_dict(adjusted_state_dict, strict=False)
-            self.DAM.to(device)
-            self.DAM.eval()
-            for param in self.DAM.parameters():
-                param.requires_grad = self.dam_ft
-
-            self._DAM_net_backup_weights = copy.deepcopy(self.DAM.state_dict()) 
-
-            if self.params.use_multiple_outputs: # FIXME: 나중에 수정
-                self.DAM_2 = ProposedSynthesisModule(input_nc=1, feat_ch=256, output_nc=1, demodulate=True)
-                checkpoint = torch.load(self.dam_path_2, map_location=lambda storage, loc: storage)
+            elif self.dam_type == "proposed_synthesis":
+                from src.models.components.network_proposed_synthesis import ProposedSynthesisModule
+                self.DAM = ProposedSynthesisModule(input_nc=1, feat_ch=256, output_nc=1, demodulate=True)
+                checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
                 model_state_dict = checkpoint["state_dict"]
-                adjusted_state_dict = {k.replace("netG_B.", ""): v for k, v in model_state_dict.items()}
-                self.DAM_2.load_state_dict(adjusted_state_dict, strict=False)
-                self.DAM_2.eval()
-                for param in self.DAM_2.parameters():
+                adjusted_state_dict = {k.replace("netG_A.", ""): v for k, v in model_state_dict.items()}
+                self.DAM.load_state_dict(adjusted_state_dict, strict=False)
+                self.DAM.to(device)
+                self.DAM.eval()
+                for param in self.DAM.parameters():
                     param.requires_grad = self.dam_ft
 
-        elif self.dam_type == "munit":
-            from src.models.components.network_adainGen import AdaINGen
-            self.DAM_A = AdaINGen(input_nc=1, output_nc=1, ngf=64)
-            checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
-            model_state_dict = checkpoint["state_dict"]
-            adjusted_state_dict = {k.replace("netG_A.", ""): v for k, v in model_state_dict.items()}
-            self.DAM_A.load_state_dict(adjusted_state_dict, strict=False)
-            self.DAM_A.eval()
-            for param in self.DAM_A.parameters():
-                param.requires_grad = self.dam_ft
+                self._DAM_net_backup_weights = copy.deepcopy(self.DAM.state_dict()) 
 
-            self.DAM_B = AdaINGen(input_nc=1, output_nc=1, ngf=64)
-            checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
-            model_state_dict = checkpoint["state_dict"]
-            adjusted_state_dict = {k.replace("netG_B.", ""): v for k, v in model_state_dict.items()}
-            self.DAM_B.load_state_dict(adjusted_state_dict, strict=False)
-            self.DAM_B.eval()
-            for param in self.DAM_B.parameters():
-                param.requires_grad = self.dam_ft
+                if self.params.use_multiple_outputs: # FIXME: 나중에 수정
+                    self.DAM_2 = ProposedSynthesisModule(input_nc=1, feat_ch=256, output_nc=1, demodulate=True)
+                    checkpoint = torch.load(self.dam_path_2, map_location=lambda storage, loc: storage)
+                    model_state_dict = checkpoint["state_dict"]
+                    adjusted_state_dict = {k.replace("netG_B.", ""): v for k, v in model_state_dict.items()}
+                    self.DAM_2.load_state_dict(adjusted_state_dict, strict=False)
+                    self.DAM_2.eval()
+                    for param in self.DAM_2.parameters():
+                        param.requires_grad = self.dam_ft
+
+            elif self.dam_type == "munit":
+                from src.models.components.network_adainGen import AdaINGen
+                self.DAM_A = AdaINGen(input_nc=1, output_nc=1, ngf=64)
+                checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
+                model_state_dict = checkpoint["state_dict"]
+                adjusted_state_dict = {k.replace("netG_A.", ""): v for k, v in model_state_dict.items()}
+                self.DAM_A.load_state_dict(adjusted_state_dict, strict=False)
+                self.DAM_A.eval()
+                for param in self.DAM_A.parameters():
+                    param.requires_grad = self.dam_ft
+
+                self.DAM_B = AdaINGen(input_nc=1, output_nc=1, ngf=64)
+                checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
+                model_state_dict = checkpoint["state_dict"]
+                adjusted_state_dict = {k.replace("netG_B.", ""): v for k, v in model_state_dict.items()}
+                self.DAM_B.load_state_dict(adjusted_state_dict, strict=False)
+                self.DAM_B.eval()
+                for param in self.DAM_B.parameters():
+                    param.requires_grad = self.dam_ft
 
         # Define feature extractor.
         # self.unet_q = Unet(src_ch, feat_dim, feat_dim)
