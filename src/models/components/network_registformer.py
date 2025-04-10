@@ -321,16 +321,15 @@ class RegistFormer(nn.Module):
                 synth_img = None
             assert input_img.shape == ref_img.shape, "Shapes of source and reference images mismatch."
             moved_img = None
-
             if self.dam_type == "proposed_synthesis" and self.params.skip_stage1_infer == False:
                 self.DAM.load_state_dict(self._DAM_net_backup_weights)
-                src_slices = []
-                for d in range(synth_img.shape[-1]):
-                    synth_slice = synth_img[:, :, :, :, d]
+                synth_slices = []
+                for d in range(input_img.shape[-1]):
+                    input_slice = input_img[:, :, :, :, d]
                     ref_slice = ref_img[:, :, :, :, d]
-                    merged_input_slice = torch.cat((synth_slice, ref_slice), dim=1)
-                    src_slices.append(self.DAM(merged_input_slice))
-                synth_img = torch.stack(src_slices, dim=-1)
+                    merged_input_slice = torch.cat((input_slice, ref_slice), dim=1)
+                    synth_slices.append(self.DAM(merged_input_slice))
+                synth_img = torch.stack(synth_slices, dim=-1)
 
             height_multiple = self.flow_size[0] if self.flow_size else 384 # FIXME: 나중에 수정
             width_multiple = self.flow_size[1] if self.flow_size else 320
