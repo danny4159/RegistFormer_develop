@@ -94,7 +94,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             # Sliding window on inference
             if self.params.is_3d and not self.training:
                 roi_size = tuple(self.params.crop_size)
-                inferer = SlidingWindowInferer(roi_size=roi_size, mode='gaussian', overlap=0.5, cval=-1, padding_mode='reflect', sigma_scale=1) # TODO: 가능한 가로 세로는 많이
+                inferer = SlidingWindowInferer(roi_size=roi_size, mode='gaussian', overlap=0.5, padding_mode='replicate') # TODO: 가능한 가로 세로는 많이
                 pred = inferer(inputs=merged_input, network=self.netG_A)
                 return pred
             else:

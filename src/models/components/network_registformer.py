@@ -303,8 +303,8 @@ class RegistFormer(nn.Module):
         self.conv4 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
         self.conv5 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
         # if self.params.use_autoencoder:
-        self.conv5_2 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
-        self.conv5_3 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
+        # self.conv5_2 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
+        # self.conv5_3 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
         if self.params.is_3d:
             if self.params.use_autoencoder:
                 self.conv6 = nn.Sequential(
@@ -420,8 +420,8 @@ class RegistFormer(nn.Module):
                 f5 = self.conv5(f4)
                 f5 = f5 + outputs[2] + f0
                 # if self.params.use_autoencoder:
-                f5 = self.conv5_2(f5)
-                f5 = self.conv5_3(f5)    
+                # f5 = self.conv5_2(f5)
+                # f5 = self.conv5_3(f5)    
 
             out = self.conv6(f5)
             # if self.params.use_autoencoder:
@@ -1220,8 +1220,8 @@ class Unet(nn.Module):
         super().__init__()
         self.conv_in = single_conv(in_ch, feat_ch, is_3d)
 
-        self.conv0 = double_conv_down(feat_ch, feat_ch, is_3d)
-        self.conv0_2 = double_conv_down(feat_ch, feat_ch, is_3d)
+        # self.conv0 = double_conv_down(feat_ch, feat_ch, is_3d)
+        # self.conv0_2 = double_conv_down(feat_ch, feat_ch, is_3d)
 
         self.conv1 = double_conv_down(feat_ch, feat_ch, is_3d)
         self.conv2 = double_conv_down(feat_ch, feat_ch, is_3d)
@@ -1232,8 +1232,8 @@ class Unet(nn.Module):
 
     def forward(self, x, for_nce=False):
         feat0 = self.conv_in(x)  # H, W
-        feat0 = self.conv0(feat0) #H/2, W/2
-        feat0 = self.conv0_2(feat0) #H/4, W/4
+        # feat0 = self.conv0(feat0) #H/2, W/2
+        # feat0 = self.conv0_2(feat0) #H/4, W/4
         feat1 = self.conv1(feat0)  # H/8, W/8
         feat2 = self.conv2(feat1)  # H/16, W/16
         feat3 = self.conv3(feat2)  # H/16, W/16
@@ -1282,7 +1282,7 @@ class Unet_Decode(nn.Module):
     
 
 class MultiheadAttention(nn.Module):
-    def __init__(self, feat_dim, n_head, k_size=5, d_k=None, d_v=None, attn=None, attn_type="softmax", is_3d=False):
+    def __init__(self, feat_dim, n_head, k_size=5, d_k=None, d_v=None, attn=None, attn_type="softmax", is_3d=False, k_depth=5):
         super().__init__()
         if d_k is None:
             d_k = feat_dim // n_head
@@ -1294,6 +1294,7 @@ class MultiheadAttention(nn.Module):
         self.d_k = d_k
         self.d_v = d_v
         self.is_3d = is_3d
+        self.k_depth = k_depth
 
         # pre-attention projection
         if is_3d:
@@ -1349,14 +1350,14 @@ class MultiheadAttention(nn.Module):
 
             n, c, h, w, d = q.shape
 
-            sample_grid = flow_to_grid_3d(flow, self.k_size)
+            sample_grid = flow_to_grid_3d(flow, self.k_size, k_depth=5)
 
-            sample_k_feat = flow_guide_sampler_3d(k, sample_grid, k_size=self.k_size)
-            sample_v_feat = flow_guide_sampler_3d(v, sample_grid, k_size=self.k_size)
+            sample_k_feat = flow_guide_sampler_3d(k, sample_grid, k_size=self.k_size, k_depth=self.k_depth)
+            sample_v_feat = flow_guide_sampler_3d(v, sample_grid, k_size=self.k_size, k_depth=self.k_depth)
 
             q = q.view(n, 1, n_head, d_k, h, w, d)
-            k = sample_k_feat.view(n, self.k_size**3, n_head, d_k, h, w, d)
-            v = sample_v_feat.view(n, self.k_size**3, n_head, d_v, h, w, d)
+            k = sample_k_feat.view(n, self.k_size**2 * self.k_depth, n_head, d_k, h, w, d)
+            v = sample_v_feat.view(n, self.k_size**2 * self.k_depth, n_head, d_v, h, w, d)
 
             if attn_type == "softmax":
                 q, attn = softmax_attention_3d(q, k, v)
@@ -1502,23 +1503,26 @@ def flow_to_grid(flow, k_size=5):
     # vgrid_scaled.requires_grad = False
     return vgrid_scaled  # n x k^2, h, w, 2  # [100, 48, 48, 2]
 
-def flow_to_grid_3d(flow, k_size=5):
+def flow_to_grid_3d(flow, k_size=5, k_depth=5):
     # flow (Tensor): Tensor with size (n, 3, h, w, d), normal value.
     # samples = flow + grid + shift
     # n, h, w, d, _ = flow.size()
     n, _, h, w, d = flow.size()  # [4, 2, 48, 48, 48]
 
-    padding = (k_size - 1) // 2
+    pad_hw = (k_size - 1) // 2
+    pad_d = (k_depth - 1) // 2
 
     grid_y, grid_x, grid_z = torch.meshgrid( # grid_x, grid_y = h, w
-        torch.arange(0, h), torch.arange(0, w), torch.arange(0, d)
+        torch.arange(0, h), torch.arange(0, w), torch.arange(0, d), indexing="ij"
     )  # [48, 48] , [48, 48]
-    grid_y = grid_y[None, ...].expand(k_size**3, -1, -1, -1).type_as(flow) # [k^2, 48, 48] # 복제하여 grid를 확장
-    grid_x = grid_x[None, ...].expand(k_size**3, -1, -1, -1).type_as(flow) # [k^2, 48, 48]
-    grid_z = grid_z[None, ...].expand(k_size**3, -1, -1, -1).type_as(flow) # [k^2, 48, 48]
+    grid_y = grid_y[None, ...].expand(k_size**2 * k_depth, -1, -1, -1).type_as(flow) # [k^2, 48, 48] # 복제하여 grid를 확장
+    grid_x = grid_x[None, ...].expand(k_size**2 * k_depth, -1, -1, -1).type_as(flow) # [k^2, 48, 48]
+    grid_z = grid_z[None, ...].expand(k_size**2 * k_depth, -1, -1, -1).type_as(flow) # [k^2, 48, 48]
     
-    shift = torch.arange(0, k_size).type_as(flow) - padding  # [k] -> -2,-1,0,1,2 (if k=5)
-    shift_y, shift_x, shift_z = torch.meshgrid(shift, shift, shift)  # [k, k, k]
+    shift_hw = torch.arange(-pad_hw, pad_hw + 1).type_as(flow)
+    shift_d = torch.arange(-pad_d, pad_d + 1).type_as(flow)
+    shift_y, shift_x, shift_z = torch.meshgrid(shift_hw, shift_hw, shift_d, indexing="ij")
+
     shift_y = shift_y.reshape(-1, 1, 1, 1).expand(-1, h, w, d)  # k^2, h, w, d  # [25, 48, 48, 48] # 첫번째 차원의 값에 따라 x,y방향으로 얼만큼씩 이동해야하는지. 일괄적으로 -2~2만큼 이동
     shift_x = shift_x.reshape(-1, 1, 1, 1).expand(-1, h, w, d)  # k^2, h, w
     shift_z = shift_z.reshape(-1, 1, 1, 1).expand(-1, h, w, d)  # k^2, h, w 
@@ -1536,7 +1540,7 @@ def flow_to_grid_3d(flow, k_size=5):
     )  # n, k^3, h, w, d, 3 # [4, 25, 48, 48, 48, 3]
     
     flow = flow.permute(0, 2, 3, 4, 1)[:, None, ...].expand(
-        -1, k_size**3, -1, -1, -1, -1
+        -1, k_size**2 * k_depth, -1, -1, -1, -1
     )  # [4, 25, 48, 48, 48, 2] 
 
     vgrid = samples_grid + flow  ## [4, 25, 48, 48, 48, 2]  [4, 25, 48, 48, 48, 2]
@@ -1576,13 +1580,14 @@ def flow_guide_sampler_3d(
     feat,
     vgrid_scaled,
     k_size=5,
+    k_depth=5,
     interp_mode="bilinear",
     padding_mode="zeros",
     align_corners=True,
 ):
     n, c, h, w, d = feat.size()
     feat = (
-        feat.view(n, 1, c, h, w, d).expand(-1, k_size**3, -1, -1, -1, -1).reshape(-1, c, h, w, d)
+        feat.view(n, 1, c, h, w, d).expand(-1, k_size**2 * k_depth, -1, -1, -1, -1).reshape(-1, c, h, w, d)
     )  # (nk^2, c, h, w, d)
     sample_feat = F.grid_sample(
         feat,
@@ -1591,6 +1596,77 @@ def flow_guide_sampler_3d(
         padding_mode=padding_mode,
         align_corners=align_corners,
     ).view(
-        n, k_size**3, c, h, w, d
+        n, k_size**2 * k_depth, c, h, w, d
     )  # [4, 25, 64, 48, 48, 48]
     return sample_feat
+
+
+# Original k^3
+# def flow_to_grid_3d(flow, k_size=5):
+#     # flow (Tensor): Tensor with size (n, 3, h, w, d), normal value.
+#     # samples = flow + grid + shift
+#     # n, h, w, d, _ = flow.size()
+#     n, _, h, w, d = flow.size()  # [4, 2, 48, 48, 48]
+
+#     padding = (k_size - 1) // 2
+
+#     grid_y, grid_x, grid_z = torch.meshgrid( # grid_x, grid_y = h, w
+#         torch.arange(0, h), torch.arange(0, w), torch.arange(0, d)
+#     )  # [48, 48] , [48, 48]
+#     grid_y = grid_y[None, ...].expand(k_size**3, -1, -1, -1).type_as(flow) # [k^2, 48, 48] # 복제하여 grid를 확장
+#     grid_x = grid_x[None, ...].expand(k_size**3, -1, -1, -1).type_as(flow) # [k^2, 48, 48]
+#     grid_z = grid_z[None, ...].expand(k_size**3, -1, -1, -1).type_as(flow) # [k^2, 48, 48]
+    
+#     shift = torch.arange(0, k_size).type_as(flow) - padding  # [k] -> -2,-1,0,1,2 (if k=5)
+#     shift_y, shift_x, shift_z = torch.meshgrid(shift, shift, shift)  # [k, k, k]
+#     shift_y = shift_y.reshape(-1, 1, 1, 1).expand(-1, h, w, d)  # k^2, h, w, d  # [25, 48, 48, 48] # 첫번째 차원의 값에 따라 x,y방향으로 얼만큼씩 이동해야하는지. 일괄적으로 -2~2만큼 이동
+#     shift_x = shift_x.reshape(-1, 1, 1, 1).expand(-1, h, w, d)  # k^2, h, w
+#     shift_z = shift_z.reshape(-1, 1, 1, 1).expand(-1, h, w, d)  # k^2, h, w 
+    
+#     samples_y = grid_y + shift_y  # k^2, h, w, d  # [25, 48, 48, 48]
+#     samples_x = grid_x + shift_x  # k^2, h, w, d
+#     samples_z = grid_z + shift_z  # k^2, h, w, d
+    
+#     samples_grid = torch.stack( 
+#         (samples_x, samples_y, samples_z), 4
+#     )  # k^3, h, w, d, 3 # [25, 48, 48, 48, 3]
+    
+#     samples_grid = samples_grid[None, ...].expand(
+#         n, -1, -1, -1, -1, -1
+#     )  # n, k^3, h, w, d, 3 # [4, 25, 48, 48, 48, 3]
+    
+#     flow = flow.permute(0, 2, 3, 4, 1)[:, None, ...].expand(
+#         -1, k_size**3, -1, -1, -1, -1
+#     )  # [4, 25, 48, 48, 48, 2] 
+
+#     vgrid = samples_grid + flow  ## [4, 25, 48, 48, 48, 2]  [4, 25, 48, 48, 48, 2]
+#     # scale grid to [-1,1]
+#     vgrid_x = 2.0 * vgrid[..., 0] / max(w - 1, 1) - 1.0
+#     vgrid_y = 2.0 * vgrid[..., 1] / max(h - 1, 1) - 1.0
+#     vgrid_z = 2.0 * vgrid[..., 2] / max(d - 1, 1) - 1.0
+#     vgrid_scaled = torch.stack((vgrid_x, vgrid_y, vgrid_z), dim=5).view(-1, h, w, d, 3)
+#     return vgrid_scaled  # n x k^2, h, w, d, 2  # [100, 48, 48, 48, 2]
+
+
+# def flow_guide_sampler_3d(
+#     feat,
+#     vgrid_scaled,
+#     k_size=5,
+#     interp_mode="bilinear",
+#     padding_mode="zeros",
+#     align_corners=True,
+# ):
+#     n, c, h, w, d = feat.size()
+#     feat = (
+#         feat.view(n, 1, c, h, w, d).expand(-1, k_size**3, -1, -1, -1, -1).reshape(-1, c, h, w, d)
+#     )  # (nk^2, c, h, w, d)
+#     sample_feat = F.grid_sample(
+#         feat,
+#         vgrid_scaled,
+#         mode=interp_mode,
+#         padding_mode=padding_mode,
+#         align_corners=align_corners,
+#     ).view(
+#         n, k_size**3, c, h, w, d
+#     )  # [4, 25, 64, 48, 48, 48]
+#     return sample_feat
