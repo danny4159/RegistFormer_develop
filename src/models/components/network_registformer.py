@@ -5,10 +5,14 @@ from torch.autograd import Variable
 import math
 import pdb
 import os
-from flash_attn import flash_attn_func
+# from flash_attn import flash_attn_func
 from src.models.components.network_voxelmorph_original import VecInt
 from src.models.components.performer import CrossAttention
 import copy
+import xformers.ops as xops
+
+from src.losses.contextual_loss import VGG_Model, ResNet_Model
+from monai.networks.nets import ResNetFeatures
 
 class RegistFormer(nn.Module):
     def __init__(self, **kwargs):
@@ -46,8 +50,6 @@ class RegistFormer(nn.Module):
         current_dir = os.path.dirname(__file__)
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
 
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu") # TODO: Put the proper number of gpu like "cuda:2"
-
         self.flow_model_path = os.path.join(project_root, self.flow_model_path)
         self.dam_path = os.path.join(project_root, self.dam_path)
         if self.params.use_multiple_outputs:
@@ -56,39 +58,48 @@ class RegistFormer(nn.Module):
 
         ############################# Autoencoder KL Maisi #############################
         if self.params.use_autoencoder:
-            from src.models.components.networks_define import define_G
-            
-            self.netK_A = define_G(netG_type='autoencoder_maisi_monai', 
-                                spatial_dims=3, 
-                                in_channels=1, 
-                                out_channels=1, 
-                                latent_channels=4, 
-                                num_channels=[64, 128, 256], 
-                                num_res_blocks=[2, 2, 2], 
-                                norm_num_groups=32, 
-                                norm_eps=1e-06, 
-                                attention_levels=[False, False, False], 
-                                with_encoder_nonlocal_attn=False, 
-                                with_decoder_nonlocal_attn=False, 
-                                use_checkpointing=False, 
-                                use_convtranspose=False, 
-                                norm_float16=False, 
-                                num_splits=8, 
-                                dim_split=1)
-            ckpt_path = "/home/sumin/registformer/RegistFormer_develop/pretrained/maisi/autoencoder_epoch273.pt"
-            ckpt = torch.load(ckpt_path, map_location=device)
-            ckpt_state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
-
-            if any(k.startswith("netK_A.") for k in ckpt_state_dict):
-                netK_A_state_dict = {k.replace("netK_A.", ""): v for k, v in ckpt_state_dict.items() if k.startswith("netK_A.")}
+            if self.params.use_resnet:
+                self.netK_A = ResNetFeatures(model_name="resnet18", 
+                                             pretrained=True,
+                                             spatial_dims=3,
+                                             in_channels=1,)
+                self.netK_A.eval()
+                for p in self.netK_A.parameters():
+                    p.requires_grad = False
+                self._autoencoderKL_net_backup_weights = copy.deepcopy(self.netK_A.state_dict()) 
             else:
-                netK_A_state_dict = ckpt_state_dict
-            self.netK_A.load_state_dict(netK_A_state_dict, strict=False)
-            self.netK_A.to(device)
-            self.netK_A.eval()
+                from src.models.components.networks_define import define_G
+                
+                self.netK_A = define_G(netG_type='autoencoder_maisi_monai', 
+                                    spatial_dims=3, 
+                                    in_channels=1, 
+                                    out_channels=1, 
+                                    latent_channels=4, 
+                                    num_channels=[64, 128, 256], 
+                                    num_res_blocks=[2, 2, 2], 
+                                    norm_num_groups=32, 
+                                    norm_eps=1e-06, 
+                                    attention_levels=[False, False, False], 
+                                    with_encoder_nonlocal_attn=False, 
+                                    with_decoder_nonlocal_attn=False, 
+                                    use_checkpointing=False, 
+                                    use_convtranspose=False, 
+                                    norm_float16=False, 
+                                    num_splits=8, 
+                                    dim_split=1)
+                ckpt_path = "/SSD5_8TB/Daniel/RegistFormer_develop/pretrained/maisi/autoencoder_epoch273.pt"
+                ckpt = torch.load(ckpt_path)
+                ckpt_state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
 
-            self._autoencoderKL_net_backup_weights = copy.deepcopy(self.netK_A.state_dict()) 
-        ################################################################################
+                if any(k.startswith("netK_A.") for k in ckpt_state_dict):
+                    netK_A_state_dict = {k.replace("netK_A.", ""): v for k, v in ckpt_state_dict.items() if k.startswith("netK_A.")}
+                else:
+                    netK_A_state_dict = ckpt_state_dict
+                self.netK_A.load_state_dict(netK_A_state_dict, strict=False)
+                self.netK_A.eval()
+
+                self._autoencoderKL_net_backup_weights = copy.deepcopy(self.netK_A.state_dict()) 
+            ################################################################################
 
 
         if self.flow_type == "voxelmorph":
@@ -110,11 +121,11 @@ class RegistFormer(nn.Module):
                                            src_feats=self.src_ch,
                                            trg_feats=self.ref_ch,
                                            unet_half_res=False,)
-            checkpoint = torch.load(self.flow_model_path, map_location=lambda storage, loc: storage)
+            checkpoint = torch.load(self.flow_model_path, map_location=lambda storage, loc: storage, weights_only=False)
+            # checkpoint = torch.load(self.flow_model_path, map_location=lambda storage, loc: storage)
             model_state_dict = checkpoint["state_dict"]
             adjusted_state_dict = {k.replace("netR_A.", ""): v for k, v in model_state_dict.items()}
             self.flow_estimator.load_state_dict(adjusted_state_dict, strict=False)
-            self.flow_estimator.to(device)
             self.flow_estimator.eval()
 
             self._regist_net_backup_weights = copy.deepcopy(self.flow_estimator.state_dict()) 
@@ -133,7 +144,8 @@ class RegistFormer(nn.Module):
                                                 src_feats=self.src_ch,
                                                 trg_feats=self.ref_ch,
                                                 unet_half_res=False)
-                checkpoint = torch.load(self.flow_model_path_2, map_location=lambda storage, loc: storage) 
+                checkpoint = torch.load(self.flow_model_path_2, map_location=lambda storage, loc: storage, weights_only=False)
+                # checkpoint = torch.load(self.flow_model_path_2, map_location=lambda storage, loc: storage) 
                 model_state_dict = checkpoint["state_dict"]
                 adjusted_state_dict = {k.replace("netR_A.", ""): v for k, v in model_state_dict.items()}
                 self.flow_estimator_2.load_state_dict(adjusted_state_dict, strict=False)
@@ -145,6 +157,8 @@ class RegistFormer(nn.Module):
         elif self.flow_type == "grad_icon":
             from src.models.components.network_grad_icon import GradICON
             self.flow_estimator = GradICON(batch_size=1, dimension=2, input_size=[384,320])
+            checkpoint = torch.load(self.flow_model_path, map_location=lambda storage, loc: storage, weights_only=False)
+
             checkpoint = torch.load(self.flow_model_path, map_location=lambda storage, loc: storage)
             model_state_dict = checkpoint["state_dict"]
             adjusted_state_dict = {k.replace("netR_A.", ""): v for k, v in model_state_dict.items()}
@@ -178,11 +192,11 @@ class RegistFormer(nn.Module):
             elif self.dam_type == "proposed_synthesis":
                 from src.models.components.network_proposed_synthesis import ProposedSynthesisModule
                 self.DAM = ProposedSynthesisModule(input_nc=1, feat_ch=256, output_nc=1, demodulate=True)
-                checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
+                # checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
+                checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage, weights_only=False)
                 model_state_dict = checkpoint["state_dict"]
                 adjusted_state_dict = {k.replace("netG_A.", ""): v for k, v in model_state_dict.items()}
                 self.DAM.load_state_dict(adjusted_state_dict, strict=False)
-                self.DAM.to(device)
                 self.DAM.eval()
                 for param in self.DAM.parameters():
                     param.requires_grad = self.dam_ft
@@ -191,7 +205,8 @@ class RegistFormer(nn.Module):
 
                 if self.params.use_multiple_outputs: # FIXME: 나중에 수정
                     self.DAM_2 = ProposedSynthesisModule(input_nc=1, feat_ch=256, output_nc=1, demodulate=True)
-                    checkpoint = torch.load(self.dam_path_2, map_location=lambda storage, loc: storage)
+                    checkpoint = torch.load(self.dam_path_2, map_location=lambda storage, loc: storage, weights_only=False)
+                    # checkpoint = torch.load(self.dam_path_2, map_location=lambda storage, loc: storage)
                     model_state_dict = checkpoint["state_dict"]
                     adjusted_state_dict = {k.replace("netG_B.", ""): v for k, v in model_state_dict.items()}
                     self.DAM_2.load_state_dict(adjusted_state_dict, strict=False)
@@ -202,7 +217,8 @@ class RegistFormer(nn.Module):
             elif self.dam_type == "munit":
                 from src.models.components.network_adainGen import AdaINGen
                 self.DAM_A = AdaINGen(input_nc=1, output_nc=1, ngf=64)
-                checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
+                checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage, weights_only=False)
+                # checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
                 model_state_dict = checkpoint["state_dict"]
                 adjusted_state_dict = {k.replace("netG_A.", ""): v for k, v in model_state_dict.items()}
                 self.DAM_A.load_state_dict(adjusted_state_dict, strict=False)
@@ -211,7 +227,8 @@ class RegistFormer(nn.Module):
                     param.requires_grad = self.dam_ft
 
                 self.DAM_B = AdaINGen(input_nc=1, output_nc=1, ngf=64)
-                checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
+                checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage, weights_only=False)
+                # checkpoint = torch.load(self.dam_path, map_location=lambda storage, loc: storage)
                 model_state_dict = checkpoint["state_dict"]
                 adjusted_state_dict = {k.replace("netG_B.", ""): v for k, v in model_state_dict.items()}
                 self.DAM_B.load_state_dict(adjusted_state_dict, strict=False)
@@ -225,12 +242,18 @@ class RegistFormer(nn.Module):
             self.unet_q = Unet(self.src_ch * 3, self.feat_dim, self.feat_dim, self.params.is_3d)
         else:
             if self.params.use_autoencoder:
-                self.unet_q = Unet(self.src_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
+                if self.params.use_resnet:
+                    self.unet_q_noDownsample = Unet(self.src_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
+                else:
+                    self.unet_q = Unet(self.src_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
             else:
                 self.unet_q = Unet(self.src_ch * 2, self.feat_dim, self.feat_dim, self.params.is_3d)
 
         if self.params.use_autoencoder:
-            self.unet_k = Unet(self.ref_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
+            if self.params.use_resnet:
+                    self.unet_k_noDownsample = Unet(self.src_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
+            else:
+                self.unet_k = Unet(self.ref_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
         else:
             self.unet_k = Unet(self.ref_ch, self.feat_dim, self.feat_dim, self.params.is_3d)
 
@@ -279,10 +302,13 @@ class RegistFormer(nn.Module):
         self.conv3 = double_conv(self.feat_dim, self.feat_dim, self.params.is_3d)
         self.conv4 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
         self.conv5 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
+        # if self.params.use_autoencoder:
+        self.conv5_2 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
+        self.conv5_3 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
         if self.params.is_3d:
             if self.params.use_autoencoder:
                 self.conv6 = nn.Sequential(
-                    single_conv(self.feat_dim, self.feat_dim, self.params.is_3d), nn.Conv3d(self.feat_dim, self.out_ch*4, 3, 1, 1)
+                    single_conv(self.feat_dim, self.feat_dim, self.params.is_3d), nn.Conv3d(self.feat_dim, self.out_ch, 3, 1, 1) #  self.out_ch*4, 3, 1, 1) # 그냥 Autoencoder로 decoding 안하려고
                 )
             else:   
                 self.conv6 = nn.Sequential(
@@ -345,15 +371,27 @@ class RegistFormer(nn.Module):
                 flow = self.crop_tensor_to_original_3d(flow, fixed_padding)
 
             if self.params.use_autoencoder:
-                self.netK_A.load_state_dict(self._autoencoderKL_net_backup_weights)
-                input_synthOut_concat = synth_img #Can't use two channel on autoencoder
-                input_synthOut_concat = self.netK_A.encoder(input_synthOut_concat)
-                ref_img = self.netK_A.encoder(ref_img)
+                if self.params.use_resnet:
+                    self.netK_A.load_state_dict(self._autoencoderKL_net_backup_weights)
+                    input_synthOut_concat = synth_img
+                    input_synthOut_concat_list = self.netK_A(input_synthOut_concat)
+                    ref_img_list = self.netK_A(ref_img)
+                    input_synthOut_concat = input_synthOut_concat_list[3]
+                    ref_img = ref_img_list[3]
+                else:
+                    self.netK_A.load_state_dict(self._autoencoderKL_net_backup_weights)
+                    input_synthOut_concat = synth_img #Can't use two channel on autoencoder
+                    input_synthOut_concat = self.netK_A.encoder(input_synthOut_concat)
+                    ref_img = self.netK_A.encoder(ref_img)
             else:
                 input_synthOut_concat = torch.cat((input_img, synth_img), dim=1)
             
-            q_feat = self.unet_q(input_synthOut_concat)
-            k_feat = self.unet_k(ref_img)
+            if self.params.use_resnet:
+                q_feat = self.unet_q_noDownsample(input_synthOut_concat)
+                k_feat = self.unet_k_noDownsample(ref_img)
+            else:
+                q_feat = self.unet_q(input_synthOut_concat)
+                k_feat = self.unet_k(ref_img)
 
             outputs = []
             for i in range(3):
@@ -381,13 +419,32 @@ class RegistFormer(nn.Module):
                 f4 = f4 + outputs[1] + f1
                 f5 = self.conv5(f4)
                 f5 = f5 + outputs[2] + f0
+                # if self.params.use_autoencoder:
+                f5 = self.conv5_2(f5)
+                f5 = self.conv5_3(f5)    
 
             out = self.conv6(f5)
-            if self.params.use_autoencoder:
-                out = self.netK_A.decoder(out)
-            out = torch.tanh(out)
+            # if self.params.use_autoencoder:
+            #     out = self.netK_A.decoder(out)
+            if self.params.norm_ZeroToOne:
+                out = torch.sigmoid(out)
+            else:
+                out = torch.tanh(out)
             return out
         
+
+####################################################################################################################################
+####################################################################################################################################
+####################################################################################################################################
+####################################################################################################################################
+####################################################################################################################################
+####################################################################################################################################
+####################################################################################################################################
+####################################################################################################################################
+####################################################################################################################################
+####################################################################################################################################
+
+
         else: # 2D generation
             input_img = merged_input[:, :1, :, :]
             if self.params.use_multiple_outputs:
@@ -403,7 +460,7 @@ class RegistFormer(nn.Module):
 
             if self.dam_type == "dam" or self.dam_type == "proposed_synthesis":
                 self.DAM.load_state_dict(self._DAM_net_backup_weights)
-                merged_input = torch.cat((synth_img, ref_img), dim=1)
+                merged_input = torch.cat((input_img, ref_img), dim=1)
                 synth_img = self.DAM(merged_input)  # [4, 3, 256, 256] #FIXME: 나중에 수정
                 if self.params.use_multiple_outputs:
                     merged_input_2 = torch.cat((synth_img, ref_img2), dim=1)
@@ -581,6 +638,15 @@ class RegistFormer(nn.Module):
             return out
 
 
+
+
+####################################################################################################################################
+####################################################################################################################################
+
+
+
+
+
     def pad_tensor_to_multiple(self, tensor, height_multiple, width_multiple):
         _, _, h, w = tensor.shape
         h_pad = (height_multiple - h % height_multiple) % height_multiple
@@ -714,6 +780,66 @@ def resize_flow_3d(flow, size_type, sizes, interp_mode="trilinear", align_corner
 
     return resized_flow
 
+# Ver1
+# def xformers_attention_global(q, k, v):
+#     q = q.to(torch.float16)
+#     k = k.to(torch.float16)
+#     v = v.to(torch.float16)
+#     """
+#     q: [B, 1, n_head, d, H, W]
+#     k: [B, k², n_head, d, H, W]
+#     v: [B, k², n_head, d, H, W]
+
+#     이들을 xFormers memory-efficient attention 형식 [B, M, H, K]에 맞춰 reshape하여
+#     글로벌 attention으로 계산.
+#     """
+#     B, _, n_head, d, H, W = q.shape
+#     k_sq = k.shape[1]
+
+#     # reshape q: [B, 1, nhead, d, H, W] → [B, 1, H*W*nhead, d]
+#     q = q.permute(0, 2, 4, 5, 1, 3).reshape(B, H * W, n_head, d)
+#     k = k.permute(0, 2, 4, 5, 1, 3).reshape(B, H * W * k_sq, n_head, d)
+#     v = v.permute(0, 2, 4, 5, 1, 3).reshape(B, H * W * k_sq, n_head, d) 
+#     # q = q.permute(0, 2, 4, 5, 1, 3).contiguous().reshape(B, 1, n_head * H * W, d)
+
+#     # # reshape k, v: [B, k², nhead, d, H, W] → [B, k², H*W*nhead, d]
+#     # k = k.permute(0, 2, 4, 5, 1, 3).contiguous().reshape(B, k_sq, n_head * H * W, d)
+#     # v = v.permute(0, 2, 4, 5, 1, 3).contiguous().reshape(B, k_sq, n_head * H * W, d)
+
+#     # xFormers attention expects [B, Mq, H, K]
+#     # 여기서 H=nhead*H*W, Mq=1 (local q), Mkv=k²
+#     # -> Mq와 Mkv는 바꾸어도 됨, 양쪽 시퀀스 길이만 맞으면 OK
+#     out = xops.memory_efficient_attention(q, k, v)  # [B, 1, nhead*H*W, d]
+
+#     # reshape back: [B, 1, nhead*H*W, d] → [B, nhead, d, H, W]
+#     out = out.squeeze(1).reshape(B, n_head, H, W, d).permute(0, 1, 4, 2, 3)
+
+#     return out, None
+
+# Ver2
+def xformers_attention_global(q, k, v):
+    q = q.to(torch.float16)
+    k = k.to(torch.float16)
+    v = v.to(torch.float16)
+
+    B, _, n_head, d, H, W = q.shape
+    k_sq = k.shape[1]
+
+    # Reshape q: [B, 1, n_head, d, H, W] → [B, 1, n_head*d, H*W]
+    q = q.permute(0, 2, 3, 4, 5, 1).reshape(B, n_head * d, H * W, 1).permute(0, 3, 1, 2)
+
+    # Reshape k, v: [B, k², n_head, d, H, W] → [B, k², n_head*d, H*W]
+    k = k.permute(0, 2, 3, 4, 5, 1).reshape(B, n_head * d, H * W, k_sq).permute(0, 3, 1, 2)
+    v = v.permute(0, 2, 3, 4, 5, 1).reshape(B, n_head * d, H * W, k_sq).permute(0, 3, 1, 2)
+
+    # xFormers expects: [B, Mq, H, K]
+    out = xops.memory_efficient_attention(q, k, v)  # [B, 1, H*W, n_head*d]
+
+    # Reshape back: [B, 1, H*W, n_head*d] → [B, n_head, d, H, W]
+    out = out.squeeze(1).reshape(B, H, W, n_head, d).permute(0, 3, 4, 1, 2)
+
+    return out, None
+
 def softmax_attention(q, k, v):
     # n x 1(k^2) x nhead x d x h x w
     h, w = q.shape[-2], q.shape[-1]
@@ -834,7 +960,7 @@ def flash_attention(q, k, v):
     v = v.permute(0, 2, 3, 1, 4).reshape(batch_size, seqlen_kv, num_heads, head_size)  # (batch_size, seqlen_kv, num_heads, head_size)
 
     # Print shapes for debugging
-    print(f"q shape: {q.shape}, k shape: {k.shape}, v shape: {v.shape}")
+    # print(f"q shape: {q.shape}, k shape: {k.shape}, v shape: {v.shape}")
 
     # Apply flash attention
     output = flash_attn_func(q=q, k=k, v=v)
@@ -1094,6 +1220,9 @@ class Unet(nn.Module):
         super().__init__()
         self.conv_in = single_conv(in_ch, feat_ch, is_3d)
 
+        self.conv0 = double_conv_down(feat_ch, feat_ch, is_3d)
+        self.conv0_2 = double_conv_down(feat_ch, feat_ch, is_3d)
+
         self.conv1 = double_conv_down(feat_ch, feat_ch, is_3d)
         self.conv2 = double_conv_down(feat_ch, feat_ch, is_3d)
         self.conv3 = double_conv(feat_ch, feat_ch, is_3d)
@@ -1103,19 +1232,54 @@ class Unet(nn.Module):
 
     def forward(self, x, for_nce=False):
         feat0 = self.conv_in(x)  # H, W
-        feat1 = self.conv1(feat0)  # H/2, W/2
-        feat2 = self.conv2(feat1)  # H/4, W/4
-        feat3 = self.conv3(feat2)  # H/4, W/4
-        feat3 = feat3 + feat2  # H/4
-        feat4 = self.conv4(feat3)  # H/2, W/2
-        feat4 = feat4 + feat1  # H/2, W/2
-        feat5 = self.conv5(feat4)  # H
-        feat5 = feat5 + feat0  # H
+        feat0 = self.conv0(feat0) #H/2, W/2
+        feat0 = self.conv0_2(feat0) #H/4, W/4
+        feat1 = self.conv1(feat0)  # H/8, W/8
+        feat2 = self.conv2(feat1)  # H/16, W/16
+        feat3 = self.conv3(feat2)  # H/16, W/16
+        feat3 = feat3 + feat2  # H/16
+        feat4 = self.conv4(feat3)  # H/8, W/8
+        feat4 = feat4 + feat1  # H/8, W/8
+        feat5 = self.conv5(feat4)  # H/4
+        feat5 = feat5 + feat0  # H/4
         feat6 = self.conv6(feat5)
         if for_nce:
             return [feat0, feat1, feat2, feat3, feat4, feat5, feat6]
         return feat0, feat1, feat2, feat3, feat4, feat6
+    
+    # Original
+    # def forward(self, x, for_nce=False):
+    #     feat0 = self.conv_in(x)  # H, W
+    #     feat1 = self.conv1(feat0)  # H/2, W/2
+    #     feat2 = self.conv2(feat1)  # H/4, W/4
+    #     feat3 = self.conv3(feat2)  # H/4, W/4
+    #     feat3 = feat3 + feat2  # H/4
+    #     feat4 = self.conv4(feat3)  # H/2, W/2
+    #     feat4 = feat4 + feat1  # H/2, W/2
+    #     feat5 = self.conv5(feat4)  # H
+    #     feat5 = feat5 + feat0  # H
+    #     feat6 = self.conv6(feat5)
+    #     if for_nce:
+    #         return [feat0, feat1, feat2, feat3, feat4, feat5, feat6]
+    #     return feat0, feat1, feat2, feat3, feat4, feat6
 
+class Unet_Decode(nn.Module):
+    def __init__(self, in_ch, feat_ch, out_ch, is_3d=False):
+        super().__init__()
+        self.conv3 = double_conv(in_ch, feat_ch, is_3d)
+        self.conv4 = double_conv_up(feat_ch, feat_ch, is_3d)
+        self.conv5 = double_conv_up(feat_ch, feat_ch, is_3d)
+        self.conv6 = double_conv(feat_ch, out_ch, is_3d)
+
+    def forward(self, x, for_nce=False): #TODO: skip connection 할수있으면 해
+        feat3 = self.conv3(x)
+        feat4 = self.conv4(feat3)         
+        feat5 = self.conv5(feat4)         
+        feat6 = self.conv6(feat5)
+        if for_nce:
+            return [None, None, None, feat3, feat4, feat5, feat6]
+        return None, None, None, feat3, feat4, feat6
+    
 
 class MultiheadAttention(nn.Module):
     def __init__(self, feat_dim, n_head, k_size=5, d_k=None, d_v=None, attn=None, attn_type="softmax", is_3d=False):
@@ -1283,6 +1447,8 @@ class MultiheadAttention(nn.Module):
             elif attn_type == "flash":
                 q = flash_attention(q, k, v)
                 attn = None
+            elif attn_type == "xformers2d":
+                q, attn = xformers_attention_global(q, k, v)
             else:
                 raise NotImplementedError(f"Unknown attention type {attn_type}")
 

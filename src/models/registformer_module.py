@@ -7,6 +7,9 @@ from src.losses.mind_loss import MINDLoss
 from src.losses.contextual_loss import Contextual_Loss, VGG_Model
 from src.losses.occlusion_contextual_loss import OcclusionContextualLoss
 from src.losses.patch_nce_loss import PatchNCELoss
+from src.losses.mind_loss_3d import MINDLoss3D
+from src.losses.gan_loss_3d import GANLoss3D
+from src.losses.mutual_information_loss import MutualInformation # TODO: data norm 0~1
 
 from src.models.base_module_AtoB import BaseModule_AtoB
 from src import utils
@@ -46,8 +49,8 @@ class RegistFormerModule(BaseModule_AtoB):
         # loss function
         # style_feat_layers = {"conv_4_4": 1.0} 
         # style_feat_layers = {"conv_2_2": 1.0, "conv_3_2": 1.0, "conv_4_2": 1.0}
-        style_feat_layers = {"conv_1_2": 1.0, "conv_2_2": 1.0, "conv_3_2": 1.0} # JBHI version # CTXLoss는 feature에서 matching point를 찾는거니 low lever로 해서 CT의 texture가 그대로 남아있어야 잘 반영될 것
-        # style_feat_layers = {"conv_2_2": 1.0, "conv_3_2": 1.0, "conv_4_2": 1.0, "conv_4_4": 1.0} # Miccai version # Memory saving
+        # style_feat_layers = {"conv_1_2": 1.0, "conv_2_2": 1.0, "conv_3_2": 1.0} # JBHI version # CTXLoss는 feature에서 matching point를 찾는거니 low lever로 해서 CT의 texture가 그대로 남아있어야 잘 반영될 것
+        style_feat_layers = {"conv_2_2": 1.0, "conv_3_2": 1.0, "conv_4_2": 1.0, "conv_4_4": 1.0} # Miccai version # Memory saving
         
         if params.flag_occlusionCTX:
             self.criterionCTX = OcclusionContextualLoss(flow_model_path=self.params.flow_model_path) if params.lambda_ctx != 0 else None
@@ -61,6 +64,12 @@ class RegistFormerModule(BaseModule_AtoB):
         self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size) if params.lambda_nce != 0 else None 
         
         self.criterionL1 = torch.nn.L1Loss() if params.lambda_l1 != 0 else None
+
+        self.criterionGAN3D = GANLoss3D(gan_type="lsgan") if params.lambda_gan_3d != 0 else None
+
+        self.criterionMIND3D = MINDLoss3D() if params.lambda_mind_3d != 0 else None
+
+        self.criterionMutualInformation = MutualInformation() if params.lambda_mutual_information != 0 else None
 
         # PatchNCE specific initializations
         self.flip_equivariance = params.flip_equivariance
@@ -232,6 +241,22 @@ class RegistFormerModule(BaseModule_AtoB):
             self.log("L1_Loss", loss_L1.detach(), prog_bar=True)
             loss_G += loss_L1
 
+        if self.criterionGAN3D:
+            pred_fake = self.netD_A(fake_b)
+            loss_GAN_b = self.criterionGAN3D(pred_fake, True) * self.params.lambda_gan_3d
+            self.log("GAN_b_Loss", loss_GAN_b.detach(), prog_bar=True)
+            loss_G += loss_GAN_b
+            
+        if self.criterionMIND3D:
+            loss_MIND = self.criterionMIND3D(real_a, fake_b) * self.params.lambda_mind_3d
+            self.log("MIND_Loss", loss_MIND.detach(), prog_bar=True)
+            loss_G += loss_MIND
+            
+        if self.criterionMutualInformation:
+            loss_MutualInformation = self.criterionMutualInformation((real_a + 1) / 2, (fake_b + 1) / 2) * self.params.lambda_mutual_information
+            self.log("MutualInformation_Loss", loss_MutualInformation.detach(), prog_bar=True)
+            loss_G += loss_MutualInformation
+            
         return loss_G   
 
     def training_step(self, batch: Any, batch_idx: int):

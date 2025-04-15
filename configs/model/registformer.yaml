@@ -51,6 +51,7 @@ netG_A:
 
 netD_A:
   _target_: src.models.components.networks_define.define_D
+  netD: basic # basic3D
   input_nc: 1
   ndf: 64
   # norm: 'instance'
@@ -81,6 +82,9 @@ params: # Other params
   lambda_mind: 0 # 1 
   lambda_nce: 0.1
   lambda_l1: 0
+  lambda_gan_3d: 0
+  lambda_mind_3d: 0
+  lambda_mutual_information: 0
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
@@ -92,9 +96,11 @@ params: # Other params
   use_misalign_simul: ${data.use_misalign_simul}
   is_3d: ${data.is_3d}
   use_autoencoder: False
+  use_resnet: False # use_autoencoder가 True라면 use_resnet은 추가 설정.
   crop_size: ${data.crop_size} # [128,128] or [128,128,16]
   is_registration: False
   skip_stage1_infer: False # Registformer: Use already synthesised initial output (Save inference memory, and time for training)
+  norm_ZeroToOne: ${data.norm_ZeroToOne}
 
   #Ablation
   ran_shift: 10 #null # "Put null or Interger" / random shift to ground truth when calculating Contextual Loss

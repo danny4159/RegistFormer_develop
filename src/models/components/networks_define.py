@@ -87,6 +87,42 @@ class Downsample(nn.Module):
             return F.conv2d(
                 self.pad(inp), self.filt, stride=self.stride, groups=inp.shape[1]
             )
+        
+class Downsample3D(nn.Module):
+    def __init__(self, channels, filt_size=3, stride=2, pad_off=0, pad_type="reflect"):
+        super(Downsample3D, self).__init__()
+        self.filt_size = filt_size
+        self.stride = stride
+        self.pad_off = pad_off
+        self.channels = channels
+
+        pad_sizes = [
+            int(1.0 * (filt_size - 1) / 2),
+            int(np.ceil(1.0 * (filt_size - 1) / 2)),
+            int(1.0 * (filt_size - 1) / 2),
+            int(np.ceil(1.0 * (filt_size - 1) / 2)),
+            int(1.0 * (filt_size - 1) / 2),
+            int(np.ceil(1.0 * (filt_size - 1) / 2)),
+        ]
+        self.pad_sizes = [p + pad_off for p in pad_sizes]
+
+        # 1D 필터 만들고 외적하여 3D 필터 구성
+        a = get_filter(filt_size).numpy()  # shape: (filt_size, filt_size)
+        a_1d = np.sqrt(a[0]) if filt_size == 1 else np.sqrt(np.sum(a, axis=0))  # 추정
+        filt3d = np.outer(a_1d, a_1d)
+        filt3d = np.outer(filt3d.reshape(-1), a_1d).reshape(filt_size, filt_size, filt_size)
+        filt3d = torch.Tensor(filt3d)
+        filt3d = filt3d / torch.sum(filt3d)
+        self.register_buffer("filt", filt3d[None, None, :, :, :].repeat((channels, 1, 1, 1, 1)))
+
+        self.pad = nn.ReplicationPad3d(self.pad_sizes)  # 3D용 패딩
+
+    def forward(self, x):
+        if self.filt_size == 1 and self.pad_off == 0:
+            return x[:, :, ::self.stride, ::self.stride, ::self.stride]
+        else:
+            x = self.pad(x)
+            return F.conv3d(x, self.filt, stride=self.stride, groups=self.channels)
 
 
 def get_pad_layer(pad_type):
@@ -130,6 +166,17 @@ def get_norm_layer(norm_type="instance"):
 
     else:
         raise NotImplementedError("normalization layer [%s] is not found" % norm_type)
+    return norm_layer
+
+def get_norm_layer_3d(norm_type="instance"):
+    if norm_type == "batch":
+        norm_layer = functools.partial(nn.BatchNorm3d, affine=True, track_running_stats=True)
+    elif norm_type == "instance":
+        norm_layer = functools.partial(nn.InstanceNorm3d, affine=False, track_running_stats=False)
+    elif norm_type == "none":
+        def norm_layer(x): return Identity()
+    else:
+        raise NotImplementedError("Normalization layer [%s] is not found" % norm_type)
     return norm_layer
 
 
@@ -316,10 +363,21 @@ def define_D(
     The discriminator has been initialized by <init_net>. It uses Leaky RELU for non-linearity.
     """
     net = None
-    norm_layer = get_norm_layer(norm_type=norm)
+    if netD in ["basic3D"]:
+        norm_layer = get_norm_layer_3d(norm_type=norm)
+    else:
+        norm_layer = get_norm_layer(norm_type=norm)
 
     if netD == "basic":  # default PatchGAN classifier
         net = NLayerDiscriminator(
+            input_nc,
+            ndf,
+            n_layers=3,
+            norm_layer=norm_layer,
+            no_antialias=no_antialias,
+        )
+    elif netD == "basic3D":
+        net = NLayerDiscriminator3D(
             input_nc,
             ndf,
             n_layers=3,
@@ -494,8 +552,8 @@ class NLayerDiscriminator(nn.Module):
             if self.gan_type == "lsgan":
                 loss += torch.mean((out0 - 0) ** 2) + torch.mean((out1 - 1) ** 2)
             elif self.gan_type == "nsgan":
-                all0 = Variable(torch.zeros_like(out0.data).cuda(), requires_grad=False)
-                all1 = Variable(torch.ones_like(out1.data).cuda(), requires_grad=False)
+                all0 = Variable(torch.zeros_like(out0.data).to(out0.device), requires_grad=False)
+                all1 = Variable(torch.ones_like(out1.data).to(out1.device), requires_grad=False)
                 loss += torch.mean(
                     F.binary_cross_entropy(F.sigmoid(out0), all0)
                     + F.binary_cross_entropy(F.sigmoid(out1), all1)
@@ -516,6 +574,144 @@ class NLayerDiscriminator(nn.Module):
                 loss += torch.mean(F.binary_cross_entropy(F.sigmoid(out0), all1))
             else:
                 assert 0, "Unsupported GAN type: {}".format(self.gan_type)
+        return loss
+    
+
+
+class NLayerDiscriminator3D(nn.Module):
+    """3D PatchGAN Discriminator"""
+
+    def __init__(
+        self,
+        input_nc,
+        ndf=64,
+        n_layers=3,
+        norm_layer=nn.BatchNorm3d,
+        no_antialias=False,
+        gan_type="lsgan"
+    ):
+        """
+        Parameters:
+            input_nc (int)  -- number of channels in input volume
+            ndf (int)       -- number of filters in the last conv layer
+            n_layers (int)  -- number of conv layers in the discriminator
+            norm_layer      -- normalization layer
+            no_antialias    -- use downsampling instead of anti-aliasing
+            gan_type (str)  -- "lsgan" or "nsgan"
+        """
+        super(NLayerDiscriminator3D, self).__init__()
+        self.gan_type = gan_type
+
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm3d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm3d
+
+        kw = 3
+        padw = 1
+
+        if no_antialias:
+            sequence = [
+                nn.Conv3d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw),
+                nn.LeakyReLU(0.2, True),
+            ]
+        else:
+            sequence = [
+                nn.Conv3d(input_nc, ndf, kernel_size=kw, stride=1, padding=padw),
+                nn.LeakyReLU(0.2, True),
+                Downsample3D(ndf),
+            ]
+
+        nf_mult = 1
+        nf_mult_prev = 1
+        for n in range(1, n_layers): # total 2 times
+            nf_mult_prev = nf_mult
+            nf_mult = min(2 ** n, 8)
+            if no_antialias:
+                sequence += [
+                    nn.Conv3d(
+                        ndf * nf_mult_prev,
+                        ndf * nf_mult,
+                        kernel_size=kw,
+                        stride=2,
+                        padding=padw,
+                        bias=use_bias,
+                    ),
+                    norm_layer(ndf * nf_mult),
+                    nn.LeakyReLU(0.2, True),
+                ]
+            else:
+                sequence += [
+                    nn.Conv3d(
+                        ndf * nf_mult_prev,
+                        ndf * nf_mult,
+                        kernel_size=kw,
+                        stride=1,
+                        padding=padw,
+                        bias=use_bias,
+                    ),
+                    norm_layer(ndf * nf_mult),
+                    nn.LeakyReLU(0.2, True),
+                    # Downsample3D(ndf * nf_mult),
+                ]
+                if n != n_layers - 1: # Skip at the end of for. In order to downsample 2 times. 
+                    sequence.append(Downsample3D(ndf * nf_mult))
+
+        nf_mult_prev = nf_mult
+        nf_mult = min(2 ** n_layers, 8)
+        sequence += [
+            nn.Conv3d(
+                ndf * nf_mult_prev,
+                ndf * nf_mult,
+                kernel_size=kw,
+                stride=1,
+                padding=padw,
+                bias=use_bias,
+            ),
+            norm_layer(ndf * nf_mult),
+            nn.LeakyReLU(0.2, True),
+        ]
+
+        sequence += [
+            nn.Conv3d(ndf * nf_mult, 1, kernel_size=3, stride=1, padding=padw) # Kernel to 3 -> Don't change spatial size
+        ]
+
+        self.model = nn.Sequential(*sequence)
+
+    def forward(self, input):
+        return self.model(input)
+
+    def calc_dis_loss(self, input_fake, input_real):
+        # calculate the loss to train D
+        outs0 = self.forward(input_fake)
+        outs1 = self.forward(input_real)
+        loss = 0
+
+        if self.gan_type == "lsgan":
+            loss += torch.mean((outs0 - 0) ** 2) + torch.mean((outs1 - 1) ** 2)
+        elif self.gan_type == "nsgan":
+            all0 = Variable(torch.zeros_like(outs0.data).cuda(), requires_grad=False)
+            all1 = Variable(torch.ones_like(outs1.data).cuda(), requires_grad=False)
+            loss += torch.mean(
+                F.binary_cross_entropy(F.sigmoid(outs0), all0)
+                + F.binary_cross_entropy(F.sigmoid(outs1), all1)
+            )
+        else:
+            raise NotImplementedError(f"Unsupported GAN type: {self.gan_type}")
+        return loss
+
+    def calc_gen_loss(self, input_fake):
+        # calculate the loss to train G
+        outs0 = self.forward(input_fake)
+        loss = 0
+
+        if self.gan_type == "lsgan":
+            loss += torch.mean((outs0 - 1) ** 2)
+        elif self.gan_type == "nsgan":
+            all1 = Variable(torch.ones_like(outs0.data).cuda(), requires_grad=False)
+            loss += torch.mean(F.binary_cross_entropy(F.sigmoid(outs0), all1))
+        else:
+            raise NotImplementedError(f"Unsupported GAN type: {self.gan_type}")
         return loss
 
 class PixelDiscriminator(nn.Module):

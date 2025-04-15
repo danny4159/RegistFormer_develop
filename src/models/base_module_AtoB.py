@@ -94,7 +94,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             # Sliding window on inference
             if self.params.is_3d and not self.training:
                 roi_size = tuple(self.params.crop_size)
-                inferer = SlidingWindowInferer(roi_size=roi_size, mode='gaussian') # TODO: 가능한 가로 세로는 많이
+                inferer = SlidingWindowInferer(roi_size=roi_size, mode='gaussian', overlap=0.5, cval=-1, padding_mode='reflect', sigma_scale=1) # TODO: 가능한 가로 세로는 많이
                 pred = inferer(inputs=merged_input, network=self.netG_A)
                 return pred
             else:
@@ -243,21 +243,31 @@ class BaseModule_AtoB(LightningModule):  # single direction
         b, c, h, w, d = real_b.shape
         loss_D_total = 0.0
 
-        for i in range(d):  # D-axis 기준 슬라이스
-            real_slice = real_b[..., i]     # [B, C, H, W]
-            fake_slice = fake_b[..., i]     # [B, C, H, W]
-
-            pred_real = self.netD_A(real_slice)
+        if self.criterionGAN3D:
+            pred_real = self.netD_A(real_b)
             loss_real = self.criterionGAN(pred_real, True)
 
-            pred_fake = self.netD_A(fake_slice.detach())
+            pred_fake = self.netD_A(fake_b.detach())
             loss_fake = self.criterionGAN(pred_fake, False)
 
             loss_D = (loss_real + loss_fake) * 0.5
             loss_D_total += loss_D
+        else:
+            for i in range(d):  # D-axis 기준 슬라이스
+                real_slice = real_b[..., i]     # [B, C, H, W]
+                fake_slice = fake_b[..., i]     # [B, C, H, W]
 
-        # 슬라이스 수만큼 평균
-        loss_D_total = loss_D_total / d
+                pred_real = self.netD_A(real_slice)
+                loss_real = self.criterionGAN(pred_real, True)
+
+                pred_fake = self.netD_A(fake_slice.detach())
+                loss_fake = self.criterionGAN(pred_fake, False)
+
+                loss_D = (loss_real + loss_fake) * 0.5
+                loss_D_total += loss_D
+
+            # 슬라이스 수만큼 평균
+            loss_D_total = loss_D_total / d
         return loss_D_total
 
     def training_step(self, batch: Any, batch_idx: int):
