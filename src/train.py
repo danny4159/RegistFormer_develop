@@ -1,11 +1,11 @@
-import torch
-from omegaconf.listconfig import ListConfig
-from omegaconf.base import ContainerMetadata
-from torch.serialization import add_safe_globals
-import typing
-
-add_safe_globals([ListConfig, ContainerMetadata])
 # For new pytorch (위에 pytroch 버전에 따라 지우고 넣고)
+# import torch
+# from omegaconf.listconfig import ListConfig
+# from omegaconf.base import ContainerMetadata
+# from torch.serialization import add_safe_globals
+# import typing
+
+# add_safe_globals([ListConfig, ContainerMetadata])
 #################################################################
 
 from typing import List, Optional, Tuple
@@ -137,13 +137,13 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
         #     ckpt_path = None
         log.info(f"Ckpt path: {ckpt_path}")
         # Ver1. Original
-        # trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
+        trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
         # Ver2. For new pytorch
-        with torch.serialization.safe_globals({typing.Any, ListConfig, ContainerMetadata}):
-            checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        # checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        model.load_state_dict(checkpoint["state_dict"])
-        trainer.test(model=model, datamodule=datamodule, ckpt_path=None)
+        # with torch.serialization.safe_globals({typing.Any, ListConfig, ContainerMetadata}):
+        #     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        # # checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        # model.load_state_dict(checkpoint["state_dict"])
+        # trainer.test(model=model, datamodule=datamodule, ckpt_path=None)
 
     test_metrics = trainer.callback_metrics
 
