@@ -108,7 +108,6 @@ class VoxelmorphOriginalModule(BaseModule_Registration):
             original_slices = evaluation_img.shape[-1]
             moving_img = self.pad_slice_to_128(moving_img)
             fixed_img = self.pad_slice_to_128(fixed_img)
-
             warped_img, deform_field = self.netR_A(moving_img, fixed_img, registration=True)
 
             moving_img = self.crop_slice_to_original(moving_img, original_slices)

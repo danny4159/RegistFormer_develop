@@ -11,6 +11,9 @@ from src.losses.mind_loss_3d import MINDLoss3D
 from src.losses.gan_loss_3d import GANLoss3D
 from src.losses.mutual_information_loss import MutualInformation # TODO: data norm 0~1
 
+from src.metrics.gradient_correlation import GradientCorrelationMetric
+import torch.nn.functional as F
+
 from src.models.base_module_AtoB import BaseModule_AtoB
 from src import utils
 
@@ -70,6 +73,8 @@ class RegistFormerModule(BaseModule_AtoB):
         self.criterionMIND3D = MINDLoss3D() if params.lambda_mind_3d != 0 else None
 
         self.criterionMutualInformation = MutualInformation() if params.lambda_mutual_information != 0 else None
+
+        self.criterionGCLagrange = GradientCorrelationMetric() if params.lambda_gc_lagrange != 0 else None
 
         # PatchNCE specific initializations
         self.flip_equivariance = params.flip_equivariance
@@ -233,6 +238,21 @@ class RegistFormerModule(BaseModule_AtoB):
                 loss_NCE = total_nce_loss / len(feat_b)
                 loss_G += loss_NCE
                 self.log("NCE_Loss", loss_NCE.detach(), prog_bar=True)
+
+            if self.criterionGCLagrange:
+                # Gradient Correlation 계산
+                ra_uint8 = ((ra + 1) / 2 * 255).to(torch.uint8)
+                fb_uint8 = ((fb + 1) / 2 * 255).to(torch.uint8)
+
+                self.criterionGCLagrange.reset() 
+                self.criterionGCLagrange.update(ra_uint8, fb_uint8)
+                gc_score = self.criterionGCLagrange.compute()
+
+                if not torch.isnan(gc_score):
+                    lagrange_loss = F.relu(0.3 - gc_score) * self.params.lambda_gc_lagrange
+                    loss_G += lagrange_loss
+                    self.log("Lagrange_GC_Loss", lagrange_loss.detach(), prog_bar=True)
+                    self.log("GC_Score", gc_score.detach(), prog_bar=True)
 
             loss_G = loss_G / D
 

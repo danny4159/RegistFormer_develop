@@ -94,7 +94,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             # Sliding window on inference
             if self.params.is_3d and not self.training:
                 roi_size = tuple(self.params.crop_size)
-                inferer = SlidingWindowInferer(roi_size=roi_size, mode='gaussian', overlap=0.5, padding_mode='replicate') # TODO: 가능한 가로 세로는 많이
+                inferer = SlidingWindowInferer(roi_size=roi_size, mode='gaussian', overlap=0.5, padding_mode='constant', cval=-1) # TODO: 가능한 가로 세로는 많이
                 pred = inferer(inputs=merged_input, network=self.netG_A)
                 return pred
             else:
@@ -198,8 +198,9 @@ class BaseModule_AtoB(LightningModule):  # single direction
                     return real_a, real_b, fake_b
                 else:
                     real_a, real_b = batch
-                    # real_a = self.pad_slice_to_128(real_a, padding_value=-1) # No on registformer
-                    # real_b = self.pad_slice_to_128(real_b, padding_value=-1)
+                    # if not self.training: # TODO: Registformer 3D: val,test때는 전체 slice로 해야 sliding window때 문제없어서. 근데 시간 절약하고싶을땐 빼둬
+                    #     real_a = self.pad_slice_to_128(real_a, padding_value=-1) # No on registformer
+                    #     real_b = self.pad_slice_to_128(real_b, padding_value=-1)
                     fake_b = self.forward(real_a, real_b)
                     real_b_ref = None
                     return real_a, real_b, fake_b

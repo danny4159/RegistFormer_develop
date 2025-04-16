@@ -85,6 +85,7 @@ params: # Other params
   lambda_gan_3d: 0
   lambda_mind_3d: 0
   lambda_mutual_information: 0
+  lambda_gc_lagrange: 0
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
