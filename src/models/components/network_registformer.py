@@ -303,7 +303,7 @@ class RegistFormer(nn.Module):
         self.conv4 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
         self.conv5 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
         # if self.params.use_autoencoder:
-        self.conv5_2 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
+        # self.conv5_2 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
         # self.conv5_3 = double_conv_up(self.feat_dim, self.feat_dim, self.params.is_3d)
         if self.params.is_3d:
             if self.params.use_autoencoder:
@@ -420,7 +420,7 @@ class RegistFormer(nn.Module):
                 f5 = self.conv5(f4)
                 f5 = f5 + outputs[2] + f0
                 # if self.params.use_autoencoder:
-                f5 = self.conv5_2(f5)
+                # f5 = self.conv5_2(f5)
                 # f5 = self.conv5_3(f5)    
 
             out = self.conv6(f5)
@@ -1220,7 +1220,7 @@ class Unet(nn.Module):
         super().__init__()
         self.conv_in = single_conv(in_ch, feat_ch, is_3d)
 
-        self.conv0 = double_conv_down(feat_ch, feat_ch, is_3d)
+        # self.conv0 = double_conv_down(feat_ch, feat_ch, is_3d)
         # self.conv0_2 = double_conv_down(feat_ch, feat_ch, is_3d)
 
         self.conv1 = double_conv_down(feat_ch, feat_ch, is_3d)
@@ -1232,7 +1232,7 @@ class Unet(nn.Module):
 
     def forward(self, x, for_nce=False):
         feat0 = self.conv_in(x)  # H, W
-        feat0 = self.conv0(feat0) #H/2, W/2
+        # feat0 = self.conv0(feat0) #H/2, W/2
         # feat0 = self.conv0_2(feat0) #H/4, W/4
         feat1 = self.conv1(feat0)  # H/8, W/8
         feat2 = self.conv2(feat1)  # H/16, W/16
