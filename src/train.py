@@ -2,6 +2,7 @@ import torch
 from omegaconf.listconfig import ListConfig
 from omegaconf.base import ContainerMetadata
 from torch.serialization import add_safe_globals
+import typing
 
 add_safe_globals([ListConfig, ContainerMetadata])
 # For new pytorch (위에 pytroch 버전에 따라 지우고 넣고)
@@ -100,8 +101,12 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
 
     if cfg.get("train"):
         log.info("Starting training!")
-        trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
-
+        if cfg.get("ckpt_path") is not None:
+            log.info(f"Resuming training from checkpoint: {cfg.get('ckpt_path')}")
+            trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
+        else:
+            trainer.fit(model=model, datamodule=datamodule)
+        
     train_metrics = trainer.callback_metrics
 
     for key, value in train_metrics.items():
@@ -134,7 +139,9 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
         # Ver1. Original
         # trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
         # Ver2. For new pytorch
-        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        with torch.serialization.safe_globals({typing.Any, ListConfig, ContainerMetadata}):
+            checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        # checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         model.load_state_dict(checkpoint["state_dict"])
         trainer.test(model=model, datamodule=datamodule, ckpt_path=None)
 
