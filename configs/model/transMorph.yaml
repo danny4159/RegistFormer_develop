@@ -38,8 +38,11 @@ netR_A:
   out_indices: [0, 1, 2, 3]
   pat_merg_rf: 4
   reg_head_chan: 16
-  img_size: [256, 256, 128]  # [384, 320, 128] # [268, 224, 96] -> down interpolation 사이즈
-
+  img_size: [192,192,256]  # MR-CT: [384, 320, 128] # [268, 224, 96] -> down interpolation 사이즈 # CBCT-CT: [192,192,256] -> 원래 사이즈가 196,196,2??이어서 192로 crop해줘야해. Val,Test도 crop 되게 해줘야.
+  # Transmorph에서 이미지 사이즈 조절 (16의 배수여야해.) 
+  # TODO: 
+  # 1. 여기 img_size조절.
+  # 2. TransMorph_Module에 new_size 조절
 
 params: # Other params
   lambda_grad: 0.02
@@ -49,3 +52,4 @@ params: # Other params
   flag_train_fixed_moving: False # Swap moving and fixed only during training to encourage learning without compromising reference features. (My guess, experimenting)
   eval_on_align: ${data.eval_on_align}
   use_misalign_simul: ${data.use_misalign_simul}
+  is_registration: True

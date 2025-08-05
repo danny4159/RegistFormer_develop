@@ -13,12 +13,17 @@ data_dir: ${paths.root_dir}/data/SynthRAD_CBCT_CT_Brain
 data_group_1: "CBCT"
 data_group_2: "CT"
 data_group_3: null # If exist put it, or null # Regist:syn_CT
+data_group_4: null
+data_group_5: null
 is_3d: False # True: 3D processing, False: 2D processing
 batch_size: 4 #5 #10 #4 #30 #16 #12 #2 #1
 num_workers: 6 # 3
 pin_memory: False
 use_split_inference: False # Inference for valid and test is divided into half from the original image (for memory issue)
 eval_on_align: False
+use_sliding_inference: False
+use_multiple_outputs: False
+use_misalign_simul: False
 
 ## Dataset File Name
 # prepared_data_0_0_0_0_0_ver3_final.h5
@@ -35,6 +40,7 @@ flip_prob: 0 #.5 #0.5
 rot_prob: 0 #.5 #0.5
 padding_size: null # Padding to hegith, width   [256, 256] -> [target_height, target_width] or null
 crop_size: null # Random crop to hegith, width  [128, 128] -> [target_height, target_width] or null
+norm_ZeroToOne: False
 
 ## Intenional Misalignment
 # misalign_x: 0

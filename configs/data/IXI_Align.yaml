@@ -40,6 +40,7 @@ flip_prob: 0 #.5 #0.5
 rot_prob: 0 #.5 #0.5
 padding_size: null # Padding to hegith, width   [256, 256] -> [target_height, target_width] or null
 crop_size: null # Random crop to hegith, width  [128, 128] -> [target_height, target_width] or null
+norm_ZeroToOne: False # True: Normalize to [0, 1], False: Assume normalized on [-1, 1]
 
 ## Intenional Misalignment
 # misalign_x: 0

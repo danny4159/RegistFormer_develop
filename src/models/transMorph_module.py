@@ -49,8 +49,8 @@ class TransMorph_Module(BaseModule_Registration):
     def pad_slice_to_128(self, tensor, padding_value=-1):
         # tensor shape: [batch, channel, height, width, slice]
         slices = tensor.shape[-1]
-        if slices < 128:
-            padding = (0, 128 - slices)  # padding only on one side
+        if slices < 256:
+            padding = (0, 256 - slices)  # padding only on one side
             tensor = F.pad(tensor, padding, mode='constant', value=padding_value)
         return tensor
     
@@ -101,7 +101,7 @@ class TransMorph_Module(BaseModule_Registration):
             _, _, H, W, D = evaluation_img.shape
             # scale_factor = 0.7
             # new_size = [int(H * scale_factor), int(W * scale_factor), int(D)]
-            new_size = [int(256), int(256), int(D)] #TODO: 이미지의 사이즈대로 세팅해줘야함
+            new_size = [int(192), int(192), int(D)] #TODO: 이미지의 사이즈대로 세팅해줘야함
 
             evaluation_img = F.interpolate(evaluation_img, size=new_size, mode='trilinear', align_corners=False)
             moving_img = F.interpolate(moving_img, size=new_size, mode='trilinear', align_corners=False)
