@@ -513,7 +513,7 @@ class RegistFormer(nn.Module):
                     if self.flow_type == "zero":
                         moved_img, flow = self.flow_estimator(ref_img, synth_img, registration=True)  # Zeroflow version
                     else:
-                        _, flow = self.flow_estimator(synth_img, ref_img, registration=True)  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
+                        moved_img, flow = self.flow_estimator(synth_img, ref_img, registration=True)  # Original version # 첫번째 입력변수가 moving, 두번째 입력변수가 fixed
                         if self.params.use_multiple_outputs:
                             _, flow_2 = self.flow_estimator(synth_img2, ref_img2, registration=True)
                         # flow = self.vecint(flow) #TODO: modified
@@ -852,9 +852,15 @@ def natten_attention(q, k, v):
     # n x 1(k^2) x nhead x d x h x w
     h, w = q.shape[-2], q.shape[-1]
     
-    # q를 n,h,w,nhead,d로 차원 변경
+    # q, k, v를 n,h,w,nhead,d로 차원 변경
     q = q.squeeze(1)
     q = q.permute(0, 3, 4, 1, 2)  # n, nhead, d, h, w -> n, h, w, nhead, d
+    
+    k = k.squeeze(1)
+    k = k.permute(0, 3, 4, 1, 2)  # n, nhead, d, h, w -> n, h, w, nhead, d
+    
+    v = v.squeeze(1)
+    v = v.permute(0, 3, 4, 1, 2)  # n, nhead, d, h, w -> n, h, w, nhead, d
     
     # natten attention 적용
     from natten.functional import na2d
@@ -865,20 +871,21 @@ def natten_attention(q, k, v):
     
     # float32로 변환 (NATTEN이 float32를 선호할 수 있음)
     q = q.float()
+    k = k.float()
+    v = v.float()
     
     try:
-        out = na2d(q, q, q, kernel_size=5)  # N, H, W, nhead, d
-        # out = na2d(q, q, q, kernel_size=5, stride=1, backend="cutlass-fna")  # N, H, W, nhead, d # 이건 Natten 최신버전용
+        out = na2d(q, k, v, kernel_size=15)  # N, H, W, nhead, d
+        # out = na2d(q, k, v, kernel_size=5, stride=1, backend="cutlass-fna")  # N, H, W, nhead, d # 이건 Natten 최신버전용
     except Exception as e:
         print(f"NATTEN error: {e}")
-        # NATTEN 실패시 fallback으로 softmax attention 사용
-        print("Falling back to softmax attention...")
-        return softmax_attention(q.permute(0, 3, 4, 1, 2).unsqueeze(1), k, v)
+        # NATTEN 실패시 에러 발생하여 코드 중단
+        raise RuntimeError(f"NATTEN attention failed: {e}")
     
     # 출력을 n,nhead,d,h,w로 차원 변경
     out = out.permute(0, 3, 4, 1, 2)  # n, nhead, d, h, w
     
-    return out, out
+    return out, None
 
 def softmax_attention(q, k, v):
     # n x 1(k^2) x nhead x d x h x w
@@ -1442,29 +1449,36 @@ class MultiheadAttention(nn.Module):
             n, c, h, w = q.shape
 
             # ------ Sampling K and V features ---------
-            sampling_grid = flow_to_grid(flow, self.k_size)  # return: src에서 각 local grid가 어떻게 움직여야 ref local grid가 되는지 # n x k**2, h, w, 2  # # [100, 48, 48, 2]
-            # sampled feature
-            # n x k^2 x c x h x w
-            sample_k_feat = flow_guide_sampler(k, sampling_grid, k_size=self.k_size)  # [4, 25, 64, 48, 48] # ref에서 feature map의 local grid
-            sample_v_feat = flow_guide_sampler(v, sampling_grid, k_size=self.k_size)
-            if k_2 is not None:
-                sampling_grid_2 = flow_to_grid(flow_2, self.k_size)
-                sample_k_feat_2 = flow_guide_sampler(k_2, sampling_grid_2, k_size=self.k_size)
-                sample_v_feat_2 = flow_guide_sampler(v_2, sampling_grid_2, k_size=self.k_size)
-
-                sample_k_feat = torch.cat([sample_k_feat, sample_k_feat_2], dim=1)
-                sample_v_feat = torch.cat([sample_v_feat, sample_v_feat_2], dim=1)
-
-            # Reshape for multi-head attention.
-            # q: n x 1 x nhead x dk x h x w
-            # k,v: n x k^2 x nhead x dk x h x w
-            q = q.view(n, 1, n_head, d_k, h, w)  # [2, 1, 2, 7, 24, 24]
-            if k_2 is not None:
-                k = sample_k_feat.view(n, self.k_size**2*2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
-                v = sample_v_feat.view(n, self.k_size**2*2, n_head, d_v, h, w)
+            if attn_type == "natten":
+                # NATTEN attention은 flow-guided sampling을 사용하지 않음
+                # q, k, v를 NATTEN에 맞는 형태로 변환
+                q = q.view(n, 1, n_head, d_k, h, w)
+                k = k.view(n, 1, n_head, d_k, h, w)  # NATTEN은 원본 k, v 사용
+                v = v.view(n, 1, n_head, d_v, h, w)
             else:
-                k = sample_k_feat.view(n, self.k_size**2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
-                v = sample_v_feat.view(n, self.k_size**2, n_head, d_v, h, w)
+                sampling_grid = flow_to_grid(flow, self.k_size)  # return: src에서 각 local grid가 어떻게 움직여야 ref local grid가 되는지 # n x k**2, h, w, 2  # # [100, 48, 48, 2]
+                # sampled feature
+                # n x k^2 x c x h x w
+                sample_k_feat = flow_guide_sampler(k, sampling_grid, k_size=self.k_size)  # [4, 25, 64, 48, 48] # ref에서 feature map의 local grid
+                sample_v_feat = flow_guide_sampler(v, sampling_grid, k_size=self.k_size)
+                if k_2 is not None:
+                    sampling_grid_2 = flow_to_grid(flow_2, self.k_size)
+                    sample_k_feat_2 = flow_guide_sampler(k_2, sampling_grid_2, k_size=self.k_size)
+                    sample_v_feat_2 = flow_guide_sampler(v_2, sampling_grid_2, k_size=self.k_size)
+
+                    sample_k_feat = torch.cat([sample_k_feat, sample_k_feat_2], dim=1)
+                    sample_v_feat = torch.cat([sample_v_feat, sample_v_feat_2], dim=1)
+
+                # Reshape for multi-head attention.
+                # q: n x 1 x nhead x dk x h x w
+                # k,v: n x k^2 x nhead x dk x h x w
+                q = q.view(n, 1, n_head, d_k, h, w)  # [2, 1, 2, 7, 24, 24]
+                if k_2 is not None:
+                    k = sample_k_feat.view(n, self.k_size**2*2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
+                    v = sample_v_feat.view(n, self.k_size**2*2, n_head, d_v, h, w)
+                else:
+                    k = sample_k_feat.view(n, self.k_size**2, n_head, d_k, h, w)  # [2, 784, 2, 7, 24, 24]
+                    v = sample_v_feat.view(n, self.k_size**2, n_head, d_v, h, w)
 
         
             #############################################################################################
@@ -1506,7 +1520,8 @@ class MultiheadAttention(nn.Module):
             elif attn_type == "xformers2d":
                 q, attn = xformers_attention_global(q, k, v)
             elif attn_type == "natten":
-                q, attn = natten_attention(q, k, v)
+                q, _ = natten_attention(q, k, v)
+                attn = None  # natten의 경우 attn을 사용하지 않으므로 None으로 설정
             else:
                 raise NotImplementedError(f"Unknown attention type {attn_type}")
 
