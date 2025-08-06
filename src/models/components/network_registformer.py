@@ -245,7 +245,7 @@ class RegistFormer(nn.Module):
                 if self.params.use_resnet:
                     self.unet_q_noDownsample = Unet(self.src_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
                 else:
-                    self.unet_q = Unet(self.src_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
+                    self.unet_q = Unet_NoDownUp(self.src_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
             else:
                 self.unet_q = Unet(self.src_ch * 2, self.feat_dim, self.feat_dim, self.params.is_3d)
 
@@ -253,7 +253,7 @@ class RegistFormer(nn.Module):
             if self.params.use_resnet:
                     self.unet_k_noDownsample = Unet(self.src_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
             else:
-                self.unet_k = Unet(self.ref_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
+                self.unet_k = Unet_NoDownUp(self.ref_ch*256, self.feat_dim, self.feat_dim, self.params.is_3d)
         else:
             self.unet_k = Unet(self.ref_ch, self.feat_dim, self.feat_dim, self.params.is_3d)
 
@@ -393,37 +393,45 @@ class RegistFormer(nn.Module):
                 q_feat = self.unet_q(input_synthOut_concat)
                 k_feat = self.unet_k(ref_img)
 
-            outputs = []
-            for i in range(3):
-                outputs.append(self.trans_unit[i](q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow))
-
-            if self.daca_loc == "end":
-                f0 = self.conv0(outputs[0])
-                f1 = self.conv1(f0)
-                f2 = self.conv2(f1)
-                f3 = self.conv3(f2)
-                f3 = f3 + f2
-                f4 = self.conv4(f3)
-                f4 = f4 + f1
-                f5 = self.conv5(f4)
-                f5 = f5 + outputs[0] + f0
+            if self.params.use_autoencoder and not self.params.use_resnet: # Only for autoencoder
+                output = self.trans_unit[0](q_feat, k_feat, k_feat, flow)
+                f0 = self.conv3(output)                # 그대로 유지
+                f1 = self.conv4(f0)           # upsample
+                f2 = self.conv5(f1)           # upsample
+                out = self.conv6(f2)
             else:
-                f0 = self.conv0(outputs[2])
-                f1 = self.conv1(f0)
-                f1 = f1 + outputs[1]
-                f2 = self.conv2(f1)
-                f2 = f2 + outputs[0]
-                f3 = self.conv3(f2)
-                f3 = f3 + outputs[0] + f2
-                f4 = self.conv4(f3)
-                f4 = f4 + outputs[1] + f1
-                f5 = self.conv5(f4)
-                f5 = f5 + outputs[2] + f0
-                # if self.params.use_autoencoder:
-                # f5 = self.conv5_2(f5)
-                # f5 = self.conv5_3(f5)    
+                outputs = []
+                for i in range(3):
+                    outputs.append(self.trans_unit[i](q_feat[i + 3], k_feat[i + 3], k_feat[i + 3], flow))
 
-            out = self.conv6(f5)
+                if self.daca_loc == "end":
+                    f0 = self.conv0(outputs[0])
+                    f1 = self.conv1(f0)
+                    f2 = self.conv2(f1)
+                    f3 = self.conv3(f2)
+                    f3 = f3 + f2
+                    f4 = self.conv4(f3)
+                    f4 = f4 + f1
+                    f5 = self.conv5(f4)
+                    f5 = f5 + outputs[0] + f0
+                else:
+                    f0 = self.conv0(outputs[2])
+                    f1 = self.conv1(f0)
+                    f1 = f1 + outputs[1]
+                    f2 = self.conv2(f1)
+                    f2 = f2 + outputs[0]
+                    f3 = self.conv3(f2)
+                    f3 = f3 + outputs[0] + f2
+                    f4 = self.conv4(f3)
+                    f4 = f4 + outputs[1] + f1
+                    f5 = self.conv5(f4)
+                    f5 = f5 + outputs[2] + f0
+                    # if self.params.use_autoencoder:
+                    # f5 = self.conv5_2(f5)
+                    # f5 = self.conv5_3(f5)    
+
+                out = self.conv6(f5)
+
             # if self.params.use_autoencoder:
             #     out = self.netK_A.decoder(out)
             if self.params.norm_ZeroToOne:
@@ -840,6 +848,38 @@ def xformers_attention_global(q, k, v):
 
     return out, None
 
+def natten_attention(q, k, v):
+    # n x 1(k^2) x nhead x d x h x w
+    h, w = q.shape[-2], q.shape[-1]
+    
+    # q를 n,h,w,nhead,d로 차원 변경
+    q = q.squeeze(1)
+    q = q.permute(0, 3, 4, 1, 2)  # n, nhead, d, h, w -> n, h, w, nhead, d
+    
+    # natten attention 적용
+    from natten.functional import na2d
+    
+    # 디버깅을 위한 정보 출력
+    # print(f"q dtype: {q.dtype}, q device: {q.device}")
+    # print(f"q shape for natten: {q.shape}")
+    
+    # float32로 변환 (NATTEN이 float32를 선호할 수 있음)
+    q = q.float()
+    
+    try:
+        out = na2d(q, q, q, kernel_size=5)  # N, H, W, nhead, d
+        # out = na2d(q, q, q, kernel_size=5, stride=1, backend="cutlass-fna")  # N, H, W, nhead, d # 이건 Natten 최신버전용
+    except Exception as e:
+        print(f"NATTEN error: {e}")
+        # NATTEN 실패시 fallback으로 softmax attention 사용
+        print("Falling back to softmax attention...")
+        return softmax_attention(q.permute(0, 3, 4, 1, 2).unsqueeze(1), k, v)
+    
+    # 출력을 n,nhead,d,h,w로 차원 변경
+    out = out.permute(0, 3, 4, 1, 2)  # n, nhead, d, h, w
+    
+    return out, out
+
 def softmax_attention(q, k, v):
     # n x 1(k^2) x nhead x d x h x w
     h, w = q.shape[-2], q.shape[-1]
@@ -1244,7 +1284,7 @@ class Unet(nn.Module):
         feat5 = feat5 + feat0  # H/4
         feat6 = self.conv6(feat5)
         if for_nce:
-            return [feat0, feat1, feat2, feat3, feat4, feat5, feat6]
+            return [None, None, None, feat1, feat2, feat3, feat4, feat5, feat6]
         return feat0, feat1, feat2, feat3, feat4, feat6
     
     # Original
@@ -1262,6 +1302,19 @@ class Unet(nn.Module):
     #     if for_nce:
     #         return [feat0, feat1, feat2, feat3, feat4, feat5, feat6]
     #     return feat0, feat1, feat2, feat3, feat4, feat6
+
+class Unet_NoDownUp(nn.Module):
+    def __init__(self, in_ch, feat_ch, out_ch, is_3d=False):
+        super().__init__()
+
+        self.conv_in = single_conv(in_ch, feat_ch, is_3d)
+        self.conv1 = single_conv(feat_ch, feat_ch, is_3d)
+
+    def forward(self, x, for_nce=False):
+        feat0 = self.conv_in(x)
+        feat1 = self.conv1(feat0) + feat0
+        return feat1
+    
 
 class Unet_Decode(nn.Module):
     def __init__(self, in_ch, feat_ch, out_ch, is_3d=False):
@@ -1452,6 +1505,8 @@ class MultiheadAttention(nn.Module):
                 attn = None
             elif attn_type == "xformers2d":
                 q, attn = xformers_attention_global(q, k, v)
+            elif attn_type == "natten":
+                q, attn = natten_attention(q, k, v)
             else:
                 raise NotImplementedError(f"Unknown attention type {attn_type}")
 
