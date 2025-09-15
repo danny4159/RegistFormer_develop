@@ -51,3 +51,5 @@ params: # Other params
   lambda_vgg: 20
   lambda_smooth: 25
   eval_on_align: ${data.eval_on_align}
+  use_misalign_simul: ${data.use_misalign_simul}
+  inference_for_registration: False
