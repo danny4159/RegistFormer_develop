@@ -30,9 +30,9 @@ use_misalign_simul: True
 # Ver3_AllPatientSameSize_final_2.h5
 # Ver3_OnlyOnePatient.h5
 # Registration_MR_CT_synCT.h5
-train_file: 'IXI_Trainset_Ver2_T1_T2_PD_Registered_30Patient_MisalignSimul_Rotate5Translate5_20SliceOut.h5'
-val_file: 'IXI_Valset_Ver2_T1_T2_PD_Registered_3Patient_MisalignSimul_Rotate5Translate5_20SliceOut.h5'
-test_file: 'IXI_Testset_T1_T2_PD_Registered_30Patient_MisalignSimul_Rotate5Translate5_20SliceOut.h5' 
+train_file: 'IXI_Trainset_Ver2_T1_T2_PD_Registered_30Patient_MisalignSimul_Rotate2Translate2_20SliceOut.h5'
+val_file: 'IXI_Valset_Ver2_T1_T2_PD_Registered_3Patient_MisalignSimul_Rotate2Translate2_20SliceOut.h5'
+test_file: 'IXI_Testset_T1_T2_PD_Registered_30Patient_MisalignSimul_Rotate2Translate2_20SliceOut.h5' 
 
 ## Preprocessing
 reverse: False # New
