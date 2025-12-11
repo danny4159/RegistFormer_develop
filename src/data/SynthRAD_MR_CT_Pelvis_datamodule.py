@@ -72,7 +72,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
     def setup(self, stage: Optional[str] = None):
         self.train_dir = os.path.join(self.data_dir, 'train', self.train_file)
         self.val_dir = os.path.join(self.data_dir, 'val', self.val_file)
-        self.test_dir = os.path.join(self.data_dir, 'test', self.test_file)
+        self.test_dir = os.path.join(self.data_dir, 'test', self.test_file) # TODO: If you want to change test file, change it here.
 
         self.data_train = dataset_SynthRAD(
             self.train_dir,
