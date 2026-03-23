@@ -12,6 +12,7 @@ class StyleDecompositionLoss(nn.Module):
     2. Private Decorrelation Loss: private_b ⊥ private_c
     3. Common-Private Separation Loss: common ⊥ private within each branch
     4. Shared Smoothness Loss: TV regularization on shared style
+    5. Shared Consistency Loss: common_shared stays close to common_avg
     """
     def __init__(
         self,
@@ -19,6 +20,7 @@ class StyleDecompositionLoss(nn.Module):
         lambda_private=0.2,
         lambda_sep=0.2,
         lambda_smooth=0.05,
+        lambda_shared_consistency=0.1,
         use_cosine=True
     ):
         super().__init__()
@@ -26,6 +28,7 @@ class StyleDecompositionLoss(nn.Module):
         self.lambda_private = lambda_private
         self.lambda_sep = lambda_sep
         self.lambda_smooth = lambda_smooth
+        self.lambda_shared_consistency = lambda_shared_consistency
         self.use_cosine = use_cosine
 
     def compute_cosine_similarity(self, x, y):
@@ -78,6 +81,7 @@ class StyleDecompositionLoss(nn.Module):
                 - common_b, common_c: [B, C, H, W]
                 - private_b, private_c: [B, C, H, W]
                 - common_shared or c_shared: [B, C, H, W]
+                - g_common: gate tensor used by the router (optional, not used here)
 
         Returns:
             total_loss: scalar
@@ -113,7 +117,12 @@ class StyleDecompositionLoss(nn.Module):
         loss_smooth = self.compute_tv_loss(c_shared) * self.lambda_smooth
         loss_dict['loss_smooth'] = loss_smooth
 
-        total_loss = loss_common + loss_private + loss_sep + loss_smooth
+        # 5. Conservative shared fusion: keep common_shared close to common_avg
+        common_avg = 0.5 * (common_b + common_c)
+        loss_shared_consistency = F.l1_loss(c_shared, common_avg) * self.lambda_shared_consistency
+        loss_dict['loss_shared_consistency'] = loss_shared_consistency
+
+        total_loss = loss_common + loss_private + loss_sep + loss_smooth + loss_shared_consistency
         loss_dict['loss_decomp_total'] = total_loss
 
         return total_loss, loss_dict

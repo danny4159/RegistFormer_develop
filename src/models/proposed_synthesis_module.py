@@ -81,6 +81,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 lambda_private=getattr(params, 'lambda_private', 0.2),
                 lambda_sep=getattr(params, 'lambda_sep', 0.2),
                 lambda_smooth=getattr(params, 'lambda_smooth', 0.05),
+                lambda_shared_consistency=getattr(params, 'lambda_shared_consistency', 0.1),
                 use_cosine=True
             )
         else:

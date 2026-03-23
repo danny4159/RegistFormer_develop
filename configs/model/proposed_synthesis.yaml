@@ -81,6 +81,7 @@ params: # Other params
   lambda_private: 0.2     # Private decorrelation loss weight
   lambda_sep: 0.2         # Common-private separation loss weight
   lambda_smooth: 0.05     # Shared style smoothness loss weight
+  lambda_shared_consistency: 0.1  # Keep common_shared close to common_avg
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
