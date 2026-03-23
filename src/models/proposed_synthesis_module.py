@@ -81,6 +81,26 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         self.lambda_leak = getattr(params, 'lambda_leak', 0.05)
         self.use_style_decomposition = getattr(params, 'use_style_decomposition', False)
 
+    def _initialize_netF_if_needed(self):
+        if not getattr(self.netF_A, 'use_mlp', False):
+            return
+        if any(True for _ in self.netF_A.parameters()):
+            return
+        if not hasattr(self.netG_A, 'encode_content_only'):
+            return
+
+        crop_size = getattr(self.params, 'crop_size', [64, 64])
+        if isinstance(crop_size, int):
+            crop_size = [crop_size, crop_size]
+        h, w = crop_size[:2]
+        device = next(self.netG_A.parameters()).device
+
+        with torch.no_grad():
+            dummy_x = torch.zeros(1, 1, h, w, device=device)
+            feats = self.netG_A.encode_content_only(dummy_x)
+            if hasattr(self.netF_A, 'create_mlp'):
+                self.netF_A.create_mlp(feats)
+
     def backward_G(self, real_a, real_b, real_c, fake_b, fake_c, real_b_ref, real_c_ref):
         loss_G = torch.tensor(0.0, device=real_a.device)
         if self.params.use_misalign_simul:
@@ -550,7 +570,9 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         """
         optimizers = []
         schedulers = []
-        
+
+        self._initialize_netF_if_needed()
+
         optimizer_G_A = self.hparams.optimizer(params=self.netG_A.parameters())
         optimizers.append(optimizer_G_A)
         optimizer_D_A = self.hparams.optimizer(params=self.netD_A.parameters())
