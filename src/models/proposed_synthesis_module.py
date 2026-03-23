@@ -172,22 +172,28 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     loss_nce_b = total_nce_loss / len(feat_b)
                     self.log("NCE_b_Loss", loss_nce_b.detach(), prog_bar=True)
                     loss_G += loss_nce_b
-
             else:
                 if self.params.use_multiple_outputs:
-                    n_layers = len(self.params.nce_layers)
                     if self.use_style_decomposition and hasattr(self.netG_A, 'encode_content_only'):
                         allowed_layers = {0, 1, 2}
-                        if not set(self.params.nce_layers).issubset(allowed_layers):
-                            raise ValueError("When use_style_decomposition=True, nce_layers must be a subset of [0, 1, 2].")
+                        requested_layers = list(self.params.nce_layers)
+                        nce_layers = [layer for layer in requested_layers if layer in allowed_layers]
+                        if len(nce_layers) != len(requested_layers):
+                            self.print(
+                                f"[ProposedSynthesis] Adjusting nce_layers from {requested_layers} to {nce_layers} because style decomposition uses only content-trunk layers [0, 1, 2]."
+                            )
+                        if not nce_layers:
+                            raise ValueError("When use_style_decomposition=True, nce_layers must include at least one of [0, 1, 2].")
 
+                        n_layers = len(nce_layers)
                         feat_a_all = self.netG_A.encode_content_only(real_a)
                         feat_b_all = self.netG_A.encode_content_only(fake_b)
                         feat_c_all = self.netG_A.encode_content_only(fake_c)
-                        feat_a = [feat_a_all[i] for i in self.params.nce_layers]
-                        feat_b = [feat_b_all[i] for i in self.params.nce_layers]
-                        feat_c = [feat_c_all[i] for i in self.params.nce_layers]
+                        feat_a = [feat_a_all[i] for i in nce_layers]
+                        feat_b = [feat_b_all[i] for i in nce_layers]
+                        feat_c = [feat_c_all[i] for i in nce_layers]
                     else:
+                        n_layers = len(self.params.nce_layers)
                         merged_input_1 = torch.cat((fake_b, real_a, real_a), dim=1)
                         feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
 
