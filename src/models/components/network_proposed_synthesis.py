@@ -393,7 +393,35 @@ class ProposedSynthesisModule(nn.Module):
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 style 적용
         if self.use_branch_style_layers:
-            # 각 branch는 feat_ch 채널 (전체의 절반)
+            # Split the synthesis path after conv22 so mid/late synthesis is branch-specific.
+            self.conv31_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                      downsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv31_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                      downsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv32_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                      downsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv32_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                      downsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv41_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                      upsample=True, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv41_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                      upsample=True, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv42_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                      upsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv42_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                      upsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv51_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                      upsample=True, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv51_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                      upsample=True, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv52_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                      upsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv52_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                      upsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv6_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv6_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
             self.conv7_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                      activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
             self.conv7_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
@@ -472,34 +500,51 @@ class ProposedSynthesisModule(nn.Module):
         feat1 = self.conv12(feat1, fused_style) # [1, feat_ch*2, H/2, W/2]
         feat2 = self.conv21(feat1, fused_style) # [1, feat_ch*2, H/4, W/4]
         feat2 = self.conv22(feat2, fused_style) # [1, feat_ch*2, H/4, W/4]
-        feat3 = self.conv31(feat2, fused_style) # [1, feat_ch*2, H/4, W/4]
-        feat3 = self.conv32(feat3, fused_style) # [1, feat_ch*2, H/4, W/4]
-        feat4 = self.conv41(feat3 + feat2, fused_style) # [1, feat_ch*2, H/2, W/2]
-        feat4 = self.conv42(feat4, fused_style)         # [1, feat_ch*2, H/2, W/2]
-        feat5 = self.conv51(feat4 + feat1, fused_style) # [1, feat_ch*2, H, W]
-        feat5 = self.conv52(feat5, fused_style)         # [1, feat_ch*2, H, W]
-        feat6 = self.conv6(feat5 + feat0, fused_style)  # [1, feat_ch*2, H, W]
 
-        # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 처리
+        # Separate style layers: conv22 이후부터 branch-specific synthesis로 진행
         if self.use_branch_style_layers:
-            # feat6를 반으로 분리
-            feat6_1, feat6_2 = torch.chunk(feat6, chunks=2, dim=1)  # 각 [B, feat_ch, H, W]
+            feat0_1, feat0_2 = torch.chunk(feat0, chunks=2, dim=1)
+            feat1_1, feat1_2 = torch.chunk(feat1, chunks=2, dim=1)
+            feat2_1, feat2_2 = torch.chunk(feat2, chunks=2, dim=1)
 
-            # conv7: 각각 독립적으로 처리 (fused style 사용)
-            feat7_1 = self.conv7_1(feat6_1, style_b_map)  # [B, feat_ch, H, W]
-            feat7_2 = self.conv7_2(feat6_2, style_c_map)  # [B, feat_ch, H, W]
+            feat3_1 = self.conv31_1(feat2_1, style_b_map)
+            feat3_1 = self.conv32_1(feat3_1, style_b_map)
+            feat3_2 = self.conv31_2(feat2_2, style_c_map)
+            feat3_2 = self.conv32_2(feat3_2, style_c_map)
+            feat3 = torch.cat((feat3_1, feat3_2), dim=1)
 
-            # conv8: 각각 독립적으로 처리 (fused style 사용)
-            feat8_1 = self.conv8_1(feat7_1, style_b_map)  # [B, feat_ch, H, W]
-            feat8_2 = self.conv8_2(feat7_2, style_c_map)  # [B, feat_ch, H, W]
+            feat4_1 = self.conv41_1(feat3_1 + feat2_1, style_b_map)
+            feat4_1 = self.conv42_1(feat4_1, style_b_map)
+            feat4_2 = self.conv41_2(feat3_2 + feat2_2, style_c_map)
+            feat4_2 = self.conv42_2(feat4_2, style_c_map)
+            feat4 = torch.cat((feat4_1, feat4_2), dim=1)
 
-            # 각각 conv_final + tanh
-            out_1 = torch.tanh(self.conv_final_1(feat8_1))  # [B, output_nc//2, H, W]
-            out_2 = torch.tanh(self.conv_final_2(feat8_2))  # [B, output_nc//2, H, W]
+            feat5_1 = self.conv51_1(feat4_1 + feat1_1, style_b_map)
+            feat5_1 = self.conv52_1(feat5_1, style_b_map)
+            feat5_2 = self.conv51_2(feat4_2 + feat1_2, style_c_map)
+            feat5_2 = self.conv52_2(feat5_2, style_c_map)
+            feat5 = torch.cat((feat5_1, feat5_2), dim=1)
 
-            # 마지막에 합쳐서 반환
-            out = torch.cat((out_1, out_2), dim=1)  # [B, output_nc, H, W]
+            feat6_1 = self.conv6_1(feat5_1 + feat0_1, style_b_map)
+            feat6_2 = self.conv6_2(feat5_2 + feat0_2, style_c_map)
+            feat6 = torch.cat((feat6_1, feat6_2), dim=1)
+
+            feat7_1 = self.conv7_1(feat6_1, style_b_map)
+            feat7_2 = self.conv7_2(feat6_2, style_c_map)
+            feat8_1 = self.conv8_1(feat7_1, style_b_map)
+            feat8_2 = self.conv8_2(feat7_2, style_c_map)
+
+            out_1 = torch.tanh(self.conv_final_1(feat8_1))
+            out_2 = torch.tanh(self.conv_final_2(feat8_2))
+            out = torch.cat((out_1, out_2), dim=1)
         else:
+            feat3 = self.conv31(feat2, fused_style) # [1, feat_ch*2, H/4, W/4]
+            feat3 = self.conv32(feat3, fused_style) # [1, feat_ch*2, H/4, W/4]
+            feat4 = self.conv41(feat3 + feat2, fused_style) # [1, feat_ch*2, H/2, W/2]
+            feat4 = self.conv42(feat4, fused_style)         # [1, feat_ch*2, H/2, W/2]
+            feat5 = self.conv51(feat4 + feat1, fused_style) # [1, feat_ch*2, H, W]
+            feat5 = self.conv52(feat5, fused_style)         # [1, feat_ch*2, H, W]
+            feat6 = self.conv6(feat5 + feat0, fused_style)  # [1, feat_ch*2, H, W]
             out = self.conv_final(feat6)
             out = torch.tanh(out)
 
