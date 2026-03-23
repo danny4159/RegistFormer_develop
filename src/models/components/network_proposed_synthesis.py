@@ -355,7 +355,9 @@ class ProposedSynthesisModule(nn.Module):
             common_shared, private_b, private_c, decomp_dict = self.style_router(
                 style_b, style_c, content_hint
             )
-            shared_style = common_shared
+            shared_style = common_shared.mean(dim=1, keepdim=True)
+            private_b = private_b.mean(dim=1, keepdim=True)
+            private_c = private_c.mean(dim=1, keepdim=True)
         elif self.use_style_router and self.use_multiple_outputs:
             shared_style = style_guidance_raw.mean(dim=1, keepdim=True)
         else:
