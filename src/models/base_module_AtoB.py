@@ -83,28 +83,28 @@ class BaseModule_AtoB(LightningModule):  # single direction
         return gc, nmi, fid, kid, sharpness
 
     def forward(self, a: torch.Tensor, b: torch.Tensor, c: Optional[torch.Tensor] = None):
-        
+
         # Case1. Refernece guided generation
         if type(self.netG_A).__name__ in ["RegistFormer", "ProposedSynthesisModule"]:
             if c is not None:
                 merged_input = torch.cat((a, b, c), dim=1)
-            else:         
+            else:
                 merged_input = torch.cat((a, b), dim=1)
-            
+
             # Sliding window on inference
             if self.params.is_3d and not self.training:
                 roi_size = tuple(self.params.crop_size)
                 inferer = SlidingWindowInferer(roi_size=roi_size, mode='gaussian', overlap=0.5, padding_mode='constant', cval=-1) # TODO: 가능한 가로 세로는 많이
                 pred = inferer(inputs=merged_input, network=self.netG_A)
-                return pred
+                return pred, None  # No decomp_dict for inference
             else:
                 if self.params.use_sliding_inference and not self.training:
                     roi_size = tuple(self.params.crop_size)
                     inferer = SlidingWindowInferer(roi_size=roi_size, mode='gaussian') # 128,128
                     pred = inferer(inputs=merged_input, network=self.netG_A) #inputs 손봐야해
-                    return pred
-        
-            return self.netG_A(merged_input)
+                    return pred, None  # No decomp_dict for inference
+
+            return self.netG_A(merged_input)  # Returns (out, decomp_dict)
         
         if type(self.netG_A).__name__ in ["AutoencoderKL", "AutoencoderKlMaisi"]:
             torch.cuda.empty_cache()
@@ -165,49 +165,74 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 if len(batch) == 3: # Ref cont 2
                     real_a, real_b, real_c = batch
                     real_merged = torch.cat((real_b, real_c), dim=1)
-                    fake_merged = self.forward(real_a, real_merged)
+                    result = self.forward(real_a, real_merged)
+                    # Handle both old (single output) and new (tuple) return formats
+                    if isinstance(result, tuple):
+                        fake_merged, decomp_dict = result
+                    else:
+                        fake_merged, decomp_dict = result, None
                     fake_b, fake_c = fake_merged[:, :1, :, :], fake_merged[:, 1:, :, :]
                     real_d, fake_d = None, None
                 elif len(batch) == 4: # Ref cont 3
                     real_a, real_b, real_c, real_d = batch
                     real_merged = torch.cat((real_b, real_c, real_d), dim=1)
-                    fake_merged = self.forward(real_a, real_merged)
+                    result = self.forward(real_a, real_merged)
+                    if isinstance(result, tuple):
+                        fake_merged, decomp_dict = result
+                    else:
+                        fake_merged, decomp_dict = result, None
                     fake_b, fake_c, fake_d = fake_merged[:, :1, :, :], fake_merged[:, 1:2, :, :], fake_merged[:, 2:, :, :]
 
-                return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d
+                return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, decomp_dict
 
             else: # use_misalign_simul == True:
                 if len(batch) == 5:
                     real_a, real_b, real_b_ref, real_c, real_c_ref = batch
-                    
+
                     real_merged = torch.cat((real_b_ref, real_c_ref), dim=1)
-                    fake_merged = self.forward(real_a, real_merged)
+                    result = self.forward(real_a, real_merged)
+                    if isinstance(result, tuple):
+                        fake_merged, decomp_dict = result
+                    else:
+                        fake_merged, decomp_dict = result, None
                     fake_b, fake_c = fake_merged[:, :1, :, :], fake_merged[:, 1:, :, :]
                     real_d, fake_d, real_d_ref = None, None, None
                 else:
                     raise ValueError(f"Expected batch size of 5 for misaligned simulation, but got {len(batch)}")
-            
-            return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref # real: GT, fake: syn by Ref
+
+            return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref, decomp_dict # real: GT, fake: syn by Ref
 
         else: # use_multiple_outputs=False, Single generation
             if self.params.use_misalign_simul == False: # Registformer
 
                 if getattr(self.params, "skip_stage1_infer", False): # Registformer: Use already synthesised initial output (Save inference memory, and time for training)
                     real_a, real_b, synth_b = batch
-                    fake_b = self.forward(real_a, real_b, synth_b)
-                    return real_a, real_b, fake_b
+                    result = self.forward(real_a, real_b, synth_b)
+                    if isinstance(result, tuple):
+                        fake_b, decomp_dict = result
+                    else:
+                        fake_b, decomp_dict = result, None
+                    return real_a, real_b, fake_b, decomp_dict
                 else:
                     real_a, real_b = batch
                     # if not self.training: # TODO: Registformer 3D: val,test때는 전체 slice로 해야 sliding window때 문제없어서. 근데 시간 절약하고싶을땐 빼둬
                     #     real_a = self.pad_slice_to_128(real_a, padding_value=-1) # No on registformer
                     #     real_b = self.pad_slice_to_128(real_b, padding_value=-1)
-                    fake_b = self.forward(real_a, real_b)
+                    result = self.forward(real_a, real_b)
+                    if isinstance(result, tuple):
+                        fake_b, decomp_dict = result
+                    else:
+                        fake_b, decomp_dict = result, None
                     real_b_ref = None
-                    return real_a, real_b, fake_b
+                    return real_a, real_b, fake_b, decomp_dict
             else: # use_misalign_simul == True:
                 real_a, real_b, real_b_ref = batch
-                fake_b = self.forward(real_a, real_b_ref)
-            return real_a, real_b, fake_b, real_b_ref
+                result = self.forward(real_a, real_b_ref)
+                if isinstance(result, tuple):
+                    fake_b, decomp_dict = result
+                else:
+                    fake_b, decomp_dict = result, None
+            return real_a, real_b, fake_b, real_b_ref, decomp_dict
 
     def on_train_start(self):
         # by default lightning executes validation step sanity checks before training starts,
