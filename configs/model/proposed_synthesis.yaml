@@ -25,6 +25,8 @@ netG_A:
   use_multiple_outputs: ${data.use_multiple_outputs}
   is_3d: ${data.is_3d}
   use_separate_style_layers: false
+  use_style_decomposition: true  # Shared-Private Style Decomposition
+  style_ch: 64  # Style feature channels for decomposition
   # init_type: 'kaiming'
 
 netD_A:
@@ -70,6 +72,11 @@ params: # Other params
   lambda_nce: 5
   lambda_mind: 0
   lambda_l1: 0
+  # Shared-Private Style Decomposition losses
+  use_style_decomposition: true  # Enable style decomposition
+  lambda_shared: 1.0   # Shared consistency loss weight
+  lambda_ortho: 0.1    # Orthogonality loss weight (private vs shared)
+  lambda_leak: 0.05    # Structure leakage suppression loss weight
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False

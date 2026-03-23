@@ -4,6 +4,7 @@ from typing import Any
 import itertools
 
 import torch
+import torch.nn.functional as F
 from src.losses.gan_loss import GANLoss
 from src.losses.contextual_loss import Contextual_Loss, VGG_Model
 from src.losses.patch_nce_loss import PatchNCELoss
@@ -76,6 +77,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # PatchNCE specific initializations
         # self.nce_layers = [0,2,4,6] # range: 0~6
         # self.flip_equivariance = params.flip_equivariance
+
+        # Style decomposition loss weights (for Shared-Private Style Decomposition)
+        self.lambda_shared = getattr(params, 'lambda_shared', 1.0)
+        self.lambda_ortho = getattr(params, 'lambda_ortho', 0.1)
+        self.lambda_leak = getattr(params, 'lambda_leak', 0.05)
+        self.use_style_decomposition = getattr(params, 'use_style_decomposition', False)
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device) 
@@ -253,6 +260,80 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_l1_c = self.criterionL1(real_c_ref, fake_c) * self.params.lambda_l1
                 self.log("L1_c_Loss", loss_l1_c.detach(), prog_bar=True)
                 loss_G += loss_l1_c
+
+        ##################################################################################################################
+        ## Style Decomposition Losses (Shared-Private Style Decomposition + Conservative Routing)
+        if self.use_style_decomposition and hasattr(self.netG_A, 'aux') and self.netG_A.aux:
+            aux = self.netG_A.aux
+
+            # 1. Shared Consistency Loss: s_common_b and s_common_c should be similar
+            # This ensures the "shared" component captures truly common information
+            if 's_common_b' in aux and 's_common_c' in aux:
+                loss_shared = F.l1_loss(aux['s_common_b'], aux['s_common_c']) * self.lambda_shared
+                self.log("Shared_Loss", loss_shared.detach(), prog_bar=True)
+                loss_G += loss_shared
+
+            # 2. Orthogonality Loss: private and shared components should be decorrelated
+            # Prevents private from containing shared info and vice versa
+            if 's_priv_b' in aux and 's_priv_c' in aux and 's_common' in aux:
+                # Normalize features for cosine similarity computation
+                def cosine_sq(a, b):
+                    a_flat = a.view(a.size(0), -1)
+                    b_flat = b.view(b.size(0), -1)
+                    a_norm = F.normalize(a_flat, dim=1)
+                    b_norm = F.normalize(b_flat, dim=1)
+                    cos_sim = (a_norm * b_norm).sum(dim=1)
+                    return (cos_sim ** 2).mean()
+
+                s_common_flat = aux['s_common']
+                ortho_b = cosine_sq(aux['s_priv_b'], s_common_flat)
+                ortho_c = cosine_sq(aux['s_priv_c'], s_common_flat)
+                loss_ortho = (ortho_b + ortho_c) * self.lambda_ortho
+                self.log("Ortho_Loss", loss_ortho.detach(), prog_bar=True)
+                loss_G += loss_ortho
+
+            # 3. Structure Leakage Suppression Loss
+            # Prevents shared style from correlating with source structure features
+            # Use early layer features from encoder as structure proxy
+            if 's_common' in aux and self.lambda_leak > 0:
+                # Get structure features from the generator's encoder (low-level features)
+                # We use feat0 or feat1 as structure proxy since they contain anatomy info
+                merged_struct = torch.cat((real_a, real_b, real_c), dim=1)
+                struct_feats = self.netG_A(merged_struct, layers=[0], encode_only=True)
+                if struct_feats:
+                    # Downsample structure features to match s_common size
+                    struct_feat = struct_feats[0]  # feat0: low-level structure
+                    s_common = aux['s_common']
+
+                    # Match spatial dimensions
+                    if struct_feat.shape[2:] != s_common.shape[2:]:
+                        struct_feat = F.adaptive_avg_pool2d(struct_feat, s_common.shape[2:])
+
+                    # Use global average pooling to get channel-wise statistics
+                    # This avoids dimension mismatch between different channel sizes
+                    s_gap = F.adaptive_avg_pool2d(s_common, 1).squeeze(-1).squeeze(-1)  # (B, C_s)
+                    f_gap = F.adaptive_avg_pool2d(struct_feat, 1).squeeze(-1).squeeze(-1)  # (B, C_f)
+
+                    # Compute correlation using normalized features
+                    # We want to penalize if style and structure features have similar patterns
+                    s_norm = F.normalize(s_gap, dim=1)
+                    f_norm = F.normalize(f_gap, dim=1)
+
+                    # Compute cross-correlation matrix between style and structure channels
+                    # If they're uncorrelated, this should be close to zero
+                    corr_matrix = torch.matmul(s_norm.unsqueeze(2), f_norm.unsqueeze(1))  # (B, C_s, C_f)
+
+                    # Penalize high correlation
+                    loss_leak = (corr_matrix ** 2).mean() * self.lambda_leak
+                    self.log("Leak_Loss", loss_leak.detach(), prog_bar=True)
+                    loss_G += loss_leak
+
+            # Log gate activations for monitoring
+            if 'alpha_b' in aux and 'alpha_c' in aux:
+                alpha_b_mean = aux['alpha_b'].mean().detach()
+                alpha_c_mean = aux['alpha_c'].mean().detach()
+                self.log("Gate_b", alpha_b_mean, prog_bar=False)
+                self.log("Gate_c", alpha_c_mean, prog_bar=False)
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G

@@ -8,6 +8,123 @@ def get_layer_by_dim(is_3d):
     Norm = getattr(nn, f'InstanceNorm{dim}d')
     return Conv, Norm, dim
 
+
+class LocalStyleEncoder(nn.Module):
+    """
+    Local style encoder that extracts style features from reference images.
+    Uses depthwise separable convolutions to limit receptive field and prevent
+    structure information leakage.
+
+    Key design choices:
+    - Small receptive field to capture local texture/style
+    - Depthwise separable conv to reduce parameters and prevent structure encoding
+    - Low-pass tendency through moderate downsampling
+    """
+    def __init__(self, in_ch=1, hid=32, out_ch=64, is_3d=False):
+        super().__init__()
+        Conv, _, _ = get_layer_by_dim(is_3d)
+
+        self.net = nn.Sequential(
+            Conv(in_ch, hid, 3, 1, 1),
+            nn.LeakyReLU(0.2, inplace=True),
+            Conv(hid, hid, 3, 1, 1, groups=hid),  # depthwise
+            Conv(hid, out_ch, 1, 1, 0),  # pointwise
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class SharedPrivateStyleDecomposer(nn.Module):
+    """
+    Decomposes style features into shared and private components.
+
+    - s_common: shared style components between two references
+    - s_priv_b, s_priv_c: private style components for each reference
+
+    The shared component captures common texture/style patterns,
+    while private components capture reference-specific characteristics.
+    """
+    def __init__(self, ch=64, is_3d=False):
+        super().__init__()
+        Conv, _, _ = get_layer_by_dim(is_3d)
+
+        # Network to extract common style from concatenated features
+        self.common_net = nn.Sequential(
+            Conv(ch * 2, ch, 3, 1, 1),
+            nn.LeakyReLU(0.2, inplace=True),
+            Conv(ch, ch, 3, 1, 1),
+        )
+
+        # Projectors to compute private components
+        # s_priv = s - proj(s_common)
+        self.proj_b = Conv(ch, ch, 1, 1, 0)
+        self.proj_c = Conv(ch, ch, 1, 1, 0)
+
+        # Separate common extractors for each branch (for loss computation)
+        self.common_from_b = Conv(ch, ch, 1, 1, 0)
+        self.common_from_c = Conv(ch, ch, 1, 1, 0)
+
+    def forward(self, s_b, s_c):
+        # Extract shared style from concatenated features
+        s_common = self.common_net(torch.cat([s_b, s_c], dim=1))
+
+        # Compute branch-specific common representations (for shared loss)
+        s_common_b = self.common_from_b(s_common)
+        s_common_c = self.common_from_c(s_common)
+
+        # Compute private components by subtracting projected common
+        s_priv_b = s_b - self.proj_b(s_common)
+        s_priv_c = s_c - self.proj_c(s_common)
+
+        return s_common, s_common_b, s_common_c, s_priv_b, s_priv_c
+
+
+class StyleRouter(nn.Module):
+    """
+    Routes shared style information to each branch with gated control.
+
+    Key design: Conservative routing
+    - Gate values start small (biased towards private style)
+    - Only truly helpful shared style gets mixed in during training
+    - Prevents structure information from leaking through shared pathway
+
+    Final style for each branch:
+    s_hat = s_priv + alpha * route(s_common)
+    where alpha is a learned spatial gate in [0, 1]
+    """
+    def __init__(self, ch=64, is_3d=False):
+        super().__init__()
+        Conv, _, _ = get_layer_by_dim(is_3d)
+
+        # Routing projectors for shared style
+        self.route_b = Conv(ch, ch, 3, 1, 1)
+        self.route_c = Conv(ch, ch, 3, 1, 1)
+
+        # Gating networks - initialized to produce small values
+        self.gate_b = Conv(ch, ch, 1, 1, 0)
+        self.gate_c = Conv(ch, ch, 1, 1, 0)
+
+        # Initialize gate biases to negative values for conservative start
+        nn.init.constant_(self.gate_b.bias, -2.0)
+        nn.init.constant_(self.gate_c.bias, -2.0)
+
+    def forward(self, s_common, s_priv_b, s_priv_c):
+        # Compute gating values (sigmoid ensures [0, 1])
+        alpha_b = torch.sigmoid(self.gate_b(s_priv_b))
+        alpha_c = torch.sigmoid(self.gate_c(s_priv_c))
+
+        # Route shared style through projectors
+        routed_b = self.route_b(s_common)
+        routed_c = self.route_c(s_common)
+
+        # Final style: private + gated shared
+        s_hat_b = s_priv_b + alpha_b * routed_b
+        s_hat_c = s_priv_c + alpha_c * routed_c
+
+        return s_hat_b, s_hat_c, alpha_b, alpha_c
+
 class ProposedSynthesisModule(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
@@ -19,13 +136,38 @@ class ProposedSynthesisModule(nn.Module):
             self.use_multiple_outputs = kwargs.get('use_multiple_outputs', None)
             self.is_3d = kwargs.get('is_3d', False)
             self.use_separate_style_layers = kwargs.get('use_separate_style_layers', False)
+            self.use_style_decomposition = kwargs.get('use_style_decomposition', False)
+            self.style_ch = kwargs.get('style_ch', 64)  # Style feature channels
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
-        
+
         Conv, _, _ = get_layer_by_dim(self.is_3d)
 
         ch = 2 if self.use_multiple_outputs else 1
+
+        # Shared-Private Style Decomposition modules
+        if self.use_style_decomposition and self.use_multiple_outputs:
+            self.local_style_encoder = LocalStyleEncoder(
+                in_ch=1, hid=32, out_ch=self.style_ch, is_3d=self.is_3d
+            )
+            self.style_decomposer = SharedPrivateStyleDecomposer(
+                ch=self.style_ch, is_3d=self.is_3d
+            )
+            self.style_router = StyleRouter(
+                ch=self.style_ch, is_3d=self.is_3d
+            )
+            # Project routed style back to 1 channel for StyleConv input
+            self.style_proj_b = Conv(self.style_ch, 1, 1, 1, 0)
+            self.style_proj_c = Conv(self.style_ch, 1, 1, 1, 0)
+
+            # Optional: Style smoother to reduce structure leakage
+            self.style_smoother = nn.Sequential(
+                Conv(1, 1, 3, 1, 1, groups=1),
+            )
+
+        # Auxiliary storage for loss computation
+        self.aux = {}
 
         self.guide_net = nn.Sequential(
             nn.Conv2d(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
@@ -102,18 +244,60 @@ class ProposedSynthesisModule(nn.Module):
 
         x = merged_input[:, :1, ...]
         ref = merged_input[:, 1:, ...]
-        
+
         if self.is_3d:
             ref = ref.permute(0, 1, 4, 2, 3)
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
-            style_guidance_1 = style_guidance_1.permute(0, 1, 3, 4, 2)
+            style_guidance_raw = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
+            style_guidance_raw = style_guidance_raw.permute(0, 1, 3, 4, 2)
         else:
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯 
-        
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/64, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, size=(1, 1), mode='nearest') # Ablation
+            style_guidance_raw = F.interpolate(ref, scale_factor=1/16, mode='nearest')
+
+        # Shared-Private Style Decomposition + Conservative Routing
+        if self.use_style_decomposition and self.use_multiple_outputs and ref.shape[1] >= 2:
+            # Extract style features from each reference
+            style_1_raw = style_guidance_raw[:, :1, ...]  # real_b style
+            style_2_raw = style_guidance_raw[:, 1:2, ...]  # real_c style
+
+            # Encode local style features
+            s_b = self.local_style_encoder(style_1_raw)
+            s_c = self.local_style_encoder(style_2_raw)
+
+            # Decompose into shared and private components
+            s_common, s_common_b, s_common_c, s_priv_b, s_priv_c = self.style_decomposer(s_b, s_c)
+
+            # Route shared style with gating
+            s_hat_b, s_hat_c, alpha_b, alpha_c = self.style_router(s_common, s_priv_b, s_priv_c)
+
+            # Project back to single channel for StyleConv compatibility
+            style_1 = self.style_proj_b(s_hat_b)
+            style_2 = self.style_proj_c(s_hat_c)
+
+            # Optional: Apply style smoother to reduce structure leakage
+            style_1 = self.style_smoother(style_1)
+            style_2 = self.style_smoother(style_2)
+
+            # Combine into style_guidance_1 format
+            style_guidance_1 = torch.cat([style_1, style_2], dim=1)
+
+            # Store auxiliary information for loss computation
+            self.aux = {
+                "s_b": s_b,
+                "s_c": s_c,
+                "s_common": s_common,
+                "s_common_b": s_common_b,
+                "s_common_c": s_common_c,
+                "s_priv_b": s_priv_b,
+                "s_priv_c": s_priv_c,
+                "s_hat_b": s_hat_b,
+                "s_hat_c": s_hat_c,
+                "alpha_b": alpha_b,
+                "alpha_c": alpha_c,
+            }
+        else:
+            # Original behavior: use raw downsampled ref as style guidance
+            style_guidance_1 = style_guidance_raw
+            self.aux = {}
+
         feats = []
         feat0 = self.conv0(x, style_guidance_1) # [1, feat_ch, H, W]
         feat1 = self.conv11(feat0, style_guidance_1) # [1, feat_ch, H/2, W/2]
