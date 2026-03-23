@@ -293,32 +293,32 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_G += loss_ortho
 
             # 3. Structure Leakage Suppression Loss
-            # Prevents shared style from correlating with source structure features
-            # Use early layer features from encoder as structure proxy
-            if 's_common' in aux and self.lambda_leak > 0:
-                # Use encode_content_only to avoid overwriting self.aux
+            # Penalize correlation between source structure and the shared contribution
+            # that is actually injected into each synthesis branch.
+            if self.lambda_leak > 0 and ('shared_contrib_b' in aux or 's_common' in aux):
                 if hasattr(self.netG_A, 'encode_content_only'):
                     struct_feat, _, _ = self.netG_A.encode_content_only(real_a)
                 else:
-                    # Fallback: use forward with encode_only (may overwrite aux)
                     merged_struct = torch.cat((real_a, real_a, real_a), dim=1)
                     struct_feats = self.netG_A(merged_struct, layers=[0], encode_only=True)
                     struct_feat = struct_feats[0] if struct_feats else None
 
                 if struct_feat is not None:
-                    s_common = aux['s_common']
-
-                    # Match spatial dimensions with 2D/3D support
-                    if self.params.is_3d:
-                        if struct_feat.shape[2:] != s_common.shape[2:]:
-                            struct_feat = F.adaptive_avg_pool3d(struct_feat, s_common.shape[2:])
-                        s_gap = F.adaptive_avg_pool3d(s_common, 1).flatten(1)  # (B, C_s)
-                        f_gap = F.adaptive_avg_pool3d(struct_feat, 1).flatten(1)  # (B, C_f)
+                    if 'shared_contrib_b' in aux and 'shared_contrib_c' in aux:
+                        shared_target = 0.5 * (aux['shared_contrib_b'] + aux['shared_contrib_c'])
                     else:
-                        if struct_feat.shape[2:] != s_common.shape[2:]:
-                            struct_feat = F.adaptive_avg_pool2d(struct_feat, s_common.shape[2:])
-                        s_gap = F.adaptive_avg_pool2d(s_common, 1).flatten(1)  # (B, C_s)
-                        f_gap = F.adaptive_avg_pool2d(struct_feat, 1).flatten(1)  # (B, C_f)
+                        shared_target = aux['s_common']
+
+                    if self.params.is_3d:
+                        if struct_feat.shape[2:] != shared_target.shape[2:]:
+                            struct_feat = F.adaptive_avg_pool3d(struct_feat, shared_target.shape[2:])
+                        s_gap = F.adaptive_avg_pool3d(shared_target, 1).flatten(1)
+                        f_gap = F.adaptive_avg_pool3d(struct_feat, 1).flatten(1)
+                    else:
+                        if struct_feat.shape[2:] != shared_target.shape[2:]:
+                            struct_feat = F.adaptive_avg_pool2d(struct_feat, shared_target.shape[2:])
+                        s_gap = F.adaptive_avg_pool2d(shared_target, 1).flatten(1)
+                        f_gap = F.adaptive_avg_pool2d(struct_feat, 1).flatten(1)
 
                     # Compute correlation using normalized features
                     # We want to penalize if style and structure features have similar patterns
@@ -428,6 +428,37 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
         return loss_G
 
+    def backward_D_B_3D(self, real_c, fake_c):
+        """
+        3D volume discriminator loss for domain C using the 2D discriminator slice-wise.
+        """
+        b, c, h, w, d = real_c.shape
+        loss_D_total = 0.0
+
+        if self.criterionGAN3D:
+            pred_real = self.netD_B(real_c)
+            loss_real = self.criterionGAN(pred_real, True)
+
+            pred_fake = self.netD_B(fake_c.detach())
+            loss_fake = self.criterionGAN(pred_fake, False)
+
+            loss_D_total = (loss_real + loss_fake) * 0.5
+        else:
+            for i in range(d):
+                real_slice = real_c[..., i]
+                fake_slice = fake_c[..., i]
+
+                pred_real = self.netD_B(real_slice)
+                loss_real = self.criterionGAN(pred_real, True)
+
+                pred_fake = self.netD_B(fake_slice.detach())
+                loss_fake = self.criterionGAN(pred_fake, False)
+
+                loss_D_total += (loss_real + loss_fake) * 0.5
+
+            loss_D_total = loss_D_total / d
+        return loss_D_total
+
     def training_step(self, batch: Any, batch_idx: int):
         
         if self.params.use_multiple_outputs:
@@ -473,7 +504,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
         with optimizer_D_A.toggle_model():
             if self.params.is_3d:
-                loss_D_A = self.backward_D_A_3D(real_a, fake_b)
+                loss_D_A = self.backward_D_A_3D(real_b, fake_b)
             else:
                 loss_D_A = self.backward_D_A(real_b, fake_b)
             self.manual_backward(loss_D_A)
@@ -486,7 +517,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         
         if self.params.use_multiple_outputs:
             with optimizer_D_B.toggle_model(): 
-                loss_D_B = self.backward_D_B(real_c, fake_c)
+                if self.params.is_3d:
+                    loss_D_B = self.backward_D_B_3D(real_c, fake_c)
+                else:
+                    loss_D_B = self.backward_D_B(real_c, fake_c)
                 self.manual_backward(loss_D_B)
                 self.clip_gradients(
                     optimizer_D_B, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
