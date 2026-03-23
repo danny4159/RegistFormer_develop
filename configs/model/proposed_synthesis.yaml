@@ -24,6 +24,7 @@ netG_A:
   demodulate: true
   use_multiple_outputs: ${data.use_multiple_outputs}
   is_3d: ${data.is_3d}
+  use_separate_style_layers: false
   # init_type: 'kaiming'
 
 netD_A:

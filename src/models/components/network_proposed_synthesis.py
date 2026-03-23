@@ -18,6 +18,7 @@ class ProposedSynthesisModule(nn.Module):
             self.demodulate = kwargs['demodulate']
             self.use_multiple_outputs = kwargs.get('use_multiple_outputs', None)
             self.is_3d = kwargs.get('is_3d', False)
+            self.use_separate_style_layers = kwargs.get('use_separate_style_layers', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -61,6 +62,21 @@ class ProposedSynthesisModule(nn.Module):
         self.conv6 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d) # 이걸 빠트렸었어.
                                 # activate=False, demodulate=self.demodulate)
+
+        # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 style 적용
+        if self.use_separate_style_layers and self.use_multiple_outputs:
+            # 각 branch는 feat_ch 채널 (전체의 절반)
+            self.conv7_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv7_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv8_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            self.conv8_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            # 각각 독립적인 conv_final
+            self.conv_final_1 = Conv(self.feat_ch, self.output_nc // 2, kernel_size=3, padding=1)
+            self.conv_final_2 = Conv(self.feat_ch, self.output_nc // 2, kernel_size=3, padding=1)
         
         ## Added for checkerboard artifact
         # if self.use_multiple_outputs:
@@ -111,11 +127,38 @@ class ProposedSynthesisModule(nn.Module):
         feat5 = self.conv51(feat4 + feat1, style_guidance_1)# [1, feat_ch, H, W]
         feat5 = self.conv52(feat5, style_guidance_1)        # [1, feat_ch, H, W]
         feat6 = self.conv6(feat5 + feat0, style_guidance_1) # [1, feat_ch, H, W]
-        out = self.conv_final(feat6)
-        out = torch.tanh(out)
+
+        # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 처리
+        if self.use_separate_style_layers and self.use_multiple_outputs:
+            # feat6를 반으로 분리
+            feat6_1, feat6_2 = torch.chunk(feat6, chunks=2, dim=1)  # 각 [B, feat_ch, H, W]
+            # style도 분리
+            style_1 = style_guidance_1[:, :1, ...]  # [B, 1, ...]
+            style_2 = style_guidance_1[:, 1:, ...]  # [B, 1, ...]
+
+            # conv7: 각각 독립적으로 처리
+            feat7_1 = self.conv7_1(feat6_1, style_1)  # [B, feat_ch, H, W]
+            feat7_2 = self.conv7_2(feat6_2, style_2)  # [B, feat_ch, H, W]
+
+            # conv8: 각각 독립적으로 처리
+            feat8_1 = self.conv8_1(feat7_1, style_1)  # [B, feat_ch, H, W]
+            feat8_2 = self.conv8_2(feat7_2, style_2)  # [B, feat_ch, H, W]
+
+            # 각각 conv_final + tanh
+            out_1 = torch.tanh(self.conv_final_1(feat8_1))  # [B, output_nc//2, H, W]
+            out_2 = torch.tanh(self.conv_final_2(feat8_2))  # [B, output_nc//2, H, W]
+
+            # 마지막에 합쳐서 반환
+            out = torch.cat((out_1, out_2), dim=1)  # [B, output_nc, H, W]
+        else:
+            out = self.conv_final(feat6)
+            out = torch.tanh(out)
 
         if encode_only:
             layers_dict = {0: feat0, 1: feat1, 2: feat2, 3: feat3, 4: feat4, 5: feat5, 6: feat6}
+            if self.use_separate_style_layers and self.use_multiple_outputs:
+                layers_dict[7] = torch.cat((feat7_1, feat7_2), dim=1)
+                layers_dict[8] = torch.cat((feat8_1, feat8_2), dim=1)
             return [layers_dict[i] for i in layers]
         
         return out
