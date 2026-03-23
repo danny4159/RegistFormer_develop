@@ -151,15 +151,6 @@ class ProposedSynthesisModule(nn.Module):
 
         self.aux = {}
 
-        self.guide_net = nn.Sequential(
-            nn.Conv2d(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(int(self.feat_ch / 8), int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(int(self.feat_ch / 8), int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
-
         if self.use_multiple_outputs:
             # Shared content encoder: explicit style exchange should happen in the router,
             # not inside a shared style-conditioned trunk.
@@ -259,8 +250,7 @@ class ProposedSynthesisModule(nn.Module):
                                     upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
             self.conv6 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                    activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
-
-        self.conv_final = Conv(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
+            self.conv_final = Conv(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
 
     def forward(self, merged_input, layers=[], encode_only=False):
         x = merged_input[:, :1, ...]
