@@ -91,20 +91,20 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         ##################################################################################################################
         ## 1. GAN Loss
         if self.criterionGAN:
-            pred_fake = self.netD_A(fake_b.detach())
+            pred_fake = self.netD_A(fake_b)
             loss_gan_b = self.criterionGAN(pred_fake, True)
             self.log("Gan_b_Loss", loss_gan_b.detach(), prog_bar=True)
             loss_G += loss_gan_b
             # assert not torch.isnan(loss_gan_b).any(), "GAN Loss is NaN"
             
             if self.params.use_multiple_outputs:
-                pred_fake = self.netD_B(fake_c.detach())
+                pred_fake = self.netD_B(fake_c)
                 loss_gan_c = self.criterionGAN(pred_fake, True)
                 self.log("Gan_c_Loss", loss_gan_c.detach(), prog_bar=True)
                 loss_G += loss_gan_c
                 # assert not torch.isnan(loss_gan_c).any(), "GAN Loss is NaN"
                 if fake_d is not None:
-                    pred_fake = self.netD_D(fake_d.detach())
+                    pred_fake = self.netD_D(fake_d)
                     loss_gan_d = self.criterionGAN(pred_fake, True)
                     self.log("Gan_d_Loss", loss_gan_d.detach(), prog_bar=True)
                     loss_G += loss_gan_d
@@ -266,10 +266,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         if self.use_style_decomposition and hasattr(self.netG_A, 'aux') and self.netG_A.aux:
             aux = self.netG_A.aux
 
-            # 1. Shared Consistency Loss: s_common_b and s_common_c should be similar
+            # 1. Shared Consistency Loss: compare the recovered shared components directly
             # This ensures the "shared" component captures truly common information
-            if 's_common_b' in aux and 's_common_c' in aux:
-                loss_shared = F.l1_loss(aux['s_common_b'], aux['s_common_c']) * self.lambda_shared
+            if 'common_b' in aux and 'common_c' in aux:
+                loss_shared = F.l1_loss(aux['common_b'], aux['common_c']) * self.lambda_shared
                 self.log("Shared_Loss", loss_shared.detach(), prog_bar=True)
                 loss_G += loss_shared
 
@@ -298,7 +298,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             if 's_common' in aux and self.lambda_leak > 0:
                 # Get structure features from the generator's encoder (low-level features)
                 # We use feat0 or feat1 as structure proxy since they contain anatomy info
-                merged_struct = torch.cat((real_a, real_b, real_c), dim=1)
+                merged_struct = torch.cat((real_a, real_a, real_a), dim=1)
                 struct_feats = self.netG_A(merged_struct, layers=[0], encode_only=True)
                 if struct_feats:
                     # Downsample structure features to match s_common size
