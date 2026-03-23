@@ -33,8 +33,8 @@ class StyleDecompositionLoss(nn.Module):
 
     def compute_cosine_similarity(self, x, y):
         """Compute cosine similarity between two tensors (spatial average)"""
-        x_flat = x.view(x.size(0), x.size(1), -1)
-        y_flat = y.view(y.size(0), y.size(1), -1)
+        x_flat = x.reshape(x.size(0), x.size(1), -1)
+        y_flat = y.reshape(y.size(0), y.size(1), -1)
 
         x_norm = F.normalize(x_flat, p=2, dim=1)
         y_norm = F.normalize(y_flat, p=2, dim=1)
@@ -91,7 +91,12 @@ class StyleDecompositionLoss(nn.Module):
         common_c = decomp_dict['common_c']
         private_b = decomp_dict['private_b']
         private_c = decomp_dict['private_c']
-        c_shared = decomp_dict.get('common_shared', decomp_dict['c_shared'])
+        if 'common_shared' in decomp_dict:
+            c_shared = decomp_dict['common_shared']
+        elif 'c_shared' in decomp_dict:
+            c_shared = decomp_dict['c_shared']
+        else:
+            raise KeyError("decomp_dict must contain 'common_shared' or 'c_shared'")
 
         loss_dict = {}
 
