@@ -153,10 +153,9 @@ class ProposedSynthesisModule(nn.Module):
             self.style_router = StyleRouter(
                 ch=self.style_ch, is_3d=self.is_3d
             )
-            self.style_proj_b = Conv(self.style_ch, 1, 1, 1, 0)
-            self.style_proj_c = Conv(self.style_ch, 1, 1, 1, 0)
+            # Use depthwise conv to smooth style while preserving multi-channel representation
             self.style_smoother = nn.Sequential(
-                Conv(1, 1, 3, 1, 1, groups=1),
+                Conv(self.style_ch, self.style_ch, 3, 1, 1, groups=self.style_ch),
             )
 
         self.aux = {}
@@ -199,45 +198,48 @@ class ProposedSynthesisModule(nn.Module):
                 style_denorm=False, ch=1, is_3d=self.is_3d
             )
 
+            # Branch b StyleConvs with multi-channel style input
+            style_in = self.style_ch if self.use_style_decomposition else 1
             self.conv31_b = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                      downsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                      downsample=False, activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
             self.conv32_b = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                      downsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                      downsample=False, activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
             self.conv41_b = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                      upsample=True, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                      upsample=True, activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
             self.conv42_b = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                      upsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                      upsample=False, activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
             self.conv51_b = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                      upsample=True, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                      upsample=True, activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
             self.conv52_b = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                      upsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                      upsample=False, activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
             self.conv6_b = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                     activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
 
+            # Branch c StyleConvs with multi-channel style input
             self.conv31_c = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                      downsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                      downsample=False, activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
             self.conv32_c = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                      downsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                      downsample=False, activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
             self.conv41_c = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                      upsample=True, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                      upsample=True, activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
             self.conv42_c = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                      upsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                      upsample=False, activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
             self.conv51_c = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                      upsample=True, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                      upsample=True, activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
             self.conv52_c = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                      upsample=False, activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                      upsample=False, activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
             self.conv6_c = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                     activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
 
             if self.use_separate_style_layers:
                 self.conv7_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                         activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                         activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
                 self.conv7_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                         activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                         activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
                 self.conv8_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                         activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                         activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
                 self.conv8_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                         activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                                         activate=True, demodulate=self.demodulate, ch=1, style_in_ch=style_in, is_3d=self.is_3d)
 
             self.conv_final_1 = Conv(self.feat_ch, branch_output_nc, kernel_size=3, padding=1)
             self.conv_final_2 = Conv(self.feat_ch, branch_output_nc, kernel_size=3, padding=1)
@@ -274,9 +276,10 @@ class ProposedSynthesisModule(nn.Module):
         ref = merged_input[:, 1:, ...]
 
         if self.is_3d:
+            # Keep as [B, C, D, H, W] for 3D convolutions - do NOT permute back
             ref = ref.permute(0, 1, 4, 2, 3)
             style_guidance_raw = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
-            style_guidance_raw = style_guidance_raw.permute(0, 1, 3, 4, 2)
+            # style_guidance_raw stays as [B, C, D, H, W]
         else:
             style_guidance_raw = F.interpolate(ref, scale_factor=1/16, mode='nearest')
 
@@ -290,10 +293,9 @@ class ProposedSynthesisModule(nn.Module):
             s_common, common_b, common_c, s_priv_b, s_priv_c = self.style_decomposer(s_b, s_c)
             s_hat_b, s_hat_c, alpha_b, alpha_c = self.style_router(s_common, s_priv_b, s_priv_c)
 
-            style_1 = self.style_proj_b(s_hat_b)
-            style_2 = self.style_proj_c(s_hat_c)
-            style_1 = self.style_smoother(style_1)
-            style_2 = self.style_smoother(style_2)
+            # Use multi-channel style representation directly (no 1-channel projection)
+            style_1 = self.style_smoother(s_hat_b)
+            style_2 = self.style_smoother(s_hat_c)
 
             self.aux = {
                 "s_b": s_b,
@@ -392,6 +394,29 @@ class ProposedSynthesisModule(nn.Module):
 
         return out
 
+    def encode_content_only(self, x):
+        """
+        Extract content features without style modulation.
+        Used for structure leakage loss to avoid overwriting self.aux.
+        """
+        if not self.use_multiple_outputs:
+            raise NotImplementedError("encode_content_only only supported for use_multiple_outputs=True")
+
+        # Create dummy style tensor matching expected dimensions
+        if self.is_3d:
+            dummy_size = (x.size(0), 1, x.size(2)//16, x.size(3)//16, x.size(4)//16)
+        else:
+            dummy_size = (x.size(0), 1, x.size(2)//16, x.size(3)//16)
+        dummy_style = x.new_zeros(dummy_size)
+
+        feat0 = self.conv0_shared(x, dummy_style)
+        feat1 = self.conv11_shared(feat0, dummy_style)
+        feat1 = self.conv12_shared(feat1, dummy_style)
+        feat2 = self.conv21_shared(feat1, dummy_style)
+        feat2 = self.conv22_shared(feat2, dummy_style)
+
+        return feat0, feat1, feat2
+
 
 class StyleConv(nn.Module):
     def __init__(self,
@@ -406,6 +431,7 @@ class StyleConv(nn.Module):
                  style_denorm=True,
                  eps=1e-8,
                  ch=1,
+                 style_in_ch=1,
                  is_3d=False):
 
         super(StyleConv, self).__init__()
@@ -419,6 +445,7 @@ class StyleConv(nn.Module):
         self.kernel_size = kernel_size
         self.padding = kernel_size // 2
         self.style_denorm = style_denorm
+        self.style_in_ch = style_in_ch
         self.is_3d = is_3d
 
         Conv, Norm, dim = get_layer_by_dim(is_3d)
@@ -454,19 +481,19 @@ class StyleConv(nn.Module):
 
         if ch == 1:
             self.mlp_shared = nn.Sequential(
-                Conv(1, nhidden, kernel_size=3, padding=1),
+                Conv(style_in_ch, nhidden, kernel_size=3, padding=1),
                 nn.ReLU())
             self.mlp_gamma = Conv(nhidden, feat_ch, kernel_size=3, padding=1)
             self.mlp_beta = Conv(nhidden, feat_ch, kernel_size=3, padding=1)
         elif ch == 2:
             self.mlp_shared = nn.Sequential(
-                Conv(1, nhidden, kernel_size=3, padding=1),
+                Conv(style_in_ch, nhidden, kernel_size=3, padding=1),
                 nn.ReLU())
             self.mlp_gamma = Conv(nhidden, feat_ch//2, kernel_size=3, padding=1)
             self.mlp_beta = Conv(nhidden, feat_ch//2, kernel_size=3, padding=1)
 
             self.mlp_shared_2 = nn.Sequential(
-                Conv(1, nhidden, kernel_size=3, padding=1),
+                Conv(style_in_ch, nhidden, kernel_size=3, padding=1),
                 nn.ReLU())
             self.mlp_gamma_2 = Conv(nhidden, feat_ch//2, kernel_size=3, padding=1)
             self.mlp_beta_2 = Conv(nhidden, feat_ch//2, kernel_size=3, padding=1)
@@ -490,13 +517,8 @@ class StyleConv(nn.Module):
         else:
             x = self.conv(x)
 
-        if style.shape[1] == 1:
-            x = self.normalize(x)
-        elif style.shape[1] == 2:
-            x1, x2 = torch.chunk(x, chunks=2, dim=1)
-            x1 = self.normalize(x1)
-            x2 = self.normalize(x2)
-            x = torch.cat((x1, x2), dim=1)
+        # Normalize based on style_in_ch (multi-channel style support)
+        x = self.normalize(x)
 
         if self.randomize_noise:
             noise = torch.randn_like(x) * self.noise_strength
@@ -507,20 +529,10 @@ class StyleConv(nn.Module):
         if self.style_denorm:
             mode = 'trilinear' if self.is_3d else 'nearest'
             style = F.interpolate(style, size=x.size()[2:], mode=mode)
-            if style.shape[1] == 1:
-                actv = self.mlp_shared(style)
-                gamma = self.mlp_gamma(actv)
-                beta = self.mlp_beta(actv)
-            elif style.shape[1] == 2:
-                actv1 = self.mlp_shared(style[:, :1, :, :])
-                gamma = self.mlp_gamma(actv1)
-                beta = self.mlp_beta(actv1)
-                actv_2 = self.mlp_shared_2(style[:, 1:, :, :])
-                gamma_2 = self.mlp_gamma_2(actv_2)
-                beta_2 = self.mlp_beta_2(actv_2)
-                gamma = torch.cat((gamma, gamma_2), dim=1)
-                beta = torch.cat((beta, beta_2), dim=1)
-
+            # Multi-channel style: use entire style tensor
+            actv = self.mlp_shared(style)
+            gamma = self.mlp_gamma(actv)
+            beta = self.mlp_beta(actv)
             x = x * gamma + beta
 
         if self.activate:

@@ -296,23 +296,29 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             # Prevents shared style from correlating with source structure features
             # Use early layer features from encoder as structure proxy
             if 's_common' in aux and self.lambda_leak > 0:
-                # Get structure features from the generator's encoder (low-level features)
-                # We use feat0 or feat1 as structure proxy since they contain anatomy info
-                merged_struct = torch.cat((real_a, real_a, real_a), dim=1)
-                struct_feats = self.netG_A(merged_struct, layers=[0], encode_only=True)
-                if struct_feats:
-                    # Downsample structure features to match s_common size
-                    struct_feat = struct_feats[0]  # feat0: low-level structure
+                # Use encode_content_only to avoid overwriting self.aux
+                if hasattr(self.netG_A, 'encode_content_only'):
+                    struct_feat, _, _ = self.netG_A.encode_content_only(real_a)
+                else:
+                    # Fallback: use forward with encode_only (may overwrite aux)
+                    merged_struct = torch.cat((real_a, real_a, real_a), dim=1)
+                    struct_feats = self.netG_A(merged_struct, layers=[0], encode_only=True)
+                    struct_feat = struct_feats[0] if struct_feats else None
+
+                if struct_feat is not None:
                     s_common = aux['s_common']
 
-                    # Match spatial dimensions
-                    if struct_feat.shape[2:] != s_common.shape[2:]:
-                        struct_feat = F.adaptive_avg_pool2d(struct_feat, s_common.shape[2:])
-
-                    # Use global average pooling to get channel-wise statistics
-                    # This avoids dimension mismatch between different channel sizes
-                    s_gap = F.adaptive_avg_pool2d(s_common, 1).squeeze(-1).squeeze(-1)  # (B, C_s)
-                    f_gap = F.adaptive_avg_pool2d(struct_feat, 1).squeeze(-1).squeeze(-1)  # (B, C_f)
+                    # Match spatial dimensions with 2D/3D support
+                    if self.params.is_3d:
+                        if struct_feat.shape[2:] != s_common.shape[2:]:
+                            struct_feat = F.adaptive_avg_pool3d(struct_feat, s_common.shape[2:])
+                        s_gap = F.adaptive_avg_pool3d(s_common, 1).flatten(1)  # (B, C_s)
+                        f_gap = F.adaptive_avg_pool3d(struct_feat, 1).flatten(1)  # (B, C_f)
+                    else:
+                        if struct_feat.shape[2:] != s_common.shape[2:]:
+                            struct_feat = F.adaptive_avg_pool2d(struct_feat, s_common.shape[2:])
+                        s_gap = F.adaptive_avg_pool2d(s_common, 1).flatten(1)  # (B, C_s)
+                        f_gap = F.adaptive_avg_pool2d(struct_feat, 1).flatten(1)  # (B, C_f)
 
                     # Compute correlation using normalized features
                     # We want to penalize if style and structure features have similar patterns
@@ -351,9 +357,9 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             rb_ref = real_b_ref[..., d] if real_b_ref is not None else None
             fb = fake_b[..., d]
 
-            ## GAN
+            ## GAN - Remove detach() so generator receives gradient
             if self.criterionGAN:
-                pred_fake = self.netD_A(fb.detach())
+                pred_fake = self.netD_A(fb)
                 loss_gan_b = self.criterionGAN(pred_fake, True) / D
                 loss_G += loss_gan_b
                 loss_logs.setdefault("Gan_b_Loss", 0.0)
