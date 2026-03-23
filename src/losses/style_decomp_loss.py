@@ -77,7 +77,7 @@ class StyleDecompositionLoss(nn.Module):
             decomp_dict: dict containing:
                 - common_b, common_c: [B, C, H, W]
                 - private_b, private_c: [B, C, H, W]
-                - c_shared: [B, C, H, W]
+                - common_shared or c_shared: [B, C, H, W]
 
         Returns:
             total_loss: scalar
@@ -87,7 +87,7 @@ class StyleDecompositionLoss(nn.Module):
         common_c = decomp_dict['common_c']
         private_b = decomp_dict['private_b']
         private_c = decomp_dict['private_c']
-        c_shared = decomp_dict['c_shared']
+        c_shared = decomp_dict.get('common_shared', decomp_dict['c_shared'])
 
         loss_dict = {}
 
