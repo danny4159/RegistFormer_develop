@@ -166,7 +166,7 @@ class CommonPrivateStyleRouter(nn.Module):
             Conv(style_ch, style_ch, kernel_size=1),
         )
 
-        # Source-conditioned gating
+        # Source-conditioned gating for common_shared fusion
         if use_source_gate:
             self.common_gate = nn.Sequential(
                 Conv(style_ch + 1, style_ch, kernel_size=3, padding=1),
@@ -175,6 +175,31 @@ class CommonPrivateStyleRouter(nn.Module):
                 nn.Sigmoid(),
             )
             nn.init.constant_(self.common_gate[-2].bias, -2.0)
+
+            # Branch-specific receiving gates: how much common_shared each branch absorbs
+            self.gate_b = nn.Sequential(
+                Conv(style_ch + 1, style_ch, kernel_size=3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                Conv(style_ch, style_ch, kernel_size=1),
+                nn.Sigmoid(),
+            )
+            self.gate_c = nn.Sequential(
+                Conv(style_ch + 1, style_ch, kernel_size=3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                Conv(style_ch, style_ch, kernel_size=1),
+                nn.Sigmoid(),
+            )
+            nn.init.constant_(self.gate_b[-2].bias, -2.0)
+            nn.init.constant_(self.gate_c[-2].bias, -2.0)
+
+        # Learnable scaling for common absorption
+        param_shape = (1, style_ch, 1, 1, 1) if is_3d else (1, style_ch, 1, 1)
+        self.alpha_b = nn.Parameter(torch.zeros(param_shape))
+        self.alpha_c = nn.Parameter(torch.zeros(param_shape))
+
+        # Project fused style to 1-channel for StyleConv compatibility
+        self.style_out_b = Conv(style_ch, 1, kernel_size=1)
+        self.style_out_c = Conv(style_ch, 1, kernel_size=1)
 
     def _prepare_input(self, style):
         if style.shape[1] == 1:
@@ -213,7 +238,7 @@ class CommonPrivateStyleRouter(nn.Module):
         return common, private
 
     def forward(self, ref_b, ref_c, source_feat=None):
-        """Process two references and return common/private style factors.
+        """Process two references and return branch-specific fused styles.
 
         Args:
             ref_b: First reference image [B, 1, H, W]
@@ -221,24 +246,25 @@ class CommonPrivateStyleRouter(nn.Module):
             source_feat: Source features for gating [B, 1, H, W] (optional)
 
         Returns:
-            common_shared: Shared common style [B, style_ch, H, W]
-            private_b: Private style for branch b [B, style_ch, H, W]
-            private_c: Private style for branch c [B, style_ch, H, W]
+            style_b_map: Fused style for branch b [B, 1, H, W]
+            style_c_map: Fused style for branch c [B, 1, H, W]
             decomp_dict: Dictionary containing decomposition info for loss computation
         """
         ref_b = self._prepare_input(ref_b)
         ref_c = self._prepare_input(ref_c)
 
-        # Decompose each reference
+        # Decompose each reference into common and private
         common_b, private_b = self.decompose_style(ref_b)
         common_c, private_c = self.decompose_style(ref_c)
 
+        # Conservative common fusion: average + gated delta
         common_avg = 0.5 * (common_b + common_c)
         delta = self.delta_fuser(torch.cat([
             common_b - common_avg,
             common_c - common_avg,
         ], dim=1))
 
+        # Resize source_feat if needed
         if self.use_source_gate and source_feat is not None:
             source_feat = self._prepare_input(source_feat)
             if source_feat.shape[2:] != common_avg.shape[2:]:
@@ -253,9 +279,26 @@ class CommonPrivateStyleRouter(nn.Module):
                     source_feat = F.interpolate(source_feat, size=common_avg.shape[2:], mode='nearest')
             g_common = self.common_gate(torch.cat([common_avg, source_feat], dim=1))
         else:
-            g_common = torch.sigmoid(common_avg)
+            g_common = torch.sigmoid(common_avg) * 0.1  # Conservative default
 
         common_shared = common_avg + g_common * delta
+
+        # Branch-specific receiving gates: how much common_shared each branch absorbs
+        if self.use_source_gate and source_feat is not None:
+            gate_b = self.gate_b(torch.cat([common_b, source_feat], dim=1))
+            gate_c = self.gate_c(torch.cat([common_c, source_feat], dim=1))
+        else:
+            gate_b = torch.full_like(common_shared, 0.1)
+            gate_c = torch.full_like(common_shared, 0.1)
+
+        # Final fused style per branch: private + alpha * (gate * common_shared)
+        # s_b = p_b + alpha_b * (g_b * c_shared)
+        style_b_feat = private_b + self.alpha_b * (gate_b * common_shared)
+        style_c_feat = private_c + self.alpha_c * (gate_c * common_shared)
+
+        # Project to 1-channel for StyleConv compatibility
+        style_b_map = self.style_out_b(style_b_feat)
+        style_c_map = self.style_out_c(style_c_feat)
 
         decomp_dict = {
             'common_b': common_b,
@@ -264,9 +307,13 @@ class CommonPrivateStyleRouter(nn.Module):
             'private_c': private_c,
             'common_shared': common_shared,
             'g_common': g_common,
+            'g_b': gate_b,
+            'g_c': gate_c,
+            'style_b_feat': style_b_feat,
+            'style_c_feat': style_c_feat,
         }
 
-        return common_shared, private_b, private_c, decomp_dict
+        return style_b_map, style_c_map, decomp_dict
 
 
 class ProposedSynthesisModule(nn.Module):
@@ -301,7 +348,9 @@ class ProposedSynthesisModule(nn.Module):
             )
 
         ch = 2 if self.use_multiple_outputs else 1
-        shared_style_ch = 1 if self.use_style_router and self.use_multiple_outputs else ch
+        # When using style router, we still use ch=2 for StyleConv
+        # because fused_style = cat(style_b_map, style_c_map) has 2 channels
+        shared_style_ch = ch
         self.use_branch_style_layers = self.use_multiple_outputs and (
             self.use_separate_style_layers or self.use_style_router
         )
@@ -396,55 +445,53 @@ class ProposedSynthesisModule(nn.Module):
             style_guidance_raw = F.interpolate(ref, scale_factor=1/16, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯
             source_low = F.interpolate(x, scale_factor=1/16, mode='nearest')
 
-        shared_style = style_guidance_raw
-        private_b = style_guidance_raw[:, :1, ...]
-        private_c = style_guidance_raw[:, 1:2, ...] if style_guidance_raw.shape[1] > 1 else private_b
+        # Default: use raw style guidance (for non-router case)
+        fused_style = style_guidance_raw  # [B, 2, H, W] when use_multiple_outputs
+        style_b_map = style_guidance_raw[:, :1, ...]
+        style_c_map = style_guidance_raw[:, 1:2, ...] if style_guidance_raw.shape[1] > 1 else style_b_map
 
         # Apply style router if enabled
         if self.use_style_router and self.use_multiple_outputs and style_guidance_raw.shape[1] >= 2:
             ref_b = style_guidance_raw[:, :1, ...]
             ref_c = style_guidance_raw[:, 1:2, ...]
             content_hint = self.guide_net(source_low)
-            shared_style_feat, private_b_feat, private_c_feat, decomp_dict = self.style_router(ref_b, ref_c, content_hint)
 
-            # Keep full common/private features for decomposition loss, but collapse to
-            # single-channel spatial style maps before feeding StyleConv.
-            shared_style = shared_style_feat.mean(dim=1, keepdim=True)
-            private_b = private_b_feat.mean(dim=1, keepdim=True)
-            private_c = private_c_feat.mean(dim=1, keepdim=True)
-        elif self.use_style_router and self.use_multiple_outputs:
-            shared_style = style_guidance_raw.mean(dim=1, keepdim=True)
+            # Router returns branch-specific fused styles
+            style_b_map, style_c_map, decomp_dict = self.style_router(ref_b, ref_c, content_hint)
+
+            # fused_style = cat(style_b_map, style_c_map) for StyleConv(ch=2)
+            fused_style = torch.cat([style_b_map, style_c_map], dim=1)  # [B, 2, H, W]
 
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/64, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, size=(1, 1), mode='nearest') # Ablation
         feats = []
-        feat0 = self.conv0(x, shared_style) # [1, feat_ch, H, W]
-        feat1 = self.conv11(feat0, shared_style) # [1, feat_ch, H/2, W/2]
-        feat1 = self.conv12(feat1, shared_style) # [1, feat_ch, H/2, W/2]
-        feat2 = self.conv21(feat1, shared_style) # [1, feat_ch, H/4, W/4]
-        feat2 = self.conv22(feat2, shared_style) # [1, feat_ch, H/4, W/4]
-        feat3 = self.conv31(feat2, shared_style) # [1, feat_ch, H/4, W/4] #TODO: 메모리 많아서 뺌.
-        feat3 = self.conv32(feat3, shared_style) # [1, feat_ch, H/4, W/4]
-        feat4 = self.conv41(feat3 + feat2, shared_style)# [1, feat_ch, H/2, W/2] #TODO: 원래 intput feat3 + feat2
-        feat4 = self.conv42(feat4, shared_style)        # [1, feat_ch, H/2, W/2]
-        feat5 = self.conv51(feat4 + feat1, shared_style)# [1, feat_ch, H, W]
-        feat5 = self.conv52(feat5, shared_style)        # [1, feat_ch, H, W]
-        feat6 = self.conv6(feat5 + feat0, shared_style) # [1, feat_ch, H, W]
+        feat0 = self.conv0(x, fused_style) # [1, feat_ch*2, H, W]
+        feat1 = self.conv11(feat0, fused_style) # [1, feat_ch*2, H/2, W/2]
+        feat1 = self.conv12(feat1, fused_style) # [1, feat_ch*2, H/2, W/2]
+        feat2 = self.conv21(feat1, fused_style) # [1, feat_ch*2, H/4, W/4]
+        feat2 = self.conv22(feat2, fused_style) # [1, feat_ch*2, H/4, W/4]
+        feat3 = self.conv31(feat2, fused_style) # [1, feat_ch*2, H/4, W/4]
+        feat3 = self.conv32(feat3, fused_style) # [1, feat_ch*2, H/4, W/4]
+        feat4 = self.conv41(feat3 + feat2, fused_style) # [1, feat_ch*2, H/2, W/2]
+        feat4 = self.conv42(feat4, fused_style)         # [1, feat_ch*2, H/2, W/2]
+        feat5 = self.conv51(feat4 + feat1, fused_style) # [1, feat_ch*2, H, W]
+        feat5 = self.conv52(feat5, fused_style)         # [1, feat_ch*2, H, W]
+        feat6 = self.conv6(feat5 + feat0, fused_style)  # [1, feat_ch*2, H, W]
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 처리
         if self.use_branch_style_layers:
             # feat6를 반으로 분리
             feat6_1, feat6_2 = torch.chunk(feat6, chunks=2, dim=1)  # 각 [B, feat_ch, H, W]
 
-            # conv7: 각각 독립적으로 처리
-            feat7_1 = self.conv7_1(feat6_1, private_b)  # [B, feat_ch, H, W]
-            feat7_2 = self.conv7_2(feat6_2, private_c)  # [B, feat_ch, H, W]
+            # conv7: 각각 독립적으로 처리 (fused style 사용)
+            feat7_1 = self.conv7_1(feat6_1, style_b_map)  # [B, feat_ch, H, W]
+            feat7_2 = self.conv7_2(feat6_2, style_c_map)  # [B, feat_ch, H, W]
 
-            # conv8: 각각 독립적으로 처리
-            feat8_1 = self.conv8_1(feat7_1, private_b)  # [B, feat_ch, H, W]
-            feat8_2 = self.conv8_2(feat7_2, private_c)  # [B, feat_ch, H, W]
+            # conv8: 각각 독립적으로 처리 (fused style 사용)
+            feat8_1 = self.conv8_1(feat7_1, style_b_map)  # [B, feat_ch, H, W]
+            feat8_2 = self.conv8_2(feat7_2, style_c_map)  # [B, feat_ch, H, W]
 
             # 각각 conv_final + tanh
             out_1 = torch.tanh(self.conv_final_1(feat8_1))  # [B, output_nc//2, H, W]
