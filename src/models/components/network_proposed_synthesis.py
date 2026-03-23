@@ -9,6 +9,11 @@ def get_layer_by_dim(is_3d):
     return Conv, Norm, dim
 
 
+def repeat_style_channels(style, channels):
+    repeat_dims = [1, channels] + [1] * (style.dim() - 2)
+    return style.repeat(*repeat_dims)
+
+
 class HighPassFilter(nn.Module):
     """Laplacian-based high-pass filter for extracting texture/style information"""
     def __init__(self, is_3d=False):
@@ -215,6 +220,67 @@ class CommonPrivateStyleRouter(nn.Module):
         return common_shared, private_b, private_c, decomp_dict
 
 
+class DualStyleModBlock(nn.Module):
+    def __init__(self, feat_ch, style_ch, is_3d=False):
+        super().__init__()
+        Conv, Norm, _ = get_layer_by_dim(is_3d)
+        self.is_3d = is_3d
+
+        self.conv = Conv(feat_ch, feat_ch, kernel_size=3, padding=1)
+        self.norm = Norm(feat_ch, affine=False)
+
+        hidden = 256
+
+        self.common_mlp = nn.Sequential(
+            Conv(style_ch, hidden, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True)
+        )
+        self.common_gamma = Conv(hidden, feat_ch, kernel_size=3, padding=1)
+        self.common_beta = Conv(hidden, feat_ch, kernel_size=3, padding=1)
+
+        self.private_mlp = nn.Sequential(
+            Conv(style_ch, hidden, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True)
+        )
+        self.private_gamma = Conv(hidden, feat_ch, kernel_size=3, padding=1)
+        self.private_beta = Conv(hidden, feat_ch, kernel_size=3, padding=1)
+
+        self.private_gate = nn.Sequential(
+            Conv(feat_ch, feat_ch, kernel_size=1, padding=0),
+            nn.Sigmoid()
+        )
+
+        self.act = nn.LeakyReLU(0.2, inplace=True)
+
+    def _resize_style(self, style, size):
+        if style.shape[2:] == size:
+            return style
+        if self.is_3d:
+            return F.interpolate(style, size=size, mode='trilinear', align_corners=False)
+        return F.interpolate(style, size=size, mode='nearest')
+
+    def forward(self, x, style_common, style_private):
+        x = self.conv(x)
+        x = self.norm(x)
+
+        style_common = self._resize_style(style_common, x.shape[2:])
+        style_private = self._resize_style(style_private, x.shape[2:])
+
+        hc = self.common_mlp(style_common)
+        gc = self.common_gamma(hc)
+        bc = self.common_beta(hc)
+
+        hp = self.private_mlp(style_private)
+        gp = self.private_gamma(hp)
+        bp = self.private_beta(hp)
+
+        gate = self.private_gate(x)
+
+        x = x * (1 + gc + gate * gp) + (bc + gate * bp)
+        x = self.act(x)
+        return x
+
+
 class ProposedSynthesisModule(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
@@ -241,16 +307,18 @@ class ProposedSynthesisModule(nn.Module):
         self.use_private_branch_layers = self.use_multiple_outputs and (
             self.use_separate_style_layers or self.use_style_router
         )
-        shared_style_ch = 1 if self.use_private_branch_layers else ch
+        self.use_dual_style_branch = self.use_style_router and self.use_multiple_outputs
+        shared_style_ch = 1 if self.use_dual_style_branch else ch
 
         # Common-Private Style Router (CPLSF block)
-        if self.use_style_router and self.use_multiple_outputs:
+        if self.use_dual_style_branch:
             self.style_router = CommonPrivateStyleRouter(
                 style_ch=self.style_router_ch,
                 use_freq_prior=self.use_freq_prior,
                 use_source_gate=self.use_source_gate,
                 is_3d=self.is_3d
             )
+            self.common_proj = Conv(self.style_router_ch, 1, kernel_size=1, padding=0)
 
         self.guide_net = nn.Sequential(
             Conv(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
@@ -290,14 +358,20 @@ class ProposedSynthesisModule(nn.Module):
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 style 적용
         if self.use_private_branch_layers:
             # 각 branch는 feat_ch 채널 (전체의 절반)
-            self.conv7_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
-            self.conv7_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
-            self.conv8_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
-            self.conv8_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+            if self.use_dual_style_branch:
+                self.conv7_1 = DualStyleModBlock(self.feat_ch, self.style_router_ch, is_3d=self.is_3d)
+                self.conv7_2 = DualStyleModBlock(self.feat_ch, self.style_router_ch, is_3d=self.is_3d)
+                self.conv8_1 = DualStyleModBlock(self.feat_ch, self.style_router_ch, is_3d=self.is_3d)
+                self.conv8_2 = DualStyleModBlock(self.feat_ch, self.style_router_ch, is_3d=self.is_3d)
+            else:
+                self.conv7_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                         activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                self.conv7_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                         activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                self.conv8_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                         activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
+                self.conv8_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+                                         activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
             # 각각 독립적인 conv_final
             self.conv_final_1 = Conv(self.feat_ch, 1, kernel_size=3, padding=1)
             self.conv_final_2 = Conv(self.feat_ch, 1, kernel_size=3, padding=1)
@@ -347,19 +421,26 @@ class ProposedSynthesisModule(nn.Module):
         decomp_dict = None
         private_b = style_guidance_raw[:, :1, ...]
         private_c = style_guidance_raw[:, 1:2, ...] if style_guidance_raw.shape[1] > 1 else private_b
+        common_branch_style = None
+        private_b_branch_style = None
+        private_c_branch_style = None
 
-        if self.use_style_router and self.use_multiple_outputs and ref.shape[1] >= 2:
+        if self.use_dual_style_branch and ref.shape[1] >= 2:
             style_b = style_guidance_raw[:, :1, ...]
             style_c = style_guidance_raw[:, 1:2, ...]
             content_hint = self.guide_net(source_low)
             common_shared, private_b, private_c, decomp_dict = self.style_router(
                 style_b, style_c, content_hint
             )
-            shared_style = common_shared.mean(dim=1, keepdim=True)
-            private_b = private_b.mean(dim=1, keepdim=True)
-            private_c = private_c.mean(dim=1, keepdim=True)
-        elif self.use_style_router and self.use_multiple_outputs:
+            shared_style = self.common_proj(common_shared)
+            common_branch_style = common_shared
+            private_b_branch_style = private_b
+            private_c_branch_style = private_c
+        elif self.use_dual_style_branch:
             shared_style = style_guidance_raw.mean(dim=1, keepdim=True)
+            common_branch_style = repeat_style_channels(shared_style, self.style_router_ch)
+            private_b_branch_style = repeat_style_channels(private_b, self.style_router_ch)
+            private_c_branch_style = repeat_style_channels(private_c, self.style_router_ch)
         else:
             shared_style = style_guidance_raw
 
@@ -382,13 +463,18 @@ class ProposedSynthesisModule(nn.Module):
             # feat6를 반으로 분리
             feat6_1, feat6_2 = torch.chunk(feat6, chunks=2, dim=1)  # 각 [B, feat_ch, H, W]
 
-            # conv7: 각각 독립적으로 처리
-            feat7_1 = self.conv7_1(feat6_1, private_b)  # [B, feat_ch, H, W]
-            feat7_2 = self.conv7_2(feat6_2, private_c)  # [B, feat_ch, H, W]
+            if self.use_dual_style_branch:
+                feat7_1 = self.conv7_1(feat6_1, common_branch_style, private_b_branch_style)
+                feat7_2 = self.conv7_2(feat6_2, common_branch_style, private_c_branch_style)
 
-            # conv8: 각각 독립적으로 처리
-            feat8_1 = self.conv8_1(feat7_1, private_b)  # [B, feat_ch, H, W]
-            feat8_2 = self.conv8_2(feat7_2, private_c)  # [B, feat_ch, H, W]
+                feat8_1 = self.conv8_1(feat7_1, common_branch_style, private_b_branch_style)
+                feat8_2 = self.conv8_2(feat7_2, common_branch_style, private_c_branch_style)
+            else:
+                feat7_1 = self.conv7_1(feat6_1, private_b)  # [B, feat_ch, H, W]
+                feat7_2 = self.conv7_2(feat6_2, private_c)  # [B, feat_ch, H, W]
+
+                feat8_1 = self.conv8_1(feat7_1, private_b)  # [B, feat_ch, H, W]
+                feat8_2 = self.conv8_2(feat7_2, private_c)  # [B, feat_ch, H, W]
 
             # 각각 conv_final + tanh
             out_1 = torch.tanh(self.conv_final_1(feat8_1))  # [B, output_nc//2, H, W]
@@ -499,16 +585,18 @@ class StyleConv(nn.Module):
 
     def forward(self, x, style): # style: [1, 64, 1, 1]
         
+        resize_mode = 'trilinear' if self.is_3d else 'bilinear'
+
         if self.downsample:
             original_size = x.size()
             if x.size()[2:] != original_size[2:]:  # If the size has changed
-                x = F.interpolate(x, size=original_size[2:], mode='bilinear', align_corners=True)
+                x = F.interpolate(x, size=original_size[2:], mode=resize_mode, align_corners=True)
             x = self.down(x)
         elif self.upsample:
             x = self.up(x)
             original_size = x.size()
             if x.size()[2:] != original_size[2:]:  # If the size has changed
-                x = F.interpolate(x, size=original_size[2:], mode='bilinear', align_corners=True)
+                x = F.interpolate(x, size=original_size[2:], mode=resize_mode, align_corners=True)
         else:
             x = self.conv(x)
         
