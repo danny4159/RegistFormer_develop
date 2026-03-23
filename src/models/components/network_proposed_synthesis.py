@@ -50,26 +50,15 @@ class SharedPrivateStyleDecomposer(nn.Module):
         super().__init__()
         Conv, _, _ = get_layer_by_dim(is_3d)
 
-        # Network to extract common style from concatenated features
-        self.common_net = nn.Sequential(
-            Conv(ch * 2, ch, 3, 1, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            Conv(ch, ch, 3, 1, 1),
-        )
-
-        # Branch-specific shared components recovered from the shared latent.
-        self.proj_b = Conv(ch, ch, 1, 1, 0)
-        self.proj_c = Conv(ch, ch, 1, 1, 0)
+        # Stronger disentanglement: predict the common component from each branch first.
+        self.common_from_b = Conv(ch, ch, 1, 1, 0)
+        self.common_from_c = Conv(ch, ch, 1, 1, 0)
 
     def forward(self, s_b, s_c):
-        # Extract shared style from concatenated features
-        s_common = self.common_net(torch.cat([s_b, s_c], dim=1))
+        common_b = self.common_from_b(s_b)
+        common_c = self.common_from_c(s_c)
+        s_common = 0.5 * (common_b + common_c)
 
-        # Recover the shared part that will be removed from each branch.
-        common_b = self.proj_b(s_common)
-        common_c = self.proj_c(s_common)
-
-        # Compute private components by subtracting projected common
         s_priv_b = s_b - common_b
         s_priv_c = s_c - common_c
 

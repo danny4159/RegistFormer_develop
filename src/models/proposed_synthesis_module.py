@@ -103,12 +103,6 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 self.log("Gan_c_Loss", loss_gan_c.detach(), prog_bar=True)
                 loss_G += loss_gan_c
                 # assert not torch.isnan(loss_gan_c).any(), "GAN Loss is NaN"
-                if fake_d is not None:
-                    pred_fake = self.netD_D(fake_d)
-                    loss_gan_d = self.criterionGAN(pred_fake, True)
-                    self.log("Gan_d_Loss", loss_gan_d.detach(), prog_bar=True)
-                    loss_G += loss_gan_d
-                    # assert not torch.isnan(loss_gan_d).any(), "GAN Loss is NaN"
 
         ##################################################################################################################
         ## 2. Contextual loss: fake_b, fake_c 각각 따로
@@ -125,12 +119,6 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 self.log("Context_c_Loss", loss_style_c.detach(), prog_bar=True)
                 loss_G += loss_style_c.squeeze()
                 # assert not torch.isnan(loss_style_c).any(), "Contextual Loss is NaN"
-                if fake_d is not None:
-                    loss_style_d = self.criterionContextual(real_d, fake_d)
-                    loss_style_d =  loss_style_d * self.params.lambda_style
-                    self.log("Context_d_Loss", loss_style_d.detach(), prog_bar=True)
-                    loss_G += loss_style_d.squeeze()
-                # assert not torch.isnan(loss_style_d).any(), "Contextual Loss is NaN"
 
         ##################################################################################################################
         ## 3. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
@@ -140,10 +128,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 if self.params.nce_independent:
                     fake_rgb_b = fake_b.repeat(1, 3, 1, 1)
                     fake_rgb_c = fake_c.repeat(1, 3, 1, 1)
-                elif fake_d is not None:
-                    fake_rgb = torch.cat((fake_b, fake_c, fake_d), dim=1)
                 elif fake_c is not None:
-                    fake_rgb = torch.cat((fake_b, fake_c, torch.zeros_like(fake_b)), dim=1) # Last channel is average -> zero (For checkerboard artifact but not sure)
+                    fake_rgb = torch.cat((fake_b, fake_c, torch.zeros_like(fake_b)), dim=1)
                 else:
                     fake_rgb = torch.cat((fake_b, fake_b, fake_b), dim=1) # Last channel is average -> zero (For checkerboard artifact but not sure)
                 self.vgg.to(real_a.device)
@@ -193,19 +179,32 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             else:
                 if self.params.use_multiple_outputs:
                     n_layers = len(self.params.nce_layers)
-                    merged_input_1 = torch.cat((fake_b, real_a, real_a), dim=1)
-                    feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
-                    
-                    merged_input_2 = torch.cat((fake_c, real_a, real_a), dim=1) 
-                    feat_c = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+                    if self.use_style_decomposition and hasattr(self.netG_A, 'encode_content_only'):
+                        allowed_layers = {0, 1, 2}
+                        if not set(self.params.nce_layers).issubset(allowed_layers):
+                            raise ValueError("When use_style_decomposition=True, nce_layers must be a subset of [0, 1, 2].")
+
+                        feat_a_all = self.netG_A.encode_content_only(real_a)
+                        feat_b_all = self.netG_A.encode_content_only(fake_b)
+                        feat_c_all = self.netG_A.encode_content_only(fake_c)
+                        feat_a = [feat_a_all[i] for i in self.params.nce_layers]
+                        feat_b = [feat_b_all[i] for i in self.params.nce_layers]
+                        feat_c = [feat_c_all[i] for i in self.params.nce_layers]
+                    else:
+                        merged_input_1 = torch.cat((fake_b, real_a, real_a), dim=1)
+                        feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
+
+                        merged_input_2 = torch.cat((fake_c, real_a, real_a), dim=1)
+                        feat_c = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+
+                        merged_input_2 = torch.cat((real_a, real_b, real_c), dim=1)
+                        feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
 
                     flipped_for_equivariance = np.random.random() < 0.5
                     if self.params.flip_equivariance and flipped_for_equivariance:
                         feat_b = [torch.flip(fb, [3]) for fb in feat_b]
                         feat_c = [torch.flip(fc, [3]) for fc in feat_c]
 
-                    merged_input_2 = torch.cat((real_a, real_b, real_c), dim=1)
-                    feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
                     feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
                     feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
                     feat_c_pool, _ = self.netF_A(feat_c, 256, sample_ids)
