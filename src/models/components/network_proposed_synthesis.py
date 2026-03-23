@@ -405,7 +405,13 @@ class ProposedSynthesisModule(nn.Module):
             ref_b = style_guidance_raw[:, :1, ...]
             ref_c = style_guidance_raw[:, 1:2, ...]
             content_hint = self.guide_net(source_low)
-            shared_style, private_b, private_c, decomp_dict = self.style_router(ref_b, ref_c, content_hint)
+            shared_style_feat, private_b_feat, private_c_feat, decomp_dict = self.style_router(ref_b, ref_c, content_hint)
+
+            # Keep full common/private features for decomposition loss, but collapse to
+            # single-channel spatial style maps before feeding StyleConv.
+            shared_style = shared_style_feat.mean(dim=1, keepdim=True)
+            private_b = private_b_feat.mean(dim=1, keepdim=True)
+            private_c = private_c_feat.mean(dim=1, keepdim=True)
         elif self.use_style_router and self.use_multiple_outputs:
             shared_style = style_guidance_raw.mean(dim=1, keepdim=True)
 
@@ -574,6 +580,9 @@ class StyleConv(nn.Module):
             x1 = self.normalize(x1)
             x2 = self.normalize(x2)
             x = torch.cat((x1, x2), dim=1)
+        else:
+            style = style.mean(dim=1, keepdim=True)
+            x = self.normalize(x)
         
         # # Add noise
         if self.randomize_noise:
@@ -600,6 +609,11 @@ class StyleConv(nn.Module):
                 beta_2 = self.mlp_beta_2(actv_2) 
                 gamma = torch.cat((gamma, gamma_2), dim=1) # B, 512, f_H, f_W
                 beta = torch.cat((beta, beta_2), dim=1)
+            else:
+                style = style.mean(dim=1, keepdim=True)
+                actv = self.mlp_shared(style)
+                gamma = self.mlp_gamma(actv)
+                beta = self.mlp_beta(actv)
 
             # 3. 거기서 감마 베타 나눠서 denorm
             x = x * gamma + beta
