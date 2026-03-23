@@ -158,28 +158,28 @@ class CommonPrivateStyleRouter(nn.Module):
             Conv(style_ch, style_ch, kernel_size=1),
         )
 
-        # Fusion network: combines common styles from both references
-        self.fusion_net = nn.Sequential(
+        # Conservative common fusion: average anchor + gated residual delta
+        self.delta_fuser = nn.Sequential(
             Conv(style_ch * 2, style_ch, kernel_size=1),
             nn.LeakyReLU(0.2, inplace=True),
+            Conv(style_ch, style_ch, kernel_size=3, padding=1, groups=style_ch),
             Conv(style_ch, style_ch, kernel_size=1),
         )
 
         # Source-conditioned gating
         if use_source_gate:
-            # Takes source features and outputs gate values
-            self.gate_net = nn.Sequential(
-                Conv(1, style_ch // 4, kernel_size=3, padding=1),
+            self.common_gate = nn.Sequential(
+                Conv(style_ch + 1, style_ch, kernel_size=3, padding=1),
                 nn.LeakyReLU(0.2, inplace=True),
-                Conv(style_ch // 4, style_ch, kernel_size=1),
+                Conv(style_ch, style_ch, kernel_size=1),
                 nn.Sigmoid(),
             )
-            # Conservative initialization: start with small gate values
-            # This prevents structure leakage in early training
-            nn.init.constant_(self.gate_net[-2].bias, -2.0)  # sigmoid(-2) ≈ 0.12
+            nn.init.constant_(self.common_gate[-2].bias, -2.0)
 
-        # Output projection: project processed style back to 1 channel for StyleConv compatibility
-        self.out_proj = Conv(style_ch, 1, kernel_size=1)
+    def _prepare_input(self, style):
+        if style.shape[1] == 1:
+            return style
+        return style.mean(dim=1, keepdim=True)
 
     def decompose_style(self, ref):
         """Decompose a single reference into common and private style components.
@@ -213,7 +213,7 @@ class CommonPrivateStyleRouter(nn.Module):
         return common, private
 
     def forward(self, ref_b, ref_c, source_feat=None):
-        """Process two references and return fused styles.
+        """Process two references and return common/private style factors.
 
         Args:
             ref_b: First reference image [B, 1, H, W]
@@ -221,47 +221,52 @@ class CommonPrivateStyleRouter(nn.Module):
             source_feat: Source features for gating [B, 1, H, W] (optional)
 
         Returns:
-            style_b: Final style for branch b [B, style_ch, H, W]
-            style_c: Final style for branch c [B, style_ch, H, W]
+            common_shared: Shared common style [B, style_ch, H, W]
+            private_b: Private style for branch b [B, style_ch, H, W]
+            private_c: Private style for branch c [B, style_ch, H, W]
             decomp_dict: Dictionary containing decomposition info for loss computation
         """
+        ref_b = self._prepare_input(ref_b)
+        ref_c = self._prepare_input(ref_c)
+
         # Decompose each reference
         common_b, private_b = self.decompose_style(ref_b)
         common_c, private_c = self.decompose_style(ref_c)
 
-        # Fuse common styles (bidirectional exchange)
-        common_concat = torch.cat([common_b, common_c], dim=1)
-        common_shared = self.fusion_net(common_concat)
+        common_avg = 0.5 * (common_b + common_c)
+        delta = self.delta_fuser(torch.cat([
+            common_b - common_avg,
+            common_c - common_avg,
+        ], dim=1))
 
-        # Compute gating if using source-conditioned gating
         if self.use_source_gate and source_feat is not None:
-            # Interpolate source_feat to match style size
-            mode = 'trilinear' if self.is_3d else 'nearest'
-            source_resized = F.interpolate(source_feat, size=common_shared.shape[2:], mode=mode)
-            gate = self.gate_net(source_resized)
+            source_feat = self._prepare_input(source_feat)
+            if source_feat.shape[2:] != common_avg.shape[2:]:
+                if self.is_3d:
+                    source_feat = F.interpolate(
+                        source_feat,
+                        size=common_avg.shape[2:],
+                        mode='trilinear',
+                        align_corners=False,
+                    )
+                else:
+                    source_feat = F.interpolate(source_feat, size=common_avg.shape[2:], mode='nearest')
+            g_common = self.common_gate(torch.cat([common_avg, source_feat], dim=1))
         else:
-            # Default conservative gate
-            gate = torch.ones_like(common_shared) * 0.1
+            g_common = torch.sigmoid(common_avg)
 
-        # Final style: private + gated common
-        style_b = private_b + gate * common_shared
-        style_c = private_c + gate * common_shared
+        common_shared = common_avg + g_common * delta
 
-        # Project to 1 channel for StyleConv compatibility
-        style_b_out = self.out_proj(style_b)
-        style_c_out = self.out_proj(style_c)
-
-        # Return decomposition info for loss computation
         decomp_dict = {
             'common_b': common_b,
             'common_c': common_c,
             'private_b': private_b,
             'private_c': private_c,
             'common_shared': common_shared,
-            'gate': gate,
+            'g_common': g_common,
         }
 
-        return style_b_out, style_c_out, decomp_dict
+        return common_shared, private_b, private_c, decomp_dict
 
 
 class ProposedSynthesisModule(nn.Module):
@@ -296,45 +301,49 @@ class ProposedSynthesisModule(nn.Module):
             )
 
         ch = 2 if self.use_multiple_outputs else 1
+        shared_style_ch = 1 if self.use_style_router and self.use_multiple_outputs else ch
+        self.use_branch_style_layers = self.use_multiple_outputs and (
+            self.use_separate_style_layers or self.use_style_router
+        )
 
+        guide_hidden = max(1, int(self.feat_ch / 8))
         self.guide_net = nn.Sequential(
-            nn.Conv2d(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
+            Conv(self.input_nc, guide_hidden, kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(int(self.feat_ch / 8), int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
+            Conv(guide_hidden, guide_hidden, kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(int(self.feat_ch / 8), int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
+            Conv(guide_hidden, 1, kernel_size=3, stride=1, padding=1),
         )
         
         # 일부분에만 style_denorm -> 21, 22, 31, 32에만 적용 #TODO: feat_ch에 ref ch만큼 배수로
         self.conv0 = StyleConv(self.input_nc, self.feat_ch * ch, kernel_size=3,
-                                                 activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                                 activate=True, demodulate=self.demodulate, ch=shared_style_ch, is_3d=self.is_3d)
         self.conv11 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                downsample=True, activate=True, demodulate=self.demodulate, ch=shared_style_ch, is_3d=self.is_3d)
         self.conv12 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=shared_style_ch, is_3d=self.is_3d)
         self.conv21 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                downsample=True, activate=True, demodulate=self.demodulate, ch=shared_style_ch, is_3d=self.is_3d)
         self.conv22 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=shared_style_ch, is_3d=self.is_3d)
         self.conv31 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=shared_style_ch, is_3d=self.is_3d)
         self.conv32 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=shared_style_ch, is_3d=self.is_3d)
         self.conv41 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, #feat_ch *4는 변치않게
-                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                upsample=True, activate=True, demodulate=self.demodulate, ch=shared_style_ch, is_3d=self.is_3d)
         self.conv42 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                upsample=False, activate=True, demodulate=self.demodulate, ch=shared_style_ch, is_3d=self.is_3d)
         self.conv51 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                upsample=True, activate=True, demodulate=self.demodulate, ch=shared_style_ch, is_3d=self.is_3d)
         self.conv52 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                upsample=False, activate=True, demodulate=self.demodulate, ch=shared_style_ch, is_3d=self.is_3d)
         self.conv6 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d) # 이걸 빠트렸었어.
+                                activate=True, demodulate=self.demodulate, ch=shared_style_ch, is_3d=self.is_3d) # 이걸 빠트렸었어.
                                 # activate=False, demodulate=self.demodulate)
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 style 적용
-        if self.use_separate_style_layers and self.use_multiple_outputs:
+        if self.use_branch_style_layers:
             # 각 branch는 feat_ch 채널 (전체의 절반)
             self.conv7_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                      activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d)
@@ -377,61 +386,59 @@ class ProposedSynthesisModule(nn.Module):
 
         if self.is_3d:
             ref = ref.permute(0, 1, 4, 2, 3)
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
-            style_guidance_1 = style_guidance_1.permute(0, 1, 3, 4, 2)
+            style_guidance_raw = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
+            style_guidance_raw = style_guidance_raw.permute(0, 1, 3, 4, 2)
+
+            x_low = x.permute(0, 1, 4, 2, 3)
+            source_low = F.interpolate(x_low, scale_factor=1/16, mode='trilinear', align_corners=False)
+            source_low = source_low.permute(0, 1, 3, 4, 2)
         else:
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯
+            style_guidance_raw = F.interpolate(ref, scale_factor=1/16, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯
+            source_low = F.interpolate(x, scale_factor=1/16, mode='nearest')
+
+        shared_style = style_guidance_raw
+        private_b = style_guidance_raw[:, :1, ...]
+        private_c = style_guidance_raw[:, 1:2, ...] if style_guidance_raw.shape[1] > 1 else private_b
 
         # Apply style router if enabled
-        if self.use_style_router and self.use_multiple_outputs:
-            # Split references
-            ref_b = style_guidance_1[:, :1, ...]  # [B, 1, H, W]
-            ref_c = style_guidance_1[:, 1:, ...]  # [B, 1, H, W]
-            # Source feature for gating (use downsampled source)
-            if self.is_3d:
-                x_permuted = x.permute(0, 1, 4, 2, 3)
-                source_feat = F.interpolate(x_permuted, scale_factor=1/16, mode='trilinear', align_corners=False)
-                source_feat = source_feat.permute(0, 1, 3, 4, 2)
-            else:
-                source_feat = F.interpolate(x, scale_factor=1/16, mode='nearest')
-            # Get processed styles through router
-            style_b, style_c, decomp_dict = self.style_router(ref_b, ref_c, source_feat)
-            # Stack for StyleConv compatibility [B, 2, H, W]
-            style_guidance_1 = torch.cat([style_b, style_c], dim=1)
+        if self.use_style_router and self.use_multiple_outputs and style_guidance_raw.shape[1] >= 2:
+            ref_b = style_guidance_raw[:, :1, ...]
+            ref_c = style_guidance_raw[:, 1:2, ...]
+            content_hint = self.guide_net(source_low)
+            shared_style, private_b, private_c, decomp_dict = self.style_router(ref_b, ref_c, content_hint)
+        elif self.use_style_router and self.use_multiple_outputs:
+            shared_style = style_guidance_raw.mean(dim=1, keepdim=True)
 
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/64, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, size=(1, 1), mode='nearest') # Ablation
         feats = []
-        feat0 = self.conv0(x, style_guidance_1) # [1, feat_ch, H, W]
-        feat1 = self.conv11(feat0, style_guidance_1) # [1, feat_ch, H/2, W/2]
-        feat1 = self.conv12(feat1, style_guidance_1) # [1, feat_ch, H/2, W/2]
-        feat2 = self.conv21(feat1, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat2 = self.conv22(feat2, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat3 = self.conv31(feat2, style_guidance_1) # [1, feat_ch, H/4, W/4] #TODO: 메모리 많아서 뺌.
-        feat3 = self.conv32(feat3, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat4 = self.conv41(feat3 + feat2, style_guidance_1)# [1, feat_ch, H/2, W/2] #TODO: 원래 intput feat3 + feat2
-        feat4 = self.conv42(feat4, style_guidance_1)        # [1, feat_ch, H/2, W/2]
-        feat5 = self.conv51(feat4 + feat1, style_guidance_1)# [1, feat_ch, H, W]
-        feat5 = self.conv52(feat5, style_guidance_1)        # [1, feat_ch, H, W]
-        feat6 = self.conv6(feat5 + feat0, style_guidance_1) # [1, feat_ch, H, W]
+        feat0 = self.conv0(x, shared_style) # [1, feat_ch, H, W]
+        feat1 = self.conv11(feat0, shared_style) # [1, feat_ch, H/2, W/2]
+        feat1 = self.conv12(feat1, shared_style) # [1, feat_ch, H/2, W/2]
+        feat2 = self.conv21(feat1, shared_style) # [1, feat_ch, H/4, W/4]
+        feat2 = self.conv22(feat2, shared_style) # [1, feat_ch, H/4, W/4]
+        feat3 = self.conv31(feat2, shared_style) # [1, feat_ch, H/4, W/4] #TODO: 메모리 많아서 뺌.
+        feat3 = self.conv32(feat3, shared_style) # [1, feat_ch, H/4, W/4]
+        feat4 = self.conv41(feat3 + feat2, shared_style)# [1, feat_ch, H/2, W/2] #TODO: 원래 intput feat3 + feat2
+        feat4 = self.conv42(feat4, shared_style)        # [1, feat_ch, H/2, W/2]
+        feat5 = self.conv51(feat4 + feat1, shared_style)# [1, feat_ch, H, W]
+        feat5 = self.conv52(feat5, shared_style)        # [1, feat_ch, H, W]
+        feat6 = self.conv6(feat5 + feat0, shared_style) # [1, feat_ch, H, W]
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 처리
-        if self.use_separate_style_layers and self.use_multiple_outputs:
+        if self.use_branch_style_layers:
             # feat6를 반으로 분리
             feat6_1, feat6_2 = torch.chunk(feat6, chunks=2, dim=1)  # 각 [B, feat_ch, H, W]
-            # style도 분리
-            style_1 = style_guidance_1[:, :1, ...]  # [B, 1, ...]
-            style_2 = style_guidance_1[:, 1:, ...]  # [B, 1, ...]
 
             # conv7: 각각 독립적으로 처리
-            feat7_1 = self.conv7_1(feat6_1, style_1)  # [B, feat_ch, H, W]
-            feat7_2 = self.conv7_2(feat6_2, style_2)  # [B, feat_ch, H, W]
+            feat7_1 = self.conv7_1(feat6_1, private_b)  # [B, feat_ch, H, W]
+            feat7_2 = self.conv7_2(feat6_2, private_c)  # [B, feat_ch, H, W]
 
             # conv8: 각각 독립적으로 처리
-            feat8_1 = self.conv8_1(feat7_1, style_1)  # [B, feat_ch, H, W]
-            feat8_2 = self.conv8_2(feat7_2, style_2)  # [B, feat_ch, H, W]
+            feat8_1 = self.conv8_1(feat7_1, private_b)  # [B, feat_ch, H, W]
+            feat8_2 = self.conv8_2(feat7_2, private_c)  # [B, feat_ch, H, W]
 
             # 각각 conv_final + tanh
             out_1 = torch.tanh(self.conv_final_1(feat8_1))  # [B, output_nc//2, H, W]
@@ -445,7 +452,7 @@ class ProposedSynthesisModule(nn.Module):
 
         if encode_only:
             layers_dict = {0: feat0, 1: feat1, 2: feat2, 3: feat3, 4: feat4, 5: feat5, 6: feat6}
-            if self.use_separate_style_layers and self.use_multiple_outputs:
+            if self.use_branch_style_layers:
                 layers_dict[7] = torch.cat((feat7_1, feat7_2), dim=1)
                 layers_dict[8] = torch.cat((feat8_1, feat8_2), dim=1)
             return [layers_dict[i] for i in layers]
@@ -544,13 +551,19 @@ class StyleConv(nn.Module):
         if self.downsample:
             original_size = x.size()
             if x.size()[2:] != original_size[2:]:  # If the size has changed
-                x = F.interpolate(x, size=original_size[2:], mode='bilinear', align_corners=True)
+                if self.is_3d:
+                    x = F.interpolate(x, size=original_size[2:], mode='trilinear', align_corners=False)
+                else:
+                    x = F.interpolate(x, size=original_size[2:], mode='bilinear', align_corners=False)
             x = self.down(x)
         elif self.upsample:
             x = self.up(x)
             original_size = x.size()
             if x.size()[2:] != original_size[2:]:  # If the size has changed
-                x = F.interpolate(x, size=original_size[2:], mode='bilinear', align_corners=True)
+                if self.is_3d:
+                    x = F.interpolate(x, size=original_size[2:], mode='trilinear', align_corners=False)
+                else:
+                    x = F.interpolate(x, size=original_size[2:], mode='bilinear', align_corners=False)
         else:
             x = self.conv(x)
         
@@ -579,10 +592,10 @@ class StyleConv(nn.Module):
                 gamma = self.mlp_gamma(actv)
                 beta = self.mlp_beta(actv)
             elif style.shape[1] == 2:
-                actv1 = self.mlp_shared(style[:, :1, :, :])
+                actv1 = self.mlp_shared(style[:, :1, ...])
                 gamma = self.mlp_gamma(actv1) # B, 256, f_H, f_W
                 beta = self.mlp_beta(actv1) # B, 256, f_H, f_W
-                actv_2 = self.mlp_shared_2(style[:, 1:, :, :])
+                actv_2 = self.mlp_shared_2(style[:, 1:2, ...])
                 gamma_2 = self.mlp_gamma_2(actv_2) 
                 beta_2 = self.mlp_beta_2(actv_2) 
                 gamma = torch.cat((gamma, gamma_2), dim=1) # B, 512, f_H, f_W
