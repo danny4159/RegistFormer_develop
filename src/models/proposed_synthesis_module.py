@@ -8,6 +8,7 @@ from src.losses.gan_loss import GANLoss
 from src.losses.contextual_loss import Contextual_Loss, VGG_Model
 from src.losses.patch_nce_loss import PatchNCELoss
 from src.losses.mind_loss import MINDLoss
+from src.losses.style_decomp_loss import StyleDecompositionLoss
 
 from src import utils
 from src.models.base_module_AtoB_BtoA import BaseModule_AtoB_BtoA
@@ -72,12 +73,86 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         self.criterionMIND = MINDLoss() if params.lambda_mind != 0 else None
         self.criterionL1 = torch.nn.L1Loss() if params.lambda_l1 != 0 else None
 
+        # Style Decomposition Loss (Common-Private)
+        self.use_style_router = getattr(params, 'use_style_router', False)
+        if self.use_style_router:
+            self.criterionStyleDecomp = StyleDecompositionLoss(
+                lambda_common=getattr(params, 'lambda_common', 1.0),
+                lambda_private=getattr(params, 'lambda_private', 0.2),
+                lambda_sep=getattr(params, 'lambda_sep', 0.2),
+                lambda_smooth=getattr(params, 'lambda_smooth', 0.05),
+                use_cosine=True
+            )
+        else:
+            self.criterionStyleDecomp = None
 
         # PatchNCE specific initializations
         # self.nce_layers = [0,2,4,6] # range: 0~6
         # self.flip_equivariance = params.flip_equivariance
 
-    def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
+    def model_step(self, batch, is_3d=False):
+        """Override model_step to handle style decomposition dict"""
+        if self.params.use_multiple_outputs:
+            if self.params.use_misalign_simul == False:
+                if len(batch) == 3:  # Ref cont 2
+                    real_a, real_b, real_c = batch
+                    real_merged = torch.cat((real_b, real_c), dim=1)
+
+                    # Check if we need decomp_dict for style router loss
+                    if self.use_style_router and self.training:
+                        result = self.forward(real_a, real_merged, return_decomp=True)
+                        if isinstance(result, tuple):
+                            fake_merged, decomp_dict = result
+                        else:
+                            fake_merged = result
+                            decomp_dict = None
+                    else:
+                        fake_merged = self.forward(real_a, real_merged)
+                        decomp_dict = None
+
+                    fake_b, fake_c = fake_merged[:, :1, ...], fake_merged[:, 1:, ...]
+                    real_d, fake_d = None, None
+
+                    return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, decomp_dict
+
+                elif len(batch) == 4:  # Ref cont 3
+                    real_a, real_b, real_c, real_d = batch
+                    real_merged = torch.cat((real_b, real_c, real_d), dim=1)
+                    fake_merged = self.forward(real_a, real_merged)
+                    fake_b = fake_merged[:, :1, ...]
+                    fake_c = fake_merged[:, 1:2, ...]
+                    fake_d = fake_merged[:, 2:, ...]
+                    return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, None
+
+            else:  # use_misalign_simul == True
+                if len(batch) == 5:
+                    real_a, real_b, real_b_ref, real_c, real_c_ref = batch
+                    real_merged = torch.cat((real_b_ref, real_c_ref), dim=1)
+
+                    if self.use_style_router and self.training:
+                        result = self.forward(real_a, real_merged, return_decomp=True)
+                        if isinstance(result, tuple):
+                            fake_merged, decomp_dict = result
+                        else:
+                            fake_merged = result
+                            decomp_dict = None
+                    else:
+                        fake_merged = self.forward(real_a, real_merged)
+                        decomp_dict = None
+
+                    fake_b, fake_c = fake_merged[:, :1, ...], fake_merged[:, 1:, ...]
+                    real_d, fake_d, real_d_ref = None, None, None
+
+                    return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref, decomp_dict
+                else:
+                    raise ValueError(f"Expected batch size of 5 for misaligned simulation, but got {len(batch)}")
+
+        else:  # Single output mode - use parent implementation
+            result = super().model_step(batch, is_3d)
+            # Add None for decomp_dict
+            return (*result, None) if isinstance(result, tuple) else (result, None)
+
+    def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref, decomp_dict=None):
         loss_G = torch.tensor(0.0, device=real_a.device) 
         if self.params.use_misalign_simul:
             real_b, real_c, real_d = real_b_ref, real_c_ref, real_d_ref # Misaligned simulated data is ref. It is assigned to real
@@ -254,6 +329,16 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 self.log("L1_c_Loss", loss_l1_c.detach(), prog_bar=True)
                 loss_G += loss_l1_c
 
+        ##################################################################################################################
+        ## 5. Style Decomposition Loss (Common-Private)
+        if self.criterionStyleDecomp is not None and decomp_dict is not None:
+            loss_decomp, loss_decomp_dict = self.criterionStyleDecomp(decomp_dict)
+            loss_G += loss_decomp
+            # Log individual decomposition losses
+            for key, val in loss_decomp_dict.items():
+                self.log(key, val.detach(), prog_bar=False)
+            self.log("Decomp_Loss", loss_decomp.detach(), prog_bar=True)
+
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
         # assert not torch.isnan(loss_G).any(), "Total Loss is NaN"
@@ -342,36 +427,41 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         return loss_G
 
     def training_step(self, batch: Any, batch_idx: int):
-        
+
+        decomp_dict = None  # Initialize decomp_dict
+
         if self.params.use_multiple_outputs:
             optimizer_G_A, optimizer_D_A, optimizer_D_B, optimizer_F_A = self.optimizers()
 
             if self.params.use_misalign_simul:
-                real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref = self.model_step(batch)
+                real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref, decomp_dict = self.model_step(batch)
             else:
-                real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d = self.model_step(batch)
+                real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, decomp_dict = self.model_step(batch)
         else:
             optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
             if self.params.use_misalign_simul:
-                real_a, real_b, fake_b, real_b_ref = self.model_step(batch)
+                result = self.model_step(batch)
+                real_a, real_b, fake_b, real_b_ref = result[:4]
+                decomp_dict = result[-1] if len(result) > 4 else None
             else:
-                real_a, real_b, fake_b = self.model_step(batch)
+                result = self.model_step(batch)
+                real_a, real_b, fake_b = result[:3]
+                decomp_dict = result[-1] if len(result) > 3 else None
 
-        
         with optimizer_G_A.toggle_model():
             if self.params.use_multiple_outputs:
                 if self.params.use_misalign_simul:
-                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
+                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref, decomp_dict)
                 else:
-                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, None, None, None)
+                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, None, None, None, decomp_dict)
             else:
                 if self.params.use_misalign_simul:
-                    loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
+                    loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None, decomp_dict)
                 else:
                     if self.params.is_3d:
                         loss_G = self.backward_G_3D(real_a, real_b, None, None, fake_b, None, None, None, None, None)
                     else:
-                        loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, None, None, None)
+                        loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, None, None, None, decomp_dict)
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"

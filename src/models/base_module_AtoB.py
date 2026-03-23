@@ -82,15 +82,15 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
         return gc, nmi, fid, kid, sharpness
 
-    def forward(self, a: torch.Tensor, b: torch.Tensor, c: Optional[torch.Tensor] = None):
-        
+    def forward(self, a: torch.Tensor, b: torch.Tensor, c: Optional[torch.Tensor] = None, return_decomp: bool = False):
+
         # Case1. Refernece guided generation
         if type(self.netG_A).__name__ in ["RegistFormer", "ProposedSynthesisModule"]:
             if c is not None:
                 merged_input = torch.cat((a, b, c), dim=1)
-            else:         
+            else:
                 merged_input = torch.cat((a, b), dim=1)
-            
+
             # Sliding window on inference
             if self.params.is_3d and not self.training:
                 roi_size = tuple(self.params.crop_size)
@@ -103,8 +103,8 @@ class BaseModule_AtoB(LightningModule):  # single direction
                     inferer = SlidingWindowInferer(roi_size=roi_size, mode='gaussian') # 128,128
                     pred = inferer(inputs=merged_input, network=self.netG_A) #inputs 손봐야해
                     return pred
-        
-            return self.netG_A(merged_input)
+
+            return self.netG_A(merged_input, return_decomp=return_decomp)
         
         if type(self.netG_A).__name__ in ["AutoencoderKL", "AutoencoderKlMaisi"]:
             torch.cuda.empty_cache()

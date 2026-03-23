@@ -25,6 +25,11 @@ netG_A:
   use_multiple_outputs: ${data.use_multiple_outputs}
   is_3d: ${data.is_3d}
   use_separate_style_layers: false
+  # Common-Private Style Router (CPLSF) options
+  use_style_router: true
+  style_router_ch: 64
+  use_freq_prior: true
+  use_source_gate: true
   # init_type: 'kaiming'
 
 netD_A:
@@ -70,6 +75,12 @@ params: # Other params
   lambda_nce: 5
   lambda_mind: 0
   lambda_l1: 0
+  # Common-Private Style Router loss weights
+  use_style_router: ${model.netG_A.use_style_router}
+  lambda_common: 1.0      # Common agreement loss weight
+  lambda_private: 0.2     # Private decorrelation loss weight
+  lambda_sep: 0.2         # Common-private separation loss weight
+  lambda_smooth: 0.05     # Shared style smoothness loss weight
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
