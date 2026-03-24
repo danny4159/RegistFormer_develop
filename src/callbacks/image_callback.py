@@ -56,7 +56,7 @@ class ImageLoggingCallback(Callback):
             print(f"Input content: {res}")
             return
         
-        if len(res) in [7,10]: # multi-contrast generation
+        if len(res) in [7, 8, 10, 11]: # multi-contrast generation (7/10: old, 8/11: with decomp_dict)
             self.ngrid = 5
             a, b, c, d, preds_b, preds_c, preds_d, *_ = res
             err_b = torch.abs(b - preds_b)
@@ -553,7 +553,7 @@ class ImageSavingCallback(Callback):
         elif len(batch[0].size()) == 4:
             res = pl_module.model_step(batch)
         
-        if len(res) in [7,10]: # Multi-contrast generation
+        if len(res) in [7, 8, 10, 11]: # Multi-contrast generation (7/10: old, 8/11: with decomp_dict)
             a, b, c, d, preds_b, preds_c, preds_d, *_ = res
             if self.data_type == 'nifti':
                 self.saving_to_nii(a, b, c, preds_b, preds_c)
