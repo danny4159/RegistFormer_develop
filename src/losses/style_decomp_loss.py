@@ -244,3 +244,46 @@ class GateRegularizationLoss(nn.Module):
         ) / 3.0
 
         return self.lambda_gate * loss_gate
+
+
+class GradientConsistencyLoss(nn.Module):
+    """Gradient consistency loss to preserve edge locations and structure.
+
+    Encourages the output to have similar gradient structure to the source,
+    which helps maintain structural alignment while allowing style transfer.
+    This can improve SSIM by keeping edge positions consistent.
+    """
+
+    def __init__(self):
+        """Initialize GradientConsistencyLoss."""
+        super().__init__()
+
+    def gradient_x(self, x):
+        """Compute horizontal gradient (difference along width)."""
+        return x[:, :, :, 1:] - x[:, :, :, :-1]
+
+    def gradient_y(self, x):
+        """Compute vertical gradient (difference along height)."""
+        return x[:, :, 1:, :] - x[:, :, :-1, :]
+
+    def forward(self, src, out):
+        """Compute gradient consistency loss between source and output.
+
+        Args:
+            src: Source image [B, C, H, W]
+            out: Output image [B, C, H, W]
+
+        Returns:
+            Scalar loss value
+        """
+        # Compute gradients
+        grad_x_src = self.gradient_x(src)
+        grad_x_out = self.gradient_x(out)
+        grad_y_src = self.gradient_y(src)
+        grad_y_out = self.gradient_y(out)
+
+        # L1 loss on gradients
+        loss_x = F.l1_loss(grad_x_src, grad_x_out)
+        loss_y = F.l1_loss(grad_y_src, grad_y_out)
+
+        return loss_x + loss_y

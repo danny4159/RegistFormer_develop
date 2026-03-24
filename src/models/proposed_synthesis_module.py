@@ -8,7 +8,7 @@ from src.losses.gan_loss import GANLoss
 from src.losses.contextual_loss import Contextual_Loss, VGG_Model
 from src.losses.patch_nce_loss import PatchNCELoss
 from src.losses.mind_loss import MINDLoss
-from src.losses.style_decomp_loss import StyleDecompositionLoss, GateRegularizationLoss
+from src.losses.style_decomp_loss import StyleDecompositionLoss, GateRegularizationLoss, GradientConsistencyLoss
 
 from src import utils
 from src.models.base_module_AtoB_BtoA import BaseModule_AtoB_BtoA
@@ -89,6 +89,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # Gate regularization loss (prevents over-aggressive common sharing)
         lambda_gate = getattr(params, 'lambda_gate', 0.005)
         self.criterionGateReg = GateRegularizationLoss(lambda_gate=lambda_gate) if lambda_gate > 0 else None
+
+        # Gradient consistency loss (preserves edge locations and structure)
+        lambda_grad = getattr(params, 'lambda_grad', 0)
+        self.criterionGrad = GradientConsistencyLoss() if lambda_grad > 0 else None
 
         # PatchNCE specific initializations
         # self.nce_layers = [0,2,4,6] # range: 0~6
@@ -289,6 +293,18 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             loss_gate_reg = self.criterionGateReg(decomp_dict)
             loss_G += loss_gate_reg
             self.log("GateReg_Loss", loss_gate_reg.detach(), prog_bar=True)
+
+        ##################################################################################################################
+        ## 7. Gradient Consistency Loss (preserves edge locations and structure)
+        if self.criterionGrad is not None:
+            loss_grad_b = self.criterionGrad(real_a, fake_b) * self.params.lambda_grad
+            loss_G += loss_grad_b
+            self.log("Grad_b_Loss", loss_grad_b.detach(), prog_bar=True)
+
+            if self.params.use_multiple_outputs:
+                loss_grad_c = self.criterionGrad(real_a, fake_c) * self.params.lambda_grad
+                loss_G += loss_grad_c
+                self.log("Grad_c_Loss", loss_grad_c.detach(), prog_bar=True)
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G

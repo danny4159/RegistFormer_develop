@@ -76,10 +76,12 @@ params: # Other params
   lambda_mind: 0
   lambda_l1: 0
   # Style Decomposition Loss (for Common-Private Style Router)
-  lambda_common: 0    # Common agreement loss (common_b ≈ common_c)
-  lambda_private: 0   # Private decorrelation loss (private_b ⊥ private_c)
-  lambda_sep: 0       # Common-private separation loss
-  lambda_smooth: 0    # Spatial smoothness (TV) loss on common_shared
+  lambda_common: 0      # Common agreement loss (common_b ≈ common_c)
+  lambda_private: 0     # Private decorrelation loss (private_b ⊥ private_c)
+  lambda_sep: 0         # Common-private separation loss
+  lambda_smooth: 0      # Spatial smoothness (TV) loss on common_shared
+  lambda_gate: 0        # Gate regularization (prevents over-aggressive common sharing)
+  lambda_grad: 0        # Gradient consistency loss (improves SSIM)
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
