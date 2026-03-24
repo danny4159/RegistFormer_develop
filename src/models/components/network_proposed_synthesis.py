@@ -195,9 +195,10 @@ class CommonPrivateStyleRouter(nn.Module):
             nn.init.constant_(self.gate_c[-2].bias, -2.0)
 
         # Learnable scaling for common absorption
+        # Initialize to -4.0 so that initial alpha ≈ 0.25 * sigmoid(-4) ≈ 0.0045 (very conservative)
         param_shape = (1, style_ch, 1, 1, 1) if is_3d else (1, style_ch, 1, 1)
-        self.alpha_b = nn.Parameter(torch.zeros(param_shape))
-        self.alpha_c = nn.Parameter(torch.zeros(param_shape))
+        self.alpha_b = nn.Parameter(torch.full(param_shape, -4.0))
+        self.alpha_c = nn.Parameter(torch.full(param_shape, -4.0))
 
         # Project fused style to 1-channel for StyleConv compatibility
         self.style_out_b = Conv(style_ch, 1, kernel_size=1)
