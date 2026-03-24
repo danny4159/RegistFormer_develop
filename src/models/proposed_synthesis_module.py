@@ -8,7 +8,7 @@ from src.losses.gan_loss import GANLoss
 from src.losses.contextual_loss import Contextual_Loss, VGG_Model
 from src.losses.patch_nce_loss import PatchNCELoss
 from src.losses.mind_loss import MINDLoss
-from src.losses.style_decomp_loss import StyleDecompositionLoss
+from src.losses.style_decomp_loss import StyleDecompositionLoss, GateRegularizationLoss
 
 from src import utils
 from src.models.base_module_AtoB_BtoA import BaseModule_AtoB_BtoA
@@ -85,6 +85,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             lambda_sep=lambda_sep,
             lambda_smooth=lambda_smooth,
         ) if use_style_decomp else None
+
+        # Gate regularization loss (prevents over-aggressive common sharing)
+        lambda_gate = getattr(params, 'lambda_gate', 0.005)
+        self.criterionGateReg = GateRegularizationLoss(lambda_gate=lambda_gate) if lambda_gate > 0 else None
 
         # PatchNCE specific initializations
         # self.nce_layers = [0,2,4,6] # range: 0~6
@@ -278,6 +282,13 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             self.log("Private_Loss", loss_dict['loss_private'], prog_bar=False)
             self.log("Sep_Loss", loss_dict['loss_sep'], prog_bar=False)
             self.log("Smooth_Loss", loss_dict['loss_smooth'], prog_bar=False)
+
+        ##################################################################################################################
+        ## 6. Gate Regularization Loss (prevents over-aggressive common sharing)
+        if self.criterionGateReg and decomp_dict is not None:
+            loss_gate_reg = self.criterionGateReg(decomp_dict)
+            loss_G += loss_gate_reg
+            self.log("GateReg_Loss", loss_gate_reg.detach(), prog_bar=True)
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G

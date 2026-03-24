@@ -202,3 +202,45 @@ class StyleDecompositionLoss(nn.Module):
         }
 
         return total_loss, loss_dict
+
+
+class GateRegularizationLoss(nn.Module):
+    """Regularization loss to prevent gates from becoming too large.
+
+    Encourages sparsity in gate activations, which prevents over-aggressive
+    common style sharing that can lead to sharp but structurally misaligned outputs.
+    """
+
+    def __init__(self, lambda_gate=0.005):
+        """Initialize GateRegularizationLoss.
+
+        Args:
+            lambda_gate: Weight for gate regularization (default: 0.005)
+        """
+        super().__init__()
+        self.lambda_gate = lambda_gate
+
+    def forward(self, decomp_dict):
+        """Compute gate regularization loss.
+
+        Args:
+            decomp_dict: Dictionary containing:
+                - g_common: Common fusion gate [B, C, H, W]
+                - g_b: Branch B receiving gate [B, C, H, W]
+                - g_c: Branch C receiving gate [B, C, H, W]
+
+        Returns:
+            Scalar loss value (already weighted by lambda_gate)
+        """
+        g_common = decomp_dict['g_common']
+        g_b = decomp_dict['g_b']
+        g_c = decomp_dict['g_c']
+
+        # Mean absolute activation (encourage sparsity)
+        loss_gate = (
+            g_common.abs().mean() +
+            g_b.abs().mean() +
+            g_c.abs().mean()
+        ) / 3.0
+
+        return self.lambda_gate * loss_gate

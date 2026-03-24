@@ -141,6 +141,8 @@ class CommonPrivateStyleRouter(nn.Module):
                 Conv(style_ch // 2, style_ch, kernel_size=3, padding=1),
                 nn.LeakyReLU(0.2, inplace=True),
             )
+            # Learnable scale for freq_feat (conservative: start at 0.25, max 0.5)
+            self.freq_scale = nn.Parameter(torch.tensor(0.25))
 
         # Common-Private decomposition networks
         # These learn to separate common (shared) from private (unique) components
@@ -226,8 +228,9 @@ class CommonPrivateStyleRouter(nn.Module):
             freq_input = torch.cat([high_freq, local_mean, local_std], dim=1)
             freq_feat = self.freq_encoder(freq_input)
 
-            # Combine style and frequency features
-            combined = torch.cat([style_feat, freq_feat], dim=1)
+            # Apply conservative freq_scale (clamped to [0, 0.5])
+            freq_scale = torch.clamp(self.freq_scale, min=0.0, max=0.5)
+            combined = torch.cat([style_feat, freq_scale * freq_feat], dim=1)
         else:
             combined = style_feat
 
@@ -293,8 +296,11 @@ class CommonPrivateStyleRouter(nn.Module):
 
         # Final fused style per branch: private + alpha * (gate * common_shared)
         # s_b = p_b + alpha_b * (g_b * c_shared)
-        style_b_feat = private_b + self.alpha_b * (gate_b * common_shared)
-        style_c_feat = private_c + self.alpha_c * (gate_c * common_shared)
+        # Cap alpha to [0, 0.25] range via 0.25 * sigmoid
+        alpha_b = 0.25 * torch.sigmoid(self.alpha_b)
+        alpha_c = 0.25 * torch.sigmoid(self.alpha_c)
+        style_b_feat = private_b + alpha_b * (gate_b * common_shared)
+        style_c_feat = private_c + alpha_c * (gate_c * common_shared)
 
         # Project to 1-channel for StyleConv compatibility
         style_b_map = self.style_out_b(style_b_feat)
