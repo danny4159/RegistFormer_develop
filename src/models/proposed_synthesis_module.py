@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+from piq import DISTS
 from src.losses.gan_loss import GANLoss
 from src.losses.contextual_loss import Contextual_Loss, VGG_Model
 from src.losses.patch_nce_loss import PatchNCELoss
@@ -70,6 +71,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         self.criterionMIND = MINDLoss() if params.lambda_mind != 0 else None
         self.criterionL1 = torch.nn.L1Loss() if params.lambda_l1 != 0 else None
 
+        # DISTS loss for structure + texture similarity (full-reference)
+        self.criterionDISTS = DISTS(
+            reduction='mean',
+            mean=[0.0, 0.0, 0.0],
+            std=[1.0, 1.0, 1.0],
+        ) if getattr(params, 'lambda_dists', 0) != 0 else None
 
         # PatchNCE specific initializations
         # self.nce_layers = [0,2,4,6] # range: 0~6
@@ -100,6 +107,18 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             feats = self.netG_A.encode_content_only(dummy_x)
             if hasattr(self.netF_A, 'create_mlp'):
                 self.netF_A.create_mlp(feats)
+
+    def _to_dists_input(self, x: torch.Tensor) -> torch.Tensor:
+        # Generator outputs and targets are expected in [-1, 1].
+        x = ((x + 1.0) * 0.5).clamp(0.0, 1.0)
+
+        # DISTS expects 3-channel images.
+        if x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+        elif x.shape[1] == 2:
+            x = torch.cat([x[:, :1], x[:, :1], x[:, :1]], dim=1)
+
+        return x
 
     def backward_G(self, real_a, real_b, real_c, fake_b, fake_c, real_b_ref, real_c_ref):
         loss_G = torch.tensor(0.0, device=real_a.device)
@@ -136,6 +155,22 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 self.log("Context_c_Loss", loss_style_c.detach(), prog_bar=True)
                 loss_G += loss_style_c.squeeze()
                 # assert not torch.isnan(loss_style_c).any(), "Contextual Loss is NaN"
+
+        ##################################################################################################################
+        ## 2.5 DISTS loss: final-image structure + texture similarity
+        if self.criterionDISTS:
+            fake_b_d = self._to_dists_input(fake_b)
+            real_b_d = self._to_dists_input(real_b)
+            loss_dists_b = self.criterionDISTS(fake_b_d, real_b_d) * self.params.lambda_dists
+            self.log("DISTS_b_Loss", loss_dists_b.detach(), prog_bar=True)
+            loss_G += loss_dists_b
+
+            if self.params.use_multiple_outputs:
+                fake_c_d = self._to_dists_input(fake_c)
+                real_c_d = self._to_dists_input(real_c)
+                loss_dists_c = self.criterionDISTS(fake_c_d, real_c_d) * self.params.lambda_dists
+                self.log("DISTS_c_Loss", loss_dists_c.detach(), prog_bar=True)
+                loss_G += loss_dists_c
 
         ##################################################################################################################
         ## 3. PatchNCE loss
@@ -393,6 +428,14 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_G += loss_style_b.squeeze()
                 loss_logs.setdefault("Context_b_Loss", 0.0)
                 loss_logs["Context_b_Loss"] += loss_style_b.detach()
+
+            if self.criterionDISTS:
+                fake_b_d = self._to_dists_input(fb)
+                real_b_d = self._to_dists_input(rb)
+                loss_dists_b = self.criterionDISTS(fake_b_d, real_b_d) * self.params.lambda_dists / D
+                loss_G += loss_dists_b
+                loss_logs.setdefault("DISTS_b_Loss", 0.0)
+                loss_logs["DISTS_b_Loss"] += loss_dists_b.detach()
 
             ## PatchNCE (slice-wise)
             if self.criterionNCE:
