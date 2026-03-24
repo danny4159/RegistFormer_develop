@@ -553,7 +553,7 @@ class ImageSavingCallback(Callback):
         elif len(batch[0].size()) == 4:
             res = pl_module.model_step(batch)
         
-        if len(res) in [7,10]: # Multi-contrast generation
+        if len(res) in [7,10,11]: # Multi-contrast generation (11 when decomp_dict is returned)
             a, b, c, d, preds_b, preds_c, preds_d, *_ = res
             if self.data_type == 'nifti':
                 self.saving_to_nii(a, b, c, preds_b, preds_c)
