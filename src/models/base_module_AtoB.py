@@ -450,14 +450,19 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 self.nmi_scores_D = []
 
     def test_step(self, batch: Any, batch_idx: int):
- 
+
+        res = self.model_step(batch)
+
         if self.params.use_multiple_outputs:
-            if self.params.use_misalign_simul:
-                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D, real_B_ref, real_C_ref, real_D_ref = self.model_step(batch) 
-            else:
-                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
+            # Handle both 7-value (no misalign_simul) and 10-value (with misalign_simul) returns
+            real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D, *extra = res
+            # Extract ref values if present (misalign_simul case)
+            real_B_ref = extra[0] if len(extra) > 0 else None
+            real_C_ref = extra[1] if len(extra) > 1 else None
+            real_D_ref = extra[2] if len(extra) > 2 else None
         else:
-            real_A, real_B, fake_B, *_ = self.model_step(batch)
+            real_A, real_B, fake_B, *_ = res
+            real_C, real_D, fake_C, fake_D = None, None, None, None
         
         if len(real_A.size()) == 5:
             for i in range(real_A.size(4)):
