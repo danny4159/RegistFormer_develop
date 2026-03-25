@@ -18,226 +18,142 @@ from monai.transforms import Affine
 import random
 import math
 
-def padding_height_width_depth(tensorA, tensorB, tensorC=None, tensorD=None, tensorE=None, target_size=(256, 256), pad_value=-1):
+def _collect_present_tensors(*tensors):
+    return tuple(tensor for tensor in tensors if tensor is not None)
+
+
+def padding_height_width_depth(
+    tensorA,
+    tensorB,
+    tensorC=None,
+    tensorD=None,
+    tensorE=None,
+    tensorF=None,
+    tensorG=None,
+    target_size=(256, 256),
+    pad_value=-1,
+):
     if isinstance(target_size, int):
         target_size = (target_size, target_size)
     elif isinstance(target_size, (list, tuple)) and len(target_size) not in (2, 3):
         raise ValueError("target_size는 int, (H, W), 또는 (H, W, D) 형식이어야 합니다.")
-    
-    # Determine if the input is 2D or 3D based on the number of dimensions
+
+    tensors = [tensorA, tensorB, tensorC, tensorD, tensorE, tensorF, tensorG]
+    tensors = [tensor for tensor in tensors if tensor is not None]
+
     if len(tensorA.shape) == 3:
-        # 2D case
         _, h, w = tensorA.shape
-        assert h < target_size[0] and w < target_size[1], "Input tensor size must be larger than min_size"
-        assert len(tensorB.shape) == 3, "Input tensor B must have 3 dimensions (C, H, W)"
-        if tensorC is not None:
-            assert len(tensorC.shape) == 3, "Input tensor C must have 3 dimensions (C, H, W)"
-        if tensorD is not None:
-            assert len(tensorD.shape) == 3, "Input tensor D must have 3 dimensions (C, H, W)"
-        if tensorE is not None:
-            assert len(tensorE.shape) == 3, "Input tensor E must have 3 dimensions (C, H, W)"
+        expected_ndim = 3
     elif len(tensorA.shape) == 4:
-        # 3D case
         _, h, w, d = tensorA.shape
-        assert h < target_size[0] and w < target_size[1], "Input tensor size must be larger than min_size"
-        assert len(tensorB.shape) == 4, "Input tensor B must have 4 dimensions (C, H, W, D)"
-        if tensorC is not None:
-            assert len(tensorC.shape) == 4, "Input tensor C must have 4 dimensions (C, H, W, D)"
-        if tensorD is not None:
-            assert len(tensorD.shape) == 4, "Input tensor D must have 4 dimensions (C, H, W, D)"
-        if tensorE is not None:
-            assert len(tensorE.shape) == 4, "Input tensor E must have 4 dimensions (C, H, W, D)"
+        expected_ndim = 4
     else:
         raise ValueError("Input tensors must have 3 or 4 dimensions")
 
-    # Calculate padding
+    for idx, tensor in enumerate(tensors, start=1):
+        assert len(tensor.shape) == expected_ndim, f"Input tensor {idx} must have {expected_ndim} dimensions"
+
     pad_top = (target_size[0] - h + 1) // 2 if h < target_size[0] else 0
     pad_bottom = (target_size[0] - h) // 2 if h < target_size[0] else 0
     pad_left = (target_size[1] - w + 1) // 2 if w < target_size[1] else 0
     pad_right = (target_size[1] - w) // 2 if w < target_size[1] else 0
-    if len(target_size) == 3:
-        pad_front = (target_size[2] - d + 1) // 2 if d < target_size[2] else 0
-        pad_back = (target_size[2] - d) // 2 if d < target_size[2] else 0
 
-    # Apply padding
     if len(target_size) == 2:
         if pad_top != 0 or pad_left != 0:
-            tensorA = nnF.pad(tensorA, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
-            tensorB = nnF.pad(tensorB, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
-            if tensorC is not None:
-                tensorC = nnF.pad(tensorC, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
-            if tensorD is not None:
-                tensorD = nnF.pad(tensorD, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
-            if tensorE is not None:
-                tensorE = nnF.pad(tensorE, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value)
-        elif len(target_size) == 3:
-            if pad_top != 0 or pad_left != 0 or pad_front != 0:
-                tensorA = nnF.pad(tensorA, (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back), value=pad_value)
-                tensorB = nnF.pad(tensorB, (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back), value=pad_value)
-                if tensorC is not None:
-                    tensorC = nnF.pad(tensorC, (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back), value=pad_value)
-                if tensorD is not None:
-                    tensorD = nnF.pad(tensorD, (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back), value=pad_value)
-                if tensorE is not None:
-                    tensorE = nnF.pad(tensorE, (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back), value=pad_value)
-
-
-    if tensorE is not None:
-        return tensorA, tensorB, tensorC, tensorD, tensorE
-    elif tensorD is not None:
-        return tensorA, tensorB, tensorC, tensorD
-    elif tensorC is not None:
-        return tensorA, tensorB, tensorC
+            padded = []
+            for tensor in tensors:
+                padded.append(nnF.pad(tensor, (pad_left, pad_right, pad_top, pad_bottom), value=pad_value))
+            tensors = padded
     else:
-        return tensorA, tensorB
+        pad_front = (target_size[2] - d + 1) // 2 if d < target_size[2] else 0
+        pad_back = (target_size[2] - d) // 2 if d < target_size[2] else 0
+        if pad_top != 0 or pad_left != 0 or pad_front != 0:
+            padded = []
+            for tensor in tensors:
+                padded.append(nnF.pad(tensor, (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back), value=pad_value))
+            tensors = padded
 
-def random_crop(tensorA, tensorB, tensorC=None, tensorD=None, tensorE=None, target_size=(128, 128)):
-    """
-    Random crop for both 2D (C, H, W) and 3D (C, H, W, D) tensors.
-    `target_size` can be 2D (H, W) or 3D (H, W, D)
-    """
+    return tuple(tensors)
+
+
+def random_crop(
+    tensorA,
+    tensorB,
+    tensorC=None,
+    tensorD=None,
+    tensorE=None,
+    tensorF=None,
+    tensorG=None,
+    target_size=(128, 128),
+):
     if isinstance(target_size, int):
         target_size = (target_size, target_size)
     elif isinstance(target_size, (list, tuple)) and len(target_size) not in (2, 3):
         raise ValueError("target_size는 int, (H, W), 또는 (H, W, D) 형식이어야 합니다.")
-    
-    # Determine if the input is 2D or 3D based on the number of dimensions
+
+    tensors = [tensorA, tensorB, tensorC, tensorD, tensorE, tensorF, tensorG]
+    tensors = [tensor for tensor in tensors if tensor is not None]
+
     if len(tensorA.shape) == 3:
-        # 2D case
         _, h, w = tensorA.shape
-        assert len(tensorB.shape) == 3, "Input tensor B must have 3 dimensions (C, H, W)"
-        if tensorC is not None:
-            assert len(tensorC.shape) == 3, "Input tensor C must have 3 dimensions (C, H, W)"
-        if tensorD is not None:
-            assert len(tensorD.shape) == 3, "Input tensor D must have 3 dimensions (C, H, W)"
-        if tensorE is not None:
-            assert len(tensorE.shape) == 3, "Input tensor E must have 3 dimensions (C, H, W)"
+        expected_ndim = 3
     elif len(tensorA.shape) == 4:
-        # 3D case
         _, h, w, d = tensorA.shape
-        assert len(tensorB.shape) == 4, "Input tensor B must have 4 dimensions (C, H, W, D)"
-        if tensorC is not None:
-            assert len(tensorC.shape) == 4, "Input tensor C must have 4 dimensions (C, H, W, D)"
-        if tensorD is not None:
-            assert len(tensorD.shape) == 4, "Input tensor D must have 4 dimensions (C, H, W, D)"
-        if tensorE is not None:
-            assert len(tensorE.shape) == 4, "Input tensor E must have 4 dimensions (C, H, W, D)"
+        expected_ndim = 4
     else:
         raise ValueError("Input tensors must have 3 or 4 dimensions")
 
-    # Calculate the top left corner of the random crop
-    top = (
-        torch.randint(0, h - target_size[0] + 1, size=(1,)).item()
-        if h > target_size[0]
-        else 0
-    )
-    left = (
-        torch.randint(0, w - target_size[1] + 1, size=(1,)).item()
-        if w > target_size[1]
-        else 0
-    )
-    if len(target_size) == 3:
-        depth = (
-            torch.randint(0, d - target_size[2] + 1, size=(1,)).item()
-            if d > target_size[2]
-            else 0
-        )
-        
-    
+    for idx, tensor in enumerate(tensors, start=1):
+        assert len(tensor.shape) == expected_ndim, f"Input tensor {idx} must have {expected_ndim} dimensions"
 
-    if len(tensorA.shape) == 3: # Perform the crop for 2D tensors
-        tensorA = F.crop(tensorA, top, left, target_size[0], target_size[1])
-        tensorB = F.crop(tensorB, top, left, target_size[0], target_size[1])
-        if tensorC is not None:
-            tensorC = F.crop(tensorC, top, left, target_size[0], target_size[1])
-        if tensorD is not None:
-            tensorD = F.crop(tensorD, top, left, target_size[0], target_size[1])
-        if tensorE is not None:
-            tensorE = F.crop(tensorE, top, left, target_size[0], target_size[1])
-    elif len(tensorA.shape) == 4: # Perform the crop for 3D tensors
-        if len(target_size) == 2:
-            tensorA = tensorA[:, top:top + target_size[0], left:left + target_size[1], :]
-            tensorB = tensorB[:, top:top + target_size[0], left:left + target_size[1], :]
-            if tensorC is not None:
-                tensorC = tensorC[:, top:top + target_size[0], left:left + target_size[1], :]
-            if tensorD is not None:
-                tensorD = tensorD[:, top:top + target_size[0], left:left + target_size[1], :]
-            if tensorE is not None:
-                tensorE = tensorE[:, top:top + target_size[0], left:left + target_size[1], :]
-        elif len(target_size) == 3:
-            tensorA = tensorA[:, top:top + target_size[0], left:left + target_size[1], depth:depth + target_size[2]]
-            tensorB = tensorB[:, top:top + target_size[0], left:left + target_size[1], depth:depth + target_size[2]]
-            if tensorC is not None:
-                tensorC = tensorC[:, top:top + target_size[0], left:left + target_size[1], depth:depth + target_size[2]]
-            if tensorD is not None:
-                tensorD = tensorD[:, top:top + target_size[0], left:left + target_size[1], depth:depth + target_size[2]]
-            if tensorE is not None:
-                tensorE = tensorE[:, top:top + target_size[0], left:left + target_size[1], depth:depth + target_size[2]]
+    top = torch.randint(0, h - target_size[0] + 1, size=(1,)).item() if h > target_size[0] else 0
+    left = torch.randint(0, w - target_size[1] + 1, size=(1,)).item() if w > target_size[1] else 0
 
-    if tensorE is not None:
-        return tensorA, tensorB, tensorC, tensorD, tensorE
-    elif tensorD is not None:
-        return tensorA, tensorB, tensorC, tensorD
-    elif tensorC is not None:
-        return tensorA, tensorB, tensorC
+    if expected_ndim == 3:
+        cropped = [F.crop(tensor, top, left, target_size[0], target_size[1]) for tensor in tensors]
     else:
-        return tensorA, tensorB
-    
-def even_crop_height_width(tensorA, tensorB, tensorC=None, tensorD=None, multiple=(16, 16)):
-    """
-    Crop the image to the target size evenly from all sides.
+        if len(target_size) == 2:
+            cropped = [tensor[:, top:top + target_size[0], left:left + target_size[1], :] for tensor in tensors]
+        else:
+            depth = torch.randint(0, d - target_size[2] + 1, size=(1,)).item() if d > target_size[2] else 0
+            cropped = [tensor[:, top:top + target_size[0], left:left + target_size[1], depth:depth + target_size[2]] for tensor in tensors]
 
-    Args:
-        tensorA (Tensor): Image to be cropped.
-        tensorB (Tensor): Second Image to be cropped.
-        target_size (tuple): Desired output size (height, width).
-        tensorC (Tensor, optional): Third image to be cropped.
-        tensorD (Tensor, optional): Fourth image to be cropped.
+    return tuple(cropped)
 
-    Returns:
-        Tensor: Cropped images.
-    """
+
+def even_crop_height_width(
+    tensorA,
+    tensorB,
+    tensorC=None,
+    tensorD=None,
+    tensorE=None,
+    tensorF=None,
+    tensorG=None,
+    multiple=(16, 16),
+):
+    tensors = [tensorA, tensorB, tensorC, tensorD, tensorE, tensorF, tensorG]
+    tensors = [tensor for tensor in tensors if tensor is not None]
+
     if len(tensorA.shape) == 3:
-        # 2D case
         _, h, w = tensorA.shape
+        expected_ndim = 3
     elif len(tensorA.shape) == 4:
-        # 3D case
         _, h, w, _ = tensorA.shape
+        expected_ndim = 4
     else:
         raise ValueError("Input tensors must have 3 or 4 dimensions")
 
     new_h = (h // multiple[0]) * multiple[0]
     new_w = (w // multiple[1]) * multiple[1]
-
-    # Calculate cropping dimensions
     top = (h - new_h) // 2
-    bottom = h - new_h - top
     left = (w - new_w) // 2
-    right = w - new_w - left
 
-    if len(tensorA.shape) == 3:
-        # Crop images
-        tensorA = F.crop(tensorA, top, left, new_h, new_w)
-        tensorB = F.crop(tensorB, top, left, new_h, new_w)
-        if tensorC is not None:
-            tensorC = F.crop(tensorC, top, left, new_h, new_w)
-        if tensorD is not None:
-            tensorD = F.crop(tensorD, top, left, new_h, new_w)
-    elif len(tensorA.shape) == 4:
-        # Crop images
-        tensorA = tensorA[:, top:top + new_h, left:left + new_w, :]
-        tensorB = tensorB[:, top:top + new_h, left:left + new_w, :]
-        if tensorC is not None:
-            tensorC = tensorC[:, top:top + new_h, left:left + new_w, :]
-        if tensorD is not None:
-            tensorD = tensorD[:, top:top + new_h, left:left + new_w, :]
-
-    if tensorC is not None and tensorD is not None:
-        return tensorA, tensorB, tensorC, tensorD
-    elif tensorC is not None:
-        return tensorA, tensorB, tensorC
+    if expected_ndim == 3:
+        cropped = [F.crop(tensor, top, left, new_h, new_w) for tensor in tensors]
     else:
-        return tensorA, tensorB
+        cropped = [tensor[:, top:top + new_h, left:left + new_w, :] for tensor in tensors]
+
+    return tuple(cropped)
 
 
 log = utils.get_pylogger(__name__)
@@ -251,6 +167,8 @@ class dataset_SynthRAD(Dataset):
         data_group_3: Optional[str] = None,
         data_group_4: Optional[str] = None,
         data_group_5: Optional[str] = None,
+        data_group_6: Optional[str] = None,  # For triple outputs (MRA)
+        data_group_7: Optional[str] = None,  # For triple outputs (MRA_moved)
         is_3d: bool = False,
         padding_size: Optional[Tuple[int, int]] = None,
         flip_prob: float = 0.0,
@@ -268,6 +186,8 @@ class dataset_SynthRAD(Dataset):
         self.data_group_3 = data_group_3
         self.data_group_4 = data_group_4
         self.data_group_5 = data_group_5
+        self.data_group_6 = data_group_6
+        self.data_group_7 = data_group_7
         self.is_3d = is_3d
         self.padding_size = padding_size
         self.crop_size = crop_size
@@ -277,6 +197,17 @@ class dataset_SynthRAD(Dataset):
         os.environ["HDF5_USE_FILE_LOCKING"] = "TRUE"
 
         self.patient_keys = []
+        self.aug_keys = ["A", "B"]
+        if self.data_group_3:
+            self.aug_keys.append("C")
+        if self.data_group_4:
+            self.aug_keys.append("D")
+        if self.data_group_5:
+            self.aug_keys.append("E")
+        if self.data_group_6:
+            self.aug_keys.append("F")
+        if self.data_group_7:
+            self.aug_keys.append("G")
 
         if self.is_3d:
             with h5py.File(self.data_dir, "r") as file:
@@ -284,8 +215,8 @@ class dataset_SynthRAD(Dataset):
 
             self.aug_func = Compose(
                 [
-                    RandFlipd(keys=["A", "B", "C", "D"] if self.data_group_4 else ["A", "B", "C"] if self.data_group_3 else ["A", "B"], prob=flip_prob, spatial_axis=[0, 1]),
-                    RandRotate90d(keys=["A", "B", "C", "D"] if self.data_group_4 else ["A", "B", "C"] if self.data_group_3 else ["A", "B"], prob=rot_prob, spatial_axes=[0, 1]),
+                    RandFlipd(keys=self.aug_keys, prob=flip_prob, spatial_axis=[0, 1]),
+                    RandRotate90d(keys=self.aug_keys, prob=rot_prob, spatial_axes=[0, 1]),
                 ]
             )
         else:
@@ -296,8 +227,8 @@ class dataset_SynthRAD(Dataset):
 
             self.aug_func = Compose(
                 [
-                    RandFlipd(keys=["A", "B", "C", "D"] if self.data_group_4 else ["A", "B", "C"] if self.data_group_3 else ["A", "B"], prob=flip_prob, spatial_axis=[0, 1]),
-                    RandRotate90d(keys=["A", "B", "C", "D"] if self.data_group_4 else ["A", "B", "C"] if self.data_group_3 else ["A", "B"], prob=rot_prob, spatial_axes=[0, 1]),
+                    RandFlipd(keys=self.aug_keys, prob=flip_prob, spatial_axis=[0, 1]),
+                    RandRotate90d(keys=self.aug_keys, prob=rot_prob, spatial_axes=[0, 1]),
                 ]
             )
 
@@ -319,7 +250,11 @@ class dataset_SynthRAD(Dataset):
                     D = file[self.data_group_4][patient_key][...]
                 if self.data_group_5:
                     E = file[self.data_group_5][patient_key][...]
-                
+                if self.data_group_6:
+                    F = file[self.data_group_6][patient_key][...]
+                if self.data_group_7:
+                    G = file[self.data_group_7][patient_key][...]
+
         else:
             patient_idx = np.searchsorted(self.cumulative_slice_counts, idx + 1) - 1
             slice_idx = idx - self.cumulative_slice_counts[patient_idx]
@@ -333,6 +268,10 @@ class dataset_SynthRAD(Dataset):
                     D = file[self.data_group_4][patient_key][..., slice_idx]
                 if self.data_group_5:
                     E = file[self.data_group_5][patient_key][..., slice_idx]
+                if self.data_group_6:
+                    F = file[self.data_group_6][patient_key][..., slice_idx]
+                if self.data_group_7:
+                    G = file[self.data_group_7][patient_key][..., slice_idx]
 
         A = torch.from_numpy(A).unsqueeze(0).float()
         B = torch.from_numpy(B).unsqueeze(0).float()
@@ -342,6 +281,10 @@ class dataset_SynthRAD(Dataset):
             D = torch.from_numpy(D).unsqueeze(0).float()
         if self.data_group_5:
             E = torch.from_numpy(E).unsqueeze(0).float()
+        if self.data_group_6:
+            F = torch.from_numpy(F).unsqueeze(0).float()
+        if self.data_group_7:
+            G = torch.from_numpy(G).unsqueeze(0).float()
 
         # Create a dictionary for the data
         data_dict = {"A": A, "B": B}
@@ -351,6 +294,10 @@ class dataset_SynthRAD(Dataset):
             data_dict["D"] = D
         if self.data_group_5:
             data_dict["E"] = E
+        if self.data_group_6:
+            data_dict["F"] = F
+        if self.data_group_7:
+            data_dict["G"] = G
 
         A = data_dict["A"]
         B = data_dict["B"]
@@ -360,10 +307,18 @@ class dataset_SynthRAD(Dataset):
             D = data_dict["D"]
         if self.data_group_5:
             E = data_dict["E"]
-            
+        if self.data_group_6:
+            F = data_dict["F"]
+        if self.data_group_7:
+            G = data_dict["G"]
+
         if self.padding_size:
-            if self.data_group_5:
-                A, B, C, D, E = padding_height_width_depth(A, B, C, D, E, target_size=self.padding_size) 
+            if self.data_group_7:
+                A, B, C, D, E, F, G = padding_height_width_depth(A, B, C, D, E, F, G, target_size=self.padding_size)
+            elif self.data_group_6:
+                A, B, C, D, E, F = padding_height_width_depth(A, B, C, D, E, F, target_size=self.padding_size)
+            elif self.data_group_5:
+                A, B, C, D, E = padding_height_width_depth(A, B, C, D, E, target_size=self.padding_size)
             elif self.data_group_4:
                 A, B, C, D = padding_height_width_depth(A, B, C, D, target_size=self.padding_size)
             elif self.data_group_3:
@@ -371,26 +326,61 @@ class dataset_SynthRAD(Dataset):
             else:
                 A, B = padding_height_width_depth(A, B, target_size=self.padding_size)
 
+        data_dict["A"] = A
+        data_dict["B"] = B
+        if self.data_group_3:
+            data_dict["C"] = C
+        if self.data_group_4:
+            data_dict["D"] = D
+        if self.data_group_5:
+            data_dict["E"] = E
+        if self.data_group_6:
+            data_dict["F"] = F
+        if self.data_group_7:
+            data_dict["G"] = G
+
         data_dict = self.aug_func(data_dict)
+        A = data_dict["A"]
+        B = data_dict["B"]
+        if self.data_group_3:
+            C = data_dict["C"]
+        if self.data_group_4:
+            D = data_dict["D"]
+        if self.data_group_5:
+            E = data_dict["E"]
+        if self.data_group_6:
+            F = data_dict["F"]
+        if self.data_group_7:
+            G = data_dict["G"]
 
         if self.crop_size:
-            if self.data_group_5:
+            if self.data_group_7:
+                A, B, C, D, E, F, G = random_crop(A, B, C, D, E, F, G, target_size=self.crop_size)
+            elif self.data_group_6:
+                A, B, C, D, E, F = random_crop(A, B, C, D, E, F, target_size=self.crop_size)
+            elif self.data_group_5:
                 A, B, C, D, E = random_crop(A, B, C, D, E, target_size=self.crop_size)
             elif self.data_group_4:
-                A, B, C, D = random_crop(A, B, C, D, target_size=self.crop_size) 
+                A, B, C, D = random_crop(A, B, C, D, target_size=self.crop_size)
             elif self.data_group_3:
-                A, B, C = random_crop(A, B, C, target_size=self.crop_size) 
+                A, B, C = random_crop(A, B, C, target_size=self.crop_size)
             else:
-                A, B = random_crop(A, B, target_size=self.crop_size) 
+                A, B = random_crop(A, B, target_size=self.crop_size)
         else:
-            if self.data_group_4:
+            if self.data_group_7:
+                A, B, C, D, E, F, G = even_crop_height_width(A, B, C, D, E, F, G, multiple=(16, 16))
+            elif self.data_group_6:
+                A, B, C, D, E, F = even_crop_height_width(A, B, C, D, E, F, multiple=(16, 16))
+            elif self.data_group_5:
+                A, B, C, D, E = even_crop_height_width(A, B, C, D, E, multiple=(16, 16))
+            elif self.data_group_4:
                 A, B, C, D = even_crop_height_width(A, B, C, D, multiple=(16, 16))
             elif self.data_group_3:
                 A, B, C = even_crop_height_width(A, B, C, multiple=(16, 16))
             else:
                 A, B = even_crop_height_width(A, B, multiple=(16, 16))
-        
-        # Normalize A, B, C, D, E to range [0,1]
+
+        # Normalize A, B, C, D, E, F, G to range [0,1]
         if self.norm_ZeroToOne:
             A = (A - A.min()) / (A.max() - A.min() + 1e-8)
             B = (B - B.min()) / (B.max() - B.min() + 1e-8)
@@ -401,9 +391,20 @@ class dataset_SynthRAD(Dataset):
                 D = (D - D.min()) / (D.max() - D.min() + 1e-8)
             if self.data_group_5:
                 E = (E - E.min()) / (E.max() - E.min() + 1e-8)
+            if self.data_group_6:
+                F = (F - F.min()) / (F.max() - F.min() + 1e-8)
+            if self.data_group_7:
+                G = (G - G.min()) / (G.max() - G.min() + 1e-8)
 
+        # Return based on which data groups are available
+        # For triple outputs without misalign_simul: A, B, D, F (T2, T1, PD, MRA)
+        # For triple outputs with misalign_simul: A, B, C, D, E, F, G
         if self.reverse:
-            if self.data_group_5:
+            if self.data_group_7:
+                return G, F, E, D, C, B, A
+            elif self.data_group_6:
+                return F, E, D, C, B, A
+            elif self.data_group_5:
                 return E, D, C, B, A
             elif self.data_group_4:
                 return D, C, B, A
@@ -412,7 +413,11 @@ class dataset_SynthRAD(Dataset):
             else:
                 return B, A
         else:
-            if self.data_group_5:
+            if self.data_group_7:
+                return A, B, C, D, E, F, G
+            elif self.data_group_6:
+                return A, B, C, D, E, F
+            elif self.data_group_5:
                 return A, B, C, D, E
             elif self.data_group_4:
                 return A, B, C, D

@@ -15,6 +15,8 @@ data_group_2: "T1"
 data_group_3: "T1_moved" # '_moved' is misalign simulated set
 data_group_4: null # PD
 data_group_5: null # PD_moved
+data_group_6: null # MRA (for triple outputs)
+data_group_7: null # MRA_moved (for triple outputs)
 is_3d: False # True: 3D processing, False: 2D processing
 batch_size: 4 #5 #10 #4 #30 #16 #12 #2 #1
 num_workers: 6 # 3
@@ -23,6 +25,7 @@ use_split_inference: False # Inference for valid and test is divided into half f
 eval_on_align: True
 use_sliding_inference: False
 use_multiple_outputs: False
+use_triple_outputs: False  # Set True for 3 outputs (T1, PD, MRA)
 use_misalign_simul: True
 
 ## Dataset File Name
@@ -30,9 +33,17 @@ use_misalign_simul: True
 # Ver3_AllPatientSameSize_final_2.h5
 # Ver3_OnlyOnePatient.h5
 # Registration_MR_CT_synCT.h5
-train_file: 'IXI_Trainset_Ver2_T1_T2_PD_Registered_30Patient_MisalignSimul_Rotate5Translate5_20SliceOut.h5'
-val_file: 'IXI_Valset_Ver2_T1_T2_PD_Registered_3Patient_MisalignSimul_Rotate5Translate5_20SliceOut.h5'
-test_file: 'IXI_Testset_T1_T2_PD_Registered_30Patient_MisalignSimul_Rotate5Translate5_20SliceOut.h5' 
+
+# Multiple
+# train_file: 'IXI_Trainset_Ver2_T1_T2_PD_Registered_30Patient_MisalignSimul_Rotate5Translate5_20SliceOut.h5'
+# val_file: 'IXI_Valset_Ver2_T1_T2_PD_Registered_3Patient_MisalignSimul_Rotate5Translate5_20SliceOut.h5'
+# test_file: 'IXI_Testset_T1_T2_PD_Registered_30Patient_MisalignSimul_Rotate5Translate5_20SliceOut.h5' 
+# Triple
+train_file: 'IXI_Trainset_Ver2_T1_T2_PD_MRA_Registered_30Patient_MisalignSimul_Rotate5Translate5_80SliceOut.h5'
+val_file: 'IXI_Valset_Ver2_T1_T2_PD_MRA_Registered_3Patient_MisalignSimul_Rotate5Translate5_80SliceOut.h5'
+test_file: 'IXI_Testset_T1_T2_PD_MRA_Registered_30Patient_MisalignSimul_Rotate5Translate5_80SliceOut.h5' 
+
+
 
 ## Preprocessing
 reverse: False # New

@@ -23,6 +23,7 @@ use_split_inference: False # Inference for valid and test is divided into half f
 eval_on_align: False
 use_sliding_inference: False
 use_multiple_outputs: False
+use_triple_outputs: False
 use_misalign_simul: False
 
 ## Dataset File Name

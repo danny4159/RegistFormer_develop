@@ -56,26 +56,88 @@ class ImageLoggingCallback(Callback):
             print(f"Input content: {res}")
             return
         
-        if len(res) in [7,10]: # multi-contrast generation
-            self.ngrid = 5
-            a, b, c, d, preds_b, preds_c, preds_d, *_ = res
+        if len(res) == 10: # multi-contrast generation with moved references
+            a, b, c, d, preds_b, preds_c, preds_d, b_ref, c_ref, d_ref = res
+            err_b = torch.abs(b_ref - preds_b)
+            err_c = torch.abs(c_ref - preds_c)
+
+            if len(self.img_grid) == 0:
+                self.first_image_size = a[0].shape[1:3]
+
+            if d is None or preds_d is None or d_ref is None:
+                self.ngrid = 7
+                self.img_grid.extend([
+                    resize(self.normalize_img(a[0]), self.first_image_size),
+                    resize(self.normalize_img(b[0]), self.first_image_size),
+                    resize(self.normalize_img(b_ref[0]), self.first_image_size),
+                    resize(self.normalize_img(preds_b[0]), self.first_image_size),
+                    resize(self.normalize_img(c[0]), self.first_image_size),
+                    resize(self.normalize_img(c_ref[0]), self.first_image_size),
+                    resize(self.normalize_img(preds_c[0]), self.first_image_size),
+                ])
+                self.err_grid.extend([
+                    resize(err_b[0], self.first_image_size),
+                    resize(err_c[0], self.first_image_size),
+                ])
+            else:
+                self.ngrid = 10
+                err_d = torch.abs(d_ref - preds_d)
+                self.img_grid.extend([
+                    resize(self.normalize_img(a[0]), self.first_image_size),
+                    resize(self.normalize_img(b[0]), self.first_image_size),
+                    resize(self.normalize_img(b_ref[0]), self.first_image_size),
+                    resize(self.normalize_img(preds_b[0]), self.first_image_size),
+                    resize(self.normalize_img(c[0]), self.first_image_size),
+                    resize(self.normalize_img(c_ref[0]), self.first_image_size),
+                    resize(self.normalize_img(preds_c[0]), self.first_image_size),
+                    resize(self.normalize_img(d[0]), self.first_image_size),
+                    resize(self.normalize_img(d_ref[0]), self.first_image_size),
+                    resize(self.normalize_img(preds_d[0]), self.first_image_size),
+                ])
+                self.err_grid.extend([
+                    resize(err_b[0], self.first_image_size),
+                    resize(err_c[0], self.first_image_size),
+                    resize(err_d[0], self.first_image_size)
+                ])
+
+        elif len(res) == 7: # multi-contrast generation
+            a, b, c, d, preds_b, preds_c, preds_d = res
             err_b = torch.abs(b - preds_b)
             err_c = torch.abs(c - preds_c)
 
             if len(self.img_grid) == 0:
                 self.first_image_size = a[0].shape[1:3]
 
-            self.img_grid.extend([
-                resize(self.normalize_img(a[0]), self.first_image_size),
-                resize(self.normalize_img(b[0]), self.first_image_size),
-                resize(self.normalize_img(preds_b[0]), self.first_image_size),
-                resize(self.normalize_img(c[0]), self.first_image_size),
-                resize(self.normalize_img(preds_c[0]), self.first_image_size),
-            ])
-            self.err_grid.extend([
-                resize(err_b[0], self.first_image_size),
-                resize(err_c[0], self.first_image_size)
-            ])
+            if d is None or preds_d is None:
+                self.ngrid = 5
+                self.img_grid.extend([
+                    resize(self.normalize_img(a[0]), self.first_image_size),
+                    resize(self.normalize_img(preds_b[0]), self.first_image_size),
+                    resize(self.normalize_img(b[0]), self.first_image_size),
+                    resize(self.normalize_img(preds_c[0]), self.first_image_size),
+                    resize(self.normalize_img(c[0]), self.first_image_size),
+                ])
+                self.err_grid.extend([
+                    resize(err_b[0], self.first_image_size),
+                    resize(err_c[0], self.first_image_size),
+                ])
+            else:
+                self.ngrid = 7
+                err_d = torch.abs(d - preds_d)
+                self.img_grid.extend([
+                    resize(self.normalize_img(a[0]), self.first_image_size),
+                    resize(self.normalize_img(b[0]), self.first_image_size),
+                    resize(self.normalize_img(preds_b[0]), self.first_image_size),
+                    resize(self.normalize_img(c[0]), self.first_image_size),
+                    resize(self.normalize_img(preds_c[0]), self.first_image_size),
+                    resize(self.normalize_img(d[0]), self.first_image_size),
+                    resize(self.normalize_img(preds_d[0]), self.first_image_size),
+                ])
+                self.err_grid.extend([
+                    resize(err_b[0], self.first_image_size),
+                    resize(err_c[0], self.first_image_size),
+                    resize(err_d[0], self.first_image_size)
+                ])
 
         elif len(res) == 6:
             self.ngrid = 6
@@ -490,6 +552,166 @@ class ImageSavingCallback(Callback):
             )
             self.dataset_list.pop(0)
 
+    @staticmethod
+    def change_torch_numpy_multi(*tensors):
+        valid_tensors = [tensor for tensor in tensors if tensor is not None]
+        if not valid_tensors:
+            raise ValueError("At least one tensor must be provided.")
+
+        ndim = valid_tensors[0].ndim
+        assert all(tensor.ndim == ndim for tensor in valid_tensors), "All tensors must have the same number of dimensions"
+
+        if ndim not in [4, 5]:
+            raise NotImplementedError("This function has not been implemented yet.")
+
+        arrays = []
+        for tensor in tensors:
+            if tensor is None:
+                arrays.append(None)
+            else:
+                arrays.append(tensor.cpu().detach().numpy()[0, 0])
+        return arrays
+
+    def change_numpy_nii_multi(self, arrays, flag_normalize=True):
+        valid_arrays = [arr for arr in arrays if arr is not None]
+        if not valid_arrays:
+            raise ValueError("At least one array must be provided.")
+
+        assert all(arr.ndim == 3 for arr in valid_arrays), "All input arrays must be 3D"
+
+        nii_list = []
+        for arr in arrays:
+            if arr is None:
+                nii_list.append(None)
+                continue
+
+            if flag_normalize:
+                arr = (self.normalize_np(arr) * 255).astype(np.int16)
+
+            arr = arr[::-1, ::-1, :]
+            nii_list.append(nib.Nifti1Image(arr, np.eye(4)))
+
+        return nii_list
+
+    @staticmethod
+    def save_nii_multi(a_nii, b_nii, c_nii, d_nii, preds_b_nii, preds_c_nii, preds_d_nii, b_ref_nii=None, c_ref_nii=None, d_ref_nii=None, subject_number=None, folder_path=None):
+        nib.save(a_nii, os.path.join(folder_path, f"a_{subject_number}.nii.gz"))
+        nib.save(b_nii, os.path.join(folder_path, f"b_{subject_number}.nii.gz"))
+        if c_nii is not None:
+            nib.save(c_nii, os.path.join(folder_path, f"c_{subject_number}.nii.gz"))
+        if d_nii is not None:
+            nib.save(d_nii, os.path.join(folder_path, f"d_{subject_number}.nii.gz"))
+        if b_ref_nii is not None:
+            nib.save(b_ref_nii, os.path.join(folder_path, f"b_ref_{subject_number}.nii.gz"))
+        if c_ref_nii is not None:
+            nib.save(c_ref_nii, os.path.join(folder_path, f"c_ref_{subject_number}.nii.gz"))
+        if d_ref_nii is not None:
+            nib.save(d_ref_nii, os.path.join(folder_path, f"d_ref_{subject_number}.nii.gz"))
+        if preds_b_nii is not None:
+            nib.save(preds_b_nii, os.path.join(folder_path, f"preds_b_{subject_number}.nii.gz"))
+        if preds_c_nii is not None:
+            nib.save(preds_c_nii, os.path.join(folder_path, f"preds_c_{subject_number}.nii.gz"))
+        if preds_d_nii is not None:
+            nib.save(preds_d_nii, os.path.join(folder_path, f"preds_d_{subject_number}.nii.gz"))
+        return
+
+    def saving_to_nii_multi(self, a, b, c=None, d=None, preds_b=None, preds_c=None, preds_d=None, b_ref=None, c_ref=None, d_ref=None):
+        if c is None:
+            c = torch.zeros_like(a)
+        if d is None:
+            d = torch.zeros_like(a)
+        if preds_b is None:
+            preds_b = torch.zeros_like(a)
+        if preds_c is None:
+            preds_c = torch.zeros_like(a)
+        if preds_d is None:
+            preds_d = torch.zeros_like(a)
+
+        a, b, c, d, preds_b, preds_c, preds_d, b_ref, c_ref, d_ref = self.change_torch_numpy_multi(
+            a, b, c, d, preds_b, preds_c, preds_d, b_ref, c_ref, d_ref
+        )
+
+        if a.ndim == 2:
+            self.img_a.append(a)
+            self.img_b.append(b)
+            self.img_c.append(c)
+            self.img_d.append(d)
+            self.img_b_ref.append(b_ref)
+            self.img_c_ref.append(c_ref)
+            self.img_d_ref.append(d_ref)
+            self.img_preds_b.append(preds_b)
+            self.img_preds_c.append(preds_c)
+            self.img_preds_d.append(preds_d)
+
+            if len(self.img_a) == self.subject_slice_num[0]:
+                a_nii = np.stack(self.img_a, -1)
+                b_nii = np.stack(self.img_b, -1)
+                c_nii = np.stack(self.img_c, -1) if self.img_c and self.img_c[0] is not None else None
+                d_nii = np.stack(self.img_d, -1) if self.img_d and self.img_d[0] is not None else None
+                b_ref_nii = np.stack(self.img_b_ref, -1) if self.img_b_ref and self.img_b_ref[0] is not None else None
+                c_ref_nii = np.stack(self.img_c_ref, -1) if self.img_c_ref and self.img_c_ref[0] is not None else None
+                d_ref_nii = np.stack(self.img_d_ref, -1) if self.img_d_ref and self.img_d_ref[0] is not None else None
+                preds_b_nii = np.stack(self.img_preds_b, -1)
+                preds_c_nii = np.stack(self.img_preds_c, -1) if self.img_preds_c and self.img_preds_c[0] is not None else None
+                preds_d_nii = np.stack(self.img_preds_d, -1) if self.img_preds_d and self.img_preds_d[0] is not None else None
+
+                a_nii, b_nii, c_nii, d_nii, preds_b_nii, preds_c_nii, preds_d_nii, b_ref_nii, c_ref_nii, d_ref_nii = self.change_numpy_nii_multi(
+                    [a_nii, b_nii, c_nii, d_nii, preds_b_nii, preds_c_nii, preds_d_nii, b_ref_nii, c_ref_nii, d_ref_nii],
+                    flag_normalize=self.flag_normalize,
+                )
+                self.save_nii_multi(
+                    a_nii,
+                    b_nii,
+                    c_nii,
+                    d_nii,
+                    preds_b_nii,
+                    preds_c_nii,
+                    preds_d_nii,
+                    b_ref_nii=b_ref_nii,
+                    c_ref_nii=c_ref_nii,
+                    d_ref_nii=d_ref_nii,
+                    subject_number=self.dataset_list[0],
+                    folder_path=self.save_folder_name,
+                )
+
+                self.img_a = []
+                self.img_b = []
+                self.img_c = []
+                self.img_d = []
+                self.img_b_ref = []
+                self.img_c_ref = []
+                self.img_d_ref = []
+                self.img_preds_b = []
+                self.img_preds_c = []
+                self.img_preds_d = []
+                self.dataset_list.pop(0)
+                self.subject_slice_num.pop(0)
+
+            if self.subject_number > self.subject_number_length:
+                log.info(f"Saving test images up to {self.subject_number_length}")
+                return
+
+        elif a.ndim == 3:
+            a_nii, b_nii, c_nii, d_nii, preds_b_nii, preds_c_nii, preds_d_nii, b_ref_nii, c_ref_nii, d_ref_nii = self.change_numpy_nii_multi(
+                [a, b, c, d, preds_b, preds_c, preds_d, b_ref, c_ref, d_ref],
+                flag_normalize=self.flag_normalize,
+            )
+            self.save_nii_multi(
+                a_nii,
+                b_nii,
+                c_nii,
+                d_nii,
+                preds_b_nii,
+                preds_c_nii,
+                preds_d_nii,
+                b_ref_nii=b_ref_nii,
+                c_ref_nii=c_ref_nii,
+                d_ref_nii=d_ref_nii,
+                subject_number=self.dataset_list[0],
+                folder_path=self.save_folder_name,
+            )
+            self.dataset_list.pop(0)
+
     def saving_to_tif(self, a, b, a2, b2, preds_a, preds_b=None):
         if preds_a is None:
             preds_a = torch.zeros_like(a)
@@ -521,9 +743,15 @@ class ImageSavingCallback(Callback):
 
         self.img_a = []
         self.img_b = []
+        self.img_c = []
+        self.img_d = []
+        self.img_b_ref = []
+        self.img_c_ref = []
+        self.img_d_ref = []
         self.img_preds_a = []
         self.img_preds_b = []
         self.img_preds_c = []
+        self.img_preds_d = []
         self.i = 0
         self.subject_slice_num = []
         self.subject_number = 1
@@ -553,10 +781,15 @@ class ImageSavingCallback(Callback):
         elif len(batch[0].size()) == 4:
             res = pl_module.model_step(batch)
         
-        if len(res) in [7,10]: # Multi-contrast generation
-            a, b, c, d, preds_b, preds_c, preds_d, *_ = res
+        if len(res) == 10: # Multi-contrast generation with moved references
+            a, b, c, d, preds_b, preds_c, preds_d, b_ref, c_ref, d_ref = res
             if self.data_type == 'nifti':
-                self.saving_to_nii(a, b, c, preds_b, preds_c)
+                self.saving_to_nii_multi(a, b, c, d, preds_b, preds_c, preds_d, b_ref, c_ref, d_ref)
+
+        elif len(res) == 7: # Multi-contrast generation
+            a, b, c, d, preds_b, preds_c, preds_d = res
+            if self.data_type == 'nifti':
+                self.saving_to_nii_multi(a, b, c, d, preds_b, preds_c, preds_d)
 
         elif len(res) == 6:
             a, b, a2, b2, preds_a, preds_b = res
@@ -568,7 +801,7 @@ class ImageSavingCallback(Callback):
         elif len(res) == 5:
             a, b, c, preds_b, preds_c = res
             if self.data_type == 'nifti':
-                self.saving_to_nii(a, b, c, preds_b, preds_c)
+                self.saving_to_nii_multi(a, b, c, None, preds_b, preds_c, None)
             elif self.data_type == 'photo':
                 self.saving_to_tif(a, b, preds_a, preds_b)
 

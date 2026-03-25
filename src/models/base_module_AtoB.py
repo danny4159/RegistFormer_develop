@@ -23,6 +23,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
     def __init__(self, params, *args: Any, **kwargs: Any):
         super().__init__()
         self.params = params
+        self.has_multiple_outputs = self.params.use_multiple_outputs or getattr(self.params, "use_triple_outputs", False)
 
         if self.params.eval_on_align:
             self.val_ssim_B, self.val_psnr_B, self.val_lpips_B, self.val_sharpness_B = self.define_metrics()
@@ -32,7 +33,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.psnr_values_B = []
             self.lpips_values_B = []
 
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 self.val_ssim_C, self.val_psnr_C, self.val_lpips_C, self.val_sharpness_C = self.define_metrics()
                 self.val_ssim_D, self.val_psnr_D, self.val_lpips_D, self.val_sharpness_D = self.define_metrics()
                 self.test_ssim_C, self.test_psnr_C, self.test_lpips_C, self.test_sharpness_C = self.define_metrics()
@@ -52,7 +53,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
         self.test_metrics = [self.test_gc_B, self.test_nmi_B, self.test_fid_B, self.test_kid_B, self.test_sharpness_B]
         self.nmi_scores_B = []
 
-        if self.params.use_multiple_outputs:
+        if self.has_multiple_outputs:
             self.val_gc_C, self.val_nmi_C, self.val_fid_C, self.val_kid_C, self.val_sharpness_C = self.define_metrics()
             self.val_gc_D, self.val_nmi_D, self.val_fid_D, self.val_kid_D, self.val_sharpness_D = self.define_metrics()
             self.test_gc_C, self.test_nmi_C, self.test_fid_C, self.test_kid_C, self.test_sharpness_C = self.define_metrics()
@@ -160,34 +161,57 @@ class BaseModule_AtoB(LightningModule):  # single direction
             fake_a = self.inferer.sample(input_noise=noise, autoencoder_model=self.autoencoder, diffusion_model=self.netG_A, scheduler=self.scheduler)
             return real_a, real_b, fake_a # 여기서 fake_a는 랜덤하게 생성된 output
 
-        if self.params.use_multiple_outputs:
+        if getattr(self.params, 'use_triple_outputs', False):
+            # Triple outputs: T1, PD, MRA (3 outputs)
             if self.params.use_misalign_simul == False:
-                if len(batch) == 3: # Ref cont 2
+                if len(batch) == 4:  # real_a, real_b, real_c, real_d
+                    real_a, real_b, real_c, real_d = batch
+                    real_merged = torch.cat((real_b, real_c, real_d), dim=1)
+                    fake_merged = self.forward(real_a, real_merged)
+                    fake_b, fake_c, fake_d = fake_merged[:, :1, :, :], fake_merged[:, 1:2, :, :], fake_merged[:, 2:, :, :]
+                else:
+                    raise ValueError(f"Expected batch size of 4 for triple outputs, but got {len(batch)}")
+                return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d
+            else:  # use_misalign_simul == True:
+                if len(batch) == 7:  # real_a, real_b, real_b_ref, real_c, real_c_ref, real_d, real_d_ref
+                    real_a, real_b, real_b_ref, real_c, real_c_ref, real_d, real_d_ref = batch
+                    real_merged = torch.cat((real_b_ref, real_c_ref, real_d_ref), dim=1)
+                    fake_merged = self.forward(real_a, real_merged)
+                    fake_b, fake_c, fake_d = fake_merged[:, :1, :, :], fake_merged[:, 1:2, :, :], fake_merged[:, 2:, :, :]
+                else:
+                    raise ValueError(f"Expected batch size of 7 for triple outputs with misaligned simulation, but got {len(batch)}")
+                return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref
+
+        elif self.params.use_multiple_outputs:
+            # Multiple outputs: T1, PD (2 outputs)
+            if self.params.use_misalign_simul == False:
+                if len(batch) == 3:  # real_a, real_b, real_c
                     real_a, real_b, real_c = batch
                     real_merged = torch.cat((real_b, real_c), dim=1)
                     fake_merged = self.forward(real_a, real_merged)
                     fake_b, fake_c = fake_merged[:, :1, :, :], fake_merged[:, 1:, :, :]
                     real_d, fake_d = None, None
-                elif len(batch) == 4: # Ref cont 3
+                elif len(batch) == 4:  # Backward compatibility
                     real_a, real_b, real_c, real_d = batch
                     real_merged = torch.cat((real_b, real_c, real_d), dim=1)
                     fake_merged = self.forward(real_a, real_merged)
                     fake_b, fake_c, fake_d = fake_merged[:, :1, :, :], fake_merged[:, 1:2, :, :], fake_merged[:, 2:, :, :]
-
+                else:
+                    raise ValueError(f"Expected batch size of 3 or 4 for multiple outputs, but got {len(batch)}")
                 return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d
 
-            else: # use_misalign_simul == True:
+            else:  # use_misalign_simul == True:
                 if len(batch) == 5:
                     real_a, real_b, real_b_ref, real_c, real_c_ref = batch
-                    
+
                     real_merged = torch.cat((real_b_ref, real_c_ref), dim=1)
                     fake_merged = self.forward(real_a, real_merged)
                     fake_b, fake_c = fake_merged[:, :1, :, :], fake_merged[:, 1:, :, :]
                     real_d, fake_d, real_d_ref = None, None, None
                 else:
                     raise ValueError(f"Expected batch size of 5 for misaligned simulation, but got {len(batch)}")
-            
-            return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref # real: GT, fake: syn by Ref
+
+            return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref  # real: GT, fake: syn by Ref
 
         else: # use_multiple_outputs=False, Single generation
             if self.params.use_misalign_simul == False: # Registformer
@@ -228,6 +252,10 @@ class BaseModule_AtoB(LightningModule):  # single direction
     def backward_D_B(self, real_b, fake_b):
         loss_D_A = self.backward_D_basic(self.netD_B, real_b, fake_b)
         return loss_D_A
+
+    def backward_D_C(self, real_d, fake_d):
+        loss_D_C = self.backward_D_basic(self.netD_C, real_d, fake_d)
+        return loss_D_C
 
     def backward_D_basic(self, netD, real, fake):
         pred_real = netD(real)
@@ -282,9 +310,14 @@ class BaseModule_AtoB(LightningModule):  # single direction
         return super().on_train_epoch_end()
 
     def validation_step(self, batch: Any, batch_idx: int):
-        if self.params.use_multiple_outputs:
+        if getattr(self.params, 'use_triple_outputs', False):
             if self.params.use_misalign_simul:
-                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D, *_ = self.model_step(batch) 
+                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D, *_ = self.model_step(batch)
+            else:
+                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
+        elif self.has_multiple_outputs:
+            if self.params.use_misalign_simul:
+                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D, *_ = self.model_step(batch)
             else:
                 real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
         else:
@@ -300,6 +333,26 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 self.val_kid_B.update(gray2rgb(norm_to_uint8(real_B[:, :, :, :, i])), real=True)
                 self.val_kid_B.update(gray2rgb(norm_to_uint8(fake_B[:, :, :, :, i])), real=False)
                 self.val_sharpness_B.update(norm_to_uint8(fake_B[:, :, :, :, i]))
+
+                if self.has_multiple_outputs:
+                    self.val_gc_C.update(norm_to_uint8(real_A[:, :, :, :, i]), norm_to_uint8(fake_C[:, :, :, :, i]))
+                    nmi_score = self.val_nmi_C(flatten_to_1d(norm_to_uint8(real_A[:, :, :, :, i])), flatten_to_1d(norm_to_uint8(fake_C[:, :, :, :, i])))
+                    self.nmi_scores_C.append(nmi_score)
+                    self.val_fid_C.update(gray2rgb(norm_to_uint8(real_C[:, :, :, :, i])), real=True)
+                    self.val_fid_C.update(gray2rgb(norm_to_uint8(fake_C[:, :, :, :, i])), real=False)
+                    self.val_kid_C.update(gray2rgb(norm_to_uint8(real_C[:, :, :, :, i])), real=True)
+                    self.val_kid_C.update(gray2rgb(norm_to_uint8(fake_C[:, :, :, :, i])), real=False)
+                    self.val_sharpness_C.update(norm_to_uint8(fake_C[:, :, :, :, i]))
+
+                    if fake_D is not None:
+                        self.val_gc_D.update(norm_to_uint8(real_A[:, :, :, :, i]), norm_to_uint8(fake_D[:, :, :, :, i]))
+                        nmi_score = self.val_nmi_D(flatten_to_1d(norm_to_uint8(real_A[:, :, :, :, i])), flatten_to_1d(norm_to_uint8(fake_D[:, :, :, :, i])))
+                        self.nmi_scores_D.append(nmi_score)
+                        self.val_fid_D.update(gray2rgb(norm_to_uint8(real_D[:, :, :, :, i])), real=True)
+                        self.val_fid_D.update(gray2rgb(norm_to_uint8(fake_D[:, :, :, :, i])), real=False)
+                        self.val_kid_D.update(gray2rgb(norm_to_uint8(real_D[:, :, :, :, i])), real=True)
+                        self.val_kid_D.update(gray2rgb(norm_to_uint8(fake_D[:, :, :, :, i])), real=False)
+                        self.val_sharpness_D.update(norm_to_uint8(fake_D[:, :, :, :, i]))
             return
 
         if self.params.eval_on_align:
@@ -312,7 +365,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.val_lpips_B.reset()
             self.val_sharpness_B.update(norm_to_uint8(fake_B).float())
 
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 self.val_ssim_C.update(real_C, fake_C)
                 self.val_psnr_C.update(real_C, fake_C)
                 self.psnr_values_C.append(self.val_psnr_C.compute().item())
@@ -343,7 +396,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.val_kid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
             self.val_sharpness_B.update(norm_to_uint8(fake_B))
 
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 self.val_gc_C.update(norm_to_uint8(real_A), norm_to_uint8(fake_C))
                 nmi_score = self.val_nmi_C(flatten_to_1d(norm_to_uint8(real_A)), flatten_to_1d(norm_to_uint8(fake_C)))
                 self.nmi_scores_C.append(nmi_score)
@@ -374,7 +427,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.log("val/lpips_B", lpips_B.detach(), sync_dist=True)
             self.log("val/sharpness_B", sharpness_B.detach(), sync_dist=True)
 
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 ssim_C = self.val_ssim_C.compute().mean()
                 psnr_C = torch.mean(torch.tensor(self.psnr_values_C, device=self.device))
                 lpips_C = torch.mean(torch.tensor(self.lpips_values_C, device=self.device))
@@ -399,7 +452,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.psnr_values_B = []
             self.lpips_values_B = []
 
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 self.psnr_values_C = []
                 self.psnr_values_D = []
                 self.lpips_values_C = []
@@ -417,7 +470,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.log("val/kid_B", kid_mean.detach(), sync_dist=True)
             self.log("val/sharpness_B", sharpness.detach(), sync_dist=True)
 
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 gc = self.val_gc_C.compute()
                 nmi = torch.mean(torch.stack(self.nmi_scores_C))
                 fid = self.val_fid_C.compute()
@@ -445,15 +498,20 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 metrics.reset()
             self.nmi_scores_B = []
 
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 self.nmi_scores_C = []
                 self.nmi_scores_D = []
 
     def test_step(self, batch: Any, batch_idx: int):
  
-        if self.params.use_multiple_outputs:
+        if getattr(self.params, 'use_triple_outputs', False):
             if self.params.use_misalign_simul:
-                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D, real_B_ref, real_C_ref, real_D_ref = self.model_step(batch) 
+                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D, *_ = self.model_step(batch)
+            else:
+                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
+        elif self.has_multiple_outputs:
+            if self.params.use_misalign_simul:
+                real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D, *_ = self.model_step(batch)
             else:
                 real_A, real_B, real_C, real_D, fake_B, fake_C, fake_D = self.model_step(batch)
         else:
@@ -469,6 +527,26 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 self.test_kid_B.update(gray2rgb(norm_to_uint8(real_B[:, :, :, :, i])), real=True)
                 self.test_kid_B.update(gray2rgb(norm_to_uint8(fake_B[:, :, :, :, i])), real=False)
                 self.test_sharpness_B.update(norm_to_uint8(fake_B[:, :, :, :, i]))
+
+                if self.has_multiple_outputs:
+                    self.test_gc_C.update(norm_to_uint8(real_A[:, :, :, :, i]), norm_to_uint8(fake_C[:, :, :, :, i]))
+                    nmi_score = self.test_nmi_C(flatten_to_1d(norm_to_uint8(real_A[:, :, :, :, i])), flatten_to_1d(norm_to_uint8(fake_C[:, :, :, :, i])))
+                    self.nmi_scores_C.append(nmi_score)
+                    self.test_fid_C.update(gray2rgb(norm_to_uint8(real_C[:, :, :, :, i])), real=True)
+                    self.test_fid_C.update(gray2rgb(norm_to_uint8(fake_C[:, :, :, :, i])), real=False)
+                    self.test_kid_C.update(gray2rgb(norm_to_uint8(real_C[:, :, :, :, i])), real=True)
+                    self.test_kid_C.update(gray2rgb(norm_to_uint8(fake_C[:, :, :, :, i])), real=False)
+                    self.test_sharpness_C.update(norm_to_uint8(fake_C[:, :, :, :, i]))
+
+                    if fake_D is not None:
+                        self.test_gc_D.update(norm_to_uint8(real_A[:, :, :, :, i]), norm_to_uint8(fake_D[:, :, :, :, i]))
+                        nmi_score = self.test_nmi_D(flatten_to_1d(norm_to_uint8(real_A[:, :, :, :, i])), flatten_to_1d(norm_to_uint8(fake_D[:, :, :, :, i])))
+                        self.nmi_scores_D.append(nmi_score)
+                        self.test_fid_D.update(gray2rgb(norm_to_uint8(real_D[:, :, :, :, i])), real=True)
+                        self.test_fid_D.update(gray2rgb(norm_to_uint8(fake_D[:, :, :, :, i])), real=False)
+                        self.test_kid_D.update(gray2rgb(norm_to_uint8(real_D[:, :, :, :, i])), real=True)
+                        self.test_kid_D.update(gray2rgb(norm_to_uint8(fake_D[:, :, :, :, i])), real=False)
+                        self.test_sharpness_D.update(norm_to_uint8(fake_D[:, :, :, :, i]))
             return
 
         if self.params.eval_on_align:
@@ -482,7 +560,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.test_lpips_B.reset()
             self.test_sharpness_B.update(norm_to_uint8(fake_B).float())
             
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 self.test_ssim_C.update(real_C, fake_C)
                 self.test_psnr_C.update(real_C, fake_C)
                 self.psnr_values_C.append(self.test_psnr_C.compute().item())
@@ -512,7 +590,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.test_kid_B.update(gray2rgb(norm_to_uint8(fake_B)), real=False)
             self.test_sharpness_B.update(norm_to_uint8(fake_B))
 
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 self.test_gc_C.update(norm_to_uint8(real_A), norm_to_uint8(fake_C))
                 nmi_score = self.test_nmi_C(flatten_to_1d(norm_to_uint8(real_A)), flatten_to_1d(norm_to_uint8(fake_C)))
                 self.nmi_scores_C.append(nmi_score)
@@ -552,7 +630,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.log("test/lpips_B_std", lpips_B_std.detach(), sync_dist=True)
             self.log("test/sharpness_B_std", sharpness_B_std.detach(), sync_dist=True)
 
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 ssim_C = self.test_ssim_C.compute().mean()
                 psnr_C = torch.mean(torch.tensor(self.psnr_values_C, device=self.device))
                 lpips_C = torch.mean(torch.tensor(self.lpips_values_C, device=self.device))
@@ -593,7 +671,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.psnr_values_B = []
             self.lpips_values_B = []
 
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 self.psnr_values_C = []
                 self.psnr_values_D = []
                 self.lpips_values_C = []
@@ -619,7 +697,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.log("test/kid_B_std", kid_std.detach(), sync_dist=True)
             self.log("test/sharpness_B_std", sharpness_std.detach(), sync_dist=True)
 
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 gc = self.test_gc_C.compute()
                 nmi = torch.mean(torch.stack(self.nmi_scores_C))
                 fid = self.test_fid_C.compute()
@@ -663,7 +741,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
                 metrics.reset()
             self.nmi_scores_B = []
 
-            if self.params.use_multiple_outputs:
+            if self.has_multiple_outputs:
                 self.nmi_scores_C = []
                 self.nmi_scores_D = []
 
