@@ -20,6 +20,7 @@ class ProposedSynthesisModule(nn.Module):
             self.use_triple_outputs = kwargs.get('use_triple_outputs', False)
             self.is_3d = kwargs.get('is_3d', False)
             self.use_separate_style_layers = kwargs.get('use_separate_style_layers', False)
+            self.noise_independent = kwargs.get('noise_independent', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -45,29 +46,29 @@ class ProposedSynthesisModule(nn.Module):
         
         # 일부분에만 style_denorm -> 21, 22, 31, 32에만 적용 #TODO: feat_ch에 ref ch만큼 배수로
         self.conv0 = StyleConv(self.input_nc, self.feat_ch * ch, kernel_size=3,
-                                                 activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                                 activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
         self.conv11 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
         self.conv12 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
         self.conv21 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
         self.conv22 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
         self.conv31 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
         self.conv32 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
         self.conv41 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, #feat_ch *4는 변치않게
-                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
         self.conv42 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
         self.conv51 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
         self.conv52 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d)
+                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
         self.conv6 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d) # 이걸 빠트렸었어.
+                                activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent) # 이걸 빠트렸었어.
                                 # activate=False, demodulate=self.demodulate)
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 style 적용
@@ -230,8 +231,9 @@ class StyleConv(nn.Module):
                  style_denorm=True,
                  eps=1e-8,
                  ch=1,
-                 is_3d=False):
-        
+                 is_3d=False,
+                 noise_independent=False):
+
         super(StyleConv, self).__init__()
         self.eps = eps
         self.input_nc = input_nc
@@ -244,6 +246,7 @@ class StyleConv(nn.Module):
         self.padding = kernel_size // 2
         self.style_denorm = style_denorm
         self.is_3d = is_3d
+        self.noise_independent = noise_independent
 
         Conv, Norm, dim = get_layer_by_dim(is_3d)
 
@@ -319,7 +322,20 @@ class StyleConv(nn.Module):
         self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
         self.randomize_noise = True
-        self.noise_strength = nn.Parameter(torch.zeros(1), requires_grad=True)
+        # noise_independent=True: chunk별로 개별 noise_strength (독립적)
+        # noise_independent=False: 기존처럼 하나의 noise_strength (cat된 상태에서 noise 주입)
+        if not self.noise_independent:
+            self.noise_strength = nn.Parameter(torch.zeros(1), requires_grad=True)
+        else:
+            if ch == 1:
+                self.noise_strength = nn.Parameter(torch.zeros(1), requires_grad=True)
+            elif ch == 2:
+                self.noise_strength_1 = nn.Parameter(torch.zeros(1), requires_grad=True)
+                self.noise_strength_2 = nn.Parameter(torch.zeros(1), requires_grad=True)
+            elif ch == 3:
+                self.noise_strength_1 = nn.Parameter(torch.zeros(1), requires_grad=True)
+                self.noise_strength_2 = nn.Parameter(torch.zeros(1), requires_grad=True)
+                self.noise_strength_3 = nn.Parameter(torch.zeros(1), requires_grad=True)
 
     def forward(self, x, style): # style: [1, 64, 1, 1]
         
@@ -336,27 +352,70 @@ class StyleConv(nn.Module):
         else:
             x = self.conv(x)
         
-        if style.shape[1] == 1:
-            x = self.normalize(x)
-        elif style.shape[1] == 2:
-            x1, x2 = torch.chunk(x, chunks=2, dim=1)  # 각 부분 [B, C/2, H, W]
-            x1 = self.normalize(x1)
-            x2 = self.normalize(x2)
-            x = torch.cat((x1, x2), dim=1)
-        elif style.shape[1] == 3:
-            x1, x2, x3 = torch.chunk(x, chunks=3, dim=1)  # 각 부분 [B, C/3, H, W]
-            x1 = self.normalize(x1)
-            x2 = self.normalize(x2)
-            x3 = self.normalize(x3)
-            x = torch.cat((x1, x2, x3), dim=1)
-        
-        # # Add noise
-        if self.randomize_noise:
-            noise = torch.randn_like(x) * self.noise_strength
+        if not self.noise_independent:
+            # 기존 방식: normalize -> cat -> noise 한꺼번에
+            if style.shape[1] == 1:
+                x = self.normalize(x)
+            elif style.shape[1] == 2:
+                x1, x2 = torch.chunk(x, chunks=2, dim=1)  # 각 부분 [B, C/2, H, W]
+                x1 = self.normalize(x1)
+                x2 = self.normalize(x2)
+                x = torch.cat((x1, x2), dim=1)
+            elif style.shape[1] == 3:
+                x1, x2, x3 = torch.chunk(x, chunks=3, dim=1)  # 각 부분 [B, C/3, H, W]
+                x1 = self.normalize(x1)
+                x2 = self.normalize(x2)
+                x3 = self.normalize(x3)
+                x = torch.cat((x1, x2, x3), dim=1)
+
+            # Add noise
+            if self.randomize_noise:
+                noise = torch.randn_like(x) * self.noise_strength
+            else:
+                noise = torch.zeros_like(x) * self.noise_strength
+
+            x = x + noise
         else:
-            noise = torch.zeros_like(x) * self.noise_strength
-        
-        x = x + noise
+            # 새로운 방식: normalize -> noise 개별 주입 -> cat
+            if style.shape[1] == 1:
+                x = self.normalize(x)
+                if self.randomize_noise:
+                    noise = torch.randn_like(x) * self.noise_strength
+                else:
+                    noise = torch.zeros_like(x) * self.noise_strength
+                x = x + noise
+            elif style.shape[1] == 2:
+                x1, x2 = torch.chunk(x, chunks=2, dim=1)  # 각 부분 [B, C/2, H, W]
+                x1 = self.normalize(x1)
+                x2 = self.normalize(x2)
+                # noise 개별 주입
+                if self.randomize_noise:
+                    noise1 = torch.randn_like(x1) * self.noise_strength_1
+                    noise2 = torch.randn_like(x2) * self.noise_strength_2
+                else:
+                    noise1 = torch.zeros_like(x1) * self.noise_strength_1
+                    noise2 = torch.zeros_like(x2) * self.noise_strength_2
+                x1 = x1 + noise1
+                x2 = x2 + noise2
+                x = torch.cat((x1, x2), dim=1)
+            elif style.shape[1] == 3:
+                x1, x2, x3 = torch.chunk(x, chunks=3, dim=1)  # 각 부분 [B, C/3, H, W]
+                x1 = self.normalize(x1)
+                x2 = self.normalize(x2)
+                x3 = self.normalize(x3)
+                # noise 개별 주입
+                if self.randomize_noise:
+                    noise1 = torch.randn_like(x1) * self.noise_strength_1
+                    noise2 = torch.randn_like(x2) * self.noise_strength_2
+                    noise3 = torch.randn_like(x3) * self.noise_strength_3
+                else:
+                    noise1 = torch.zeros_like(x1) * self.noise_strength_1
+                    noise2 = torch.zeros_like(x2) * self.noise_strength_2
+                    noise3 = torch.zeros_like(x3) * self.noise_strength_3
+                x1 = x1 + noise1
+                x2 = x2 + noise2
+                x3 = x3 + noise3
+                x = torch.cat((x1, x2, x3), dim=1)
         if self.style_denorm:
             # 1. style을 x의 크기와 맞게 interpolation 
             mode = 'trilinear' if self.is_3d else 'nearest'

@@ -26,6 +26,7 @@ netG_A:
   use_triple_outputs: ${data.use_triple_outputs}
   is_3d: ${data.is_3d}
   use_separate_style_layers: false
+  noise_independent: false  # false: cat 후 noise 주입 (기존), true: chunk별 개별 noise 주입
   # init_type: 'kaiming'
 
 netD_A:
