@@ -30,6 +30,7 @@ netG_A:
   use_25d_style: ${data.use_25d_style}
   ref_stack_size: ${data.ref_stack_size}
   z_agg_deep: false          # true: 3-layer z_agg (K->hidden->hidden->1), false: 2-layer (K->hidden->1)
+  use_center_residual_style: false  # Option C-2: center-anchor + ctx residual modulation
   # init_type: 'kaiming'
 
 netD_A:

@@ -24,6 +24,7 @@ class ProposedSynthesisModule(nn.Module):
             self.use_25d_style = kwargs.get('use_25d_style', False)
             self.ref_stack_size = kwargs.get('ref_stack_size', 3)
             self.z_agg_deep = kwargs.get('z_agg_deep', False)
+            self.use_center_residual_style = kwargs.get('use_center_residual_style', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -72,31 +73,21 @@ class ProposedSynthesisModule(nn.Module):
         )
         
         # 일부분에만 style_denorm -> 21, 22, 31, 32에만 적용 #TODO: feat_ch에 ref ch만큼 배수로
-        self.conv0 = StyleConv(self.input_nc, self.feat_ch * ch, kernel_size=3,
-                                                 activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
-        self.conv11 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
-        self.conv12 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
-        self.conv21 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
-        self.conv22 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
-        self.conv31 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
-        self.conv32 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
-        self.conv41 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, #feat_ch *4는 변치않게
-                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
-        self.conv42 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
-        self.conv51 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
-        self.conv52 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent)
-        self.conv6 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent) # 이걸 빠트렸었어.
-                                # activate=False, demodulate=self.demodulate)
+        _sc_kw = dict(activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d,
+                      noise_independent=self.noise_independent,
+                      use_center_residual_style=self.use_center_residual_style)
+        self.conv0  = StyleConv(self.input_nc,    self.feat_ch * ch, kernel_size=3, **_sc_kw)
+        self.conv11 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, downsample=True,  **_sc_kw)
+        self.conv12 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, downsample=False, **_sc_kw)
+        self.conv21 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, downsample=True,  **_sc_kw)
+        self.conv22 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, downsample=False, **_sc_kw)
+        self.conv31 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, downsample=False, **_sc_kw)
+        self.conv32 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, downsample=False, **_sc_kw)
+        self.conv41 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, upsample=True,    **_sc_kw)
+        self.conv42 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, upsample=False,   **_sc_kw)
+        self.conv51 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, upsample=True,    **_sc_kw)
+        self.conv52 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, upsample=False,   **_sc_kw)
+        self.conv6  = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, **_sc_kw)
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 style 적용
         if self.use_separate_style_layers and self.use_triple_outputs:
@@ -155,59 +146,85 @@ class ProposedSynthesisModule(nn.Module):
         """2.5D: [B, num_streams*K, H, W] -> [B, num_streams, H, W]"""
         if not self.use_25d_style:
             return ref_all
+        expected_ch = self.num_style_streams * self.ref_stack_size
+        assert ref_all.shape[1] == expected_ch, \
+            f"Expected {expected_ch} ref channels, got {ref_all.shape[1]}"
         chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
         style_maps = [z_agg(chunk) for chunk, z_agg in zip(chunks, self.z_aggs)]
         return torch.cat(style_maps, dim=1)
+
+    def _split_center_and_ctx_ref(self, ref_all):
+        """Option C-2: returns (ref_center, ref_ctx) both [B, num_streams, H, W].
+        ref_center = center slice per stream; ref_ctx = z_agg output per stream.
+        """
+        expected_ch = self.num_style_streams * self.ref_stack_size
+        assert ref_all.shape[1] == expected_ch, \
+            f"Expected {expected_ch} ref channels, got {ref_all.shape[1]}"
+        center_idx = self.ref_stack_size // 2
+        chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
+        centers, ctxs = [], []
+        for chunk, z_agg in zip(chunks, self.z_aggs):
+            centers.append(chunk[:, center_idx:center_idx + 1])
+            ctxs.append(z_agg(chunk))
+        return torch.cat(centers, dim=1), torch.cat(ctxs, dim=1)
+
+    def _make_style_guidance(self, ref):
+        if self.is_3d:
+            ref = ref.permute(0, 1, 4, 2, 3)
+            sg = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
+            return sg.permute(0, 1, 3, 4, 2)
+        return F.interpolate(ref, scale_factor=1/16, mode='nearest')
 
     def forward(self, merged_input, layers=[], encode_only=False):
 
         x = merged_input[:, :1, ...]
         ref_all = merged_input[:, 1:, ...]
-        ref = self._aggregate_ref_stack(ref_all)  # 2.5D: K-ch stack -> 1/2/3-ch map; 2D: passthrough
 
-        if self.is_3d:
-            ref = ref.permute(0, 1, 4, 2, 3)
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
-            style_guidance_1 = style_guidance_1.permute(0, 1, 3, 4, 2)
+        use_c2 = self.use_25d_style and self.use_center_residual_style
+        if use_c2:
+            ref_center, ref_ctx = self._split_center_and_ctx_ref(ref_all)
+            sg_center = self._make_style_guidance(ref_center)
+            sg_ctx    = self._make_style_guidance(ref_ctx)
         else:
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯
-        
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/64, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, size=(1, 1), mode='nearest') # Ablation
+            ref = self._aggregate_ref_stack(ref_all)
+            sg_center = self._make_style_guidance(ref)
+            sg_ctx = None
+
         feats = []
-        feat0 = self.conv0(x, style_guidance_1) # [1, feat_ch, H, W]
-        feat1 = self.conv11(feat0, style_guidance_1) # [1, feat_ch, H/2, W/2]
-        feat1 = self.conv12(feat1, style_guidance_1) # [1, feat_ch, H/2, W/2]
-        feat2 = self.conv21(feat1, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat2 = self.conv22(feat2, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat3 = self.conv31(feat2, style_guidance_1) # [1, feat_ch, H/4, W/4] #TODO: 메모리 많아서 뺌.
-        feat3 = self.conv32(feat3, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat4 = self.conv41(feat3 + feat2, style_guidance_1)# [1, feat_ch, H/2, W/2] #TODO: 원래 intput feat3 + feat2
-        feat4 = self.conv42(feat4, style_guidance_1)        # [1, feat_ch, H/2, W/2]
-        feat5 = self.conv51(feat4 + feat1, style_guidance_1)# [1, feat_ch, H, W]
-        feat5 = self.conv52(feat5, style_guidance_1)        # [1, feat_ch, H, W]
-        feat6 = self.conv6(feat5 + feat0, style_guidance_1) # [1, feat_ch, H, W]
+        feat0 = self.conv0(x,            sg_center, sg_ctx)
+        feat1 = self.conv11(feat0,        sg_center, sg_ctx)
+        feat1 = self.conv12(feat1,        sg_center, sg_ctx)
+        feat2 = self.conv21(feat1,        sg_center, sg_ctx)
+        feat2 = self.conv22(feat2,        sg_center, sg_ctx)
+        feat3 = self.conv31(feat2,        sg_center, sg_ctx)
+        feat3 = self.conv32(feat3,        sg_center, sg_ctx)
+        feat4 = self.conv41(feat3 + feat2, sg_center, sg_ctx)
+        feat4 = self.conv42(feat4,         sg_center, sg_ctx)
+        feat5 = self.conv51(feat4 + feat1, sg_center, sg_ctx)
+        feat5 = self.conv52(feat5,         sg_center, sg_ctx)
+        feat6 = self.conv6(feat5 + feat0,  sg_center, sg_ctx)
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 처리
         if self.use_separate_style_layers and self.use_triple_outputs:
             # feat6를 3등분으로 분리
             feat6_1, feat6_2, feat6_3 = torch.chunk(feat6, chunks=3, dim=1)  # 각 [B, feat_ch, H, W]
             # style도 분리
-            style_1 = style_guidance_1[:, :1, ...]  # [B, 1, ...]
-            style_2 = style_guidance_1[:, 1:2, ...]  # [B, 1, ...]
-            style_3 = style_guidance_1[:, 2:3, ...]  # [B, 1, ...]
+            style_1 = sg_center[:, :1, ...]
+            style_2 = sg_center[:, 1:2, ...]
+            style_3 = sg_center[:, 2:3, ...]
+            ctx_1 = sg_ctx[:, :1, ...] if sg_ctx is not None else None
+            ctx_2 = sg_ctx[:, 1:2, ...] if sg_ctx is not None else None
+            ctx_3 = sg_ctx[:, 2:3, ...] if sg_ctx is not None else None
 
             # conv7: 각각 독립적으로 처리
-            feat7_1 = self.conv7_1(feat6_1, style_1)  # [B, feat_ch, H, W]
-            feat7_2 = self.conv7_2(feat6_2, style_2)  # [B, feat_ch, H, W]
-            feat7_3 = self.conv7_3(feat6_3, style_3)  # [B, feat_ch, H, W]
+            feat7_1 = self.conv7_1(feat6_1, style_1, ctx_1)
+            feat7_2 = self.conv7_2(feat6_2, style_2, ctx_2)
+            feat7_3 = self.conv7_3(feat6_3, style_3, ctx_3)
 
             # conv8: 각각 독립적으로 처리
-            feat8_1 = self.conv8_1(feat7_1, style_1)  # [B, feat_ch, H, W]
-            feat8_2 = self.conv8_2(feat7_2, style_2)  # [B, feat_ch, H, W]
-            feat8_3 = self.conv8_3(feat7_3, style_3)  # [B, feat_ch, H, W]
+            feat8_1 = self.conv8_1(feat7_1, style_1, ctx_1)
+            feat8_2 = self.conv8_2(feat7_2, style_2, ctx_2)
+            feat8_3 = self.conv8_3(feat7_3, style_3, ctx_3)
 
             # 각각 conv_final + tanh
             out_1 = torch.tanh(self.conv_final_1(feat8_1))  # [B, output_nc//3, H, W]
@@ -220,16 +237,18 @@ class ProposedSynthesisModule(nn.Module):
             # feat6를 반으로 분리
             feat6_1, feat6_2 = torch.chunk(feat6, chunks=2, dim=1)  # 각 [B, feat_ch, H, W]
             # style도 분리
-            style_1 = style_guidance_1[:, :1, ...]  # [B, 1, ...]
-            style_2 = style_guidance_1[:, 1:, ...]  # [B, 1, ...]
+            style_1 = sg_center[:, :1, ...]
+            style_2 = sg_center[:, 1:, ...]
+            ctx_1 = sg_ctx[:, :1, ...] if sg_ctx is not None else None
+            ctx_2 = sg_ctx[:, 1:, ...] if sg_ctx is not None else None
 
             # conv7: 각각 독립적으로 처리
-            feat7_1 = self.conv7_1(feat6_1, style_1)  # [B, feat_ch, H, W]
-            feat7_2 = self.conv7_2(feat6_2, style_2)  # [B, feat_ch, H, W]
+            feat7_1 = self.conv7_1(feat6_1, style_1, ctx_1)
+            feat7_2 = self.conv7_2(feat6_2, style_2, ctx_2)
 
             # conv8: 각각 독립적으로 처리
-            feat8_1 = self.conv8_1(feat7_1, style_1)  # [B, feat_ch, H, W]
-            feat8_2 = self.conv8_2(feat7_2, style_2)  # [B, feat_ch, H, W]
+            feat8_1 = self.conv8_1(feat7_1, style_1, ctx_1)
+            feat8_2 = self.conv8_2(feat7_2, style_2, ctx_2)
 
             # 각각 conv_final + tanh
             out_1 = torch.tanh(self.conv_final_1(feat8_1))  # [B, output_nc//2, H, W]
@@ -268,7 +287,8 @@ class StyleConv(nn.Module):
                  eps=1e-8,
                  ch=1,
                  is_3d=False,
-                 noise_independent=False):
+                 noise_independent=False,
+                 use_center_residual_style=False):
 
         super(StyleConv, self).__init__()
         self.eps = eps
@@ -283,6 +303,7 @@ class StyleConv(nn.Module):
         self.style_denorm = style_denorm
         self.is_3d = is_3d
         self.noise_independent = noise_independent
+        self.use_center_residual_style = use_center_residual_style
 
         Conv, Norm, dim = get_layer_by_dim(is_3d)
 
@@ -357,6 +378,16 @@ class StyleConv(nn.Module):
 
         self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
+        if self.use_center_residual_style:
+            gate_hidden = max(16, feat_ch // 8)
+            self.gate_net = nn.Sequential(
+                Conv(2 * ch, gate_hidden, kernel_size=3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                Conv(gate_hidden, feat_ch, kernel_size=3, padding=1),
+                nn.Sigmoid(),
+            )
+            self.ctx_res_scale = nn.Parameter(torch.zeros(1))
+
         self.randomize_noise = True
         # noise_independent=True: chunk별로 개별 noise_strength (독립적)
         # noise_independent=False: 기존처럼 하나의 noise_strength (cat된 상태에서 noise 주입)
@@ -373,7 +404,28 @@ class StyleConv(nn.Module):
                 self.noise_strength_2 = nn.Parameter(torch.zeros(1), requires_grad=True)
                 self.noise_strength_3 = nn.Parameter(torch.zeros(1), requires_grad=True)
 
-    def forward(self, x, style): # style: [1, 64, 1, 1]
+    def _style_to_gamma_beta(self, style):
+        """style [B, ch, H, W] -> gamma, beta [B, feat_ch, H, W]"""
+        if style.shape[1] == 1:
+            actv = self.mlp_shared(style)
+            gamma = self.mlp_gamma(actv)
+            beta = self.mlp_beta(actv)
+        elif style.shape[1] == 2:
+            actv1 = self.mlp_shared(style[:, :1, ...])
+            actv2 = self.mlp_shared_2(style[:, 1:2, ...])
+            gamma = torch.cat((self.mlp_gamma(actv1), self.mlp_gamma_2(actv2)), dim=1)
+            beta = torch.cat((self.mlp_beta(actv1), self.mlp_beta_2(actv2)), dim=1)
+        elif style.shape[1] == 3:
+            actv1 = self.mlp_shared(style[:, :1, ...])
+            actv2 = self.mlp_shared_2(style[:, 1:2, ...])
+            actv3 = self.mlp_shared_3(style[:, 2:3, ...])
+            gamma = torch.cat((self.mlp_gamma(actv1), self.mlp_gamma_2(actv2), self.mlp_gamma_3(actv3)), dim=1)
+            beta = torch.cat((self.mlp_beta(actv1), self.mlp_beta_2(actv2), self.mlp_beta_3(actv3)), dim=1)
+        else:
+            raise ValueError(f"Unsupported style channels: {style.shape[1]}")
+        return gamma, beta
+
+    def forward(self, x, style_center, style_ctx=None): # style_center: [B, ch, H, W]
         
         if self.downsample:
             original_size = x.size()
@@ -390,14 +442,14 @@ class StyleConv(nn.Module):
         
         if not self.noise_independent:
             # 기존 방식: normalize -> cat -> noise 한꺼번에
-            if style.shape[1] == 1:
+            if style_center.shape[1] == 1:
                 x = self.normalize(x)
-            elif style.shape[1] == 2:
+            elif style_center.shape[1] == 2:
                 x1, x2 = torch.chunk(x, chunks=2, dim=1)  # 각 부분 [B, C/2, H, W]
                 x1 = self.normalize(x1)
                 x2 = self.normalize(x2)
                 x = torch.cat((x1, x2), dim=1)
-            elif style.shape[1] == 3:
+            elif style_center.shape[1] == 3:
                 x1, x2, x3 = torch.chunk(x, chunks=3, dim=1)  # 각 부분 [B, C/3, H, W]
                 x1 = self.normalize(x1)
                 x2 = self.normalize(x2)
@@ -413,14 +465,14 @@ class StyleConv(nn.Module):
             x = x + noise
         else:
             # 새로운 방식: normalize -> noise 개별 주입 -> cat
-            if style.shape[1] == 1:
+            if style_center.shape[1] == 1:
                 x = self.normalize(x)
                 if self.randomize_noise:
                     noise = torch.randn_like(x) * self.noise_strength
                 else:
                     noise = torch.zeros_like(x) * self.noise_strength
                 x = x + noise
-            elif style.shape[1] == 2:
+            elif style_center.shape[1] == 2:
                 x1, x2 = torch.chunk(x, chunks=2, dim=1)  # 각 부분 [B, C/2, H, W]
                 x1 = self.normalize(x1)
                 x2 = self.normalize(x2)
@@ -434,7 +486,7 @@ class StyleConv(nn.Module):
                 x1 = x1 + noise1
                 x2 = x2 + noise2
                 x = torch.cat((x1, x2), dim=1)
-            elif style.shape[1] == 3:
+            elif style_center.shape[1] == 3:
                 x1, x2, x3 = torch.chunk(x, chunks=3, dim=1)  # 각 부분 [B, C/3, H, W]
                 x1 = self.normalize(x1)
                 x2 = self.normalize(x2)
@@ -453,37 +505,20 @@ class StyleConv(nn.Module):
                 x3 = x3 + noise3
                 x = torch.cat((x1, x2, x3), dim=1)
         if self.style_denorm:
-            # 1. style을 x의 크기와 맞게 interpolation 
             mode = 'trilinear' if self.is_3d else 'nearest'
-            style = F.interpolate(style, size=x.size()[2:], mode=mode) # TODO: bilinear 도 시도
-            # 2. style을 x의 C과 맞게 mlp
-            if style.shape[1] == 1:
-                actv = self.mlp_shared(style)
-                gamma = self.mlp_gamma(actv)
-                beta = self.mlp_beta(actv)
-            elif style.shape[1] == 2:
-                actv1 = self.mlp_shared(style[:, :1, :, :])
-                gamma = self.mlp_gamma(actv1) # B, 256, f_H, f_W
-                beta = self.mlp_beta(actv1) # B, 256, f_H, f_W
-                actv_2 = self.mlp_shared_2(style[:, 1:, :, :])
-                gamma_2 = self.mlp_gamma_2(actv_2)
-                beta_2 = self.mlp_beta_2(actv_2)
-                gamma = torch.cat((gamma, gamma_2), dim=1) # B, 512, f_H, f_W
-                beta = torch.cat((beta, beta_2), dim=1)
-            elif style.shape[1] == 3:
-                actv1 = self.mlp_shared(style[:, :1, ...])
-                gamma = self.mlp_gamma(actv1)  # B, feat_ch//3, f_H, f_W
-                beta = self.mlp_beta(actv1)
-                actv_2 = self.mlp_shared_2(style[:, 1:2, ...])
-                gamma_2 = self.mlp_gamma_2(actv_2)
-                beta_2 = self.mlp_beta_2(actv_2)
-                actv_3 = self.mlp_shared_3(style[:, 2:3, ...])
-                gamma_3 = self.mlp_gamma_3(actv_3)
-                beta_3 = self.mlp_beta_3(actv_3)
-                gamma = torch.cat((gamma, gamma_2, gamma_3), dim=1)  # B, feat_ch, f_H, f_W
-                beta = torch.cat((beta, beta_2, beta_3), dim=1)
+            style_center = F.interpolate(style_center, size=x.size()[2:], mode=mode)
 
-            # 3. 거기서 감마 베타 나눠서 denorm
+            if self.use_center_residual_style and style_ctx is not None:
+                style_ctx = F.interpolate(style_ctx, size=x.size()[2:], mode=mode)
+                gamma_center, beta_center = self._style_to_gamma_beta(style_center)
+                gamma_ctx, beta_ctx = self._style_to_gamma_beta(style_ctx)
+                gate = self.gate_net(torch.cat((style_center, style_ctx), dim=1))
+                scale = torch.tanh(self.ctx_res_scale)
+                gamma = gamma_center + scale * gate * (gamma_ctx - gamma_center)
+                beta = beta_center + scale * gate * (beta_ctx - beta_center)
+            else:
+                gamma, beta = self._style_to_gamma_beta(style_center)
+
             x = x * gamma + beta
         
         # activation (LeakyReLU)
