@@ -169,3 +169,7 @@ Mambaforge-Linux-x86_64.sh
 
 # Folder
 /notebooks/
+
+# Python package management
+uv.lock
+pyproject.toml
