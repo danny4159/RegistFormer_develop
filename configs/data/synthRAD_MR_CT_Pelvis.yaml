@@ -24,6 +24,8 @@ eval_on_align: False
 use_sliding_inference: False
 use_multiple_outputs: False
 use_misalign_simul: False
+use_25d_style: False
+ref_stack_size: 3
 
 ## Dataset File Name
 # prepared_data_0_0_0_0_0_ver3_final.h5

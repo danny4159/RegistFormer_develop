@@ -79,10 +79,45 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # self.nce_layers = [0,2,4,6] # range: 0~6
         # self.flip_equivariance = params.flip_equivariance
 
+    @staticmethod
+    def _softmin_contextual(cx_list, shift_penalties=None, tau=0.3):
+        """Soft-min over a list of contextual losses (center-biased)."""
+        losses = torch.stack(cx_list)
+        if shift_penalties is not None:
+            penalties = torch.tensor(shift_penalties, device=losses.device, dtype=losses.dtype)
+            losses = losses + penalties
+        return -tau * torch.logsumexp(-losses / tau, dim=0)
+
+    def _contextual_stack_loss(self, fake_img, ref_stack, lambda_style):
+        """Contextual loss for 2.5D ref stack.
+        ctx_center_only=True: use center slice only (2D equivalent).
+        ctx_center_only=False: center-biased soft-min over K slices.
+        """
+        K = ref_stack.shape[1]
+        center_idx = K // 2
+        if getattr(self.params, 'ctx_center_only', False):
+            return self.criterionContextual(ref_stack[:, center_idx:center_idx+1], fake_img) * lambda_style
+        tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
+        shift_penalty_base = getattr(self.params, 'ctx_shift_penalty', 0.05)
+        cx_losses, shift_penalties = [], []
+        for i in range(K):
+            cx_losses.append(self.criterionContextual(ref_stack[:, i:i+1], fake_img).squeeze())
+            shift_penalties.append(abs(i - center_idx) * shift_penalty_base)
+        return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
+
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
-        loss_G = torch.tensor(0.0, device=real_a.device) 
-        if self.params.use_misalign_simul:
-            real_b, real_c, real_d = real_b_ref, real_c_ref, real_d_ref # Misaligned simulated data is ref. It is assigned to real
+        loss_G = torch.tensor(0.0, device=real_a.device)
+        use_25d = getattr(self.params, 'use_25d_style', False)
+
+        # Effective style refs for contextual and NCE real-side
+        # 2.5D: real_b_ref is K-channel stack
+        # 2D misalign: real_b_ref is single misaligned ref
+        # 2D no misalign: real_b is GT
+        if use_25d or self.params.use_misalign_simul:
+            eff_b, eff_c, eff_d = real_b_ref, real_c_ref, real_d_ref
+        else:
+            eff_b, eff_c, eff_d = real_b, real_c, real_d
+
         ##################################################################################################################
         ## 1. GAN Loss
         if self.criterionGAN:
@@ -106,26 +141,29 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     # assert not torch.isnan(loss_gan_d).any(), "GAN Loss is NaN"
 
         ##################################################################################################################
-        ## 2. Contextual loss: fake_b, fake_c 각각 따로
+        ## 2. Contextual loss
         if self.criterionContextual:
-            loss_style_b = self.criterionContextual(real_b, fake_b)
-            loss_style_b =  loss_style_b * self.params.lambda_style
+            if use_25d and eff_b is not None:
+                loss_style_b = self._contextual_stack_loss(fake_b, eff_b, self.params.lambda_style)
+            else:
+                loss_style_b = self.criterionContextual(eff_b, fake_b) * self.params.lambda_style
             self.log("Context_b_Loss", loss_style_b.detach(), prog_bar=True)
             loss_G += loss_style_b.squeeze()
-            # assert not torch.isnan(loss_style_b).any(), "Contextual Loss is NaN"
 
             if self.params.use_multiple_outputs or self.params.use_triple_outputs:
-                loss_style_c = self.criterionContextual(real_c, fake_c)
-                loss_style_c =  loss_style_c * self.params.lambda_style
+                if use_25d and eff_c is not None:
+                    loss_style_c = self._contextual_stack_loss(fake_c, eff_c, self.params.lambda_style)
+                else:
+                    loss_style_c = self.criterionContextual(eff_c, fake_c) * self.params.lambda_style
                 self.log("Context_c_Loss", loss_style_c.detach(), prog_bar=True)
                 loss_G += loss_style_c.squeeze()
-                # assert not torch.isnan(loss_style_c).any(), "Contextual Loss is NaN"
                 if self.params.use_triple_outputs and fake_d is not None:
-                    loss_style_d = self.criterionContextual(real_d, fake_d)
-                    loss_style_d =  loss_style_d * self.params.lambda_style
+                    if use_25d and eff_d is not None:
+                        loss_style_d = self._contextual_stack_loss(fake_d, eff_d, self.params.lambda_style)
+                    else:
+                        loss_style_d = self.criterionContextual(eff_d, fake_d) * self.params.lambda_style
                     self.log("Context_d_Loss", loss_style_d.detach(), prog_bar=True)
                     loss_G += loss_style_d.squeeze()
-                # assert not torch.isnan(loss_style_d).any(), "Contextual Loss is NaN"
 
         ##################################################################################################################
         ## 3. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
@@ -186,15 +224,22 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     loss_G += loss_nce_b
 
             else:
+                # For 2.5D: fake side uses dummy stacks; real side uses eff_b/c/d (already K-ch stacks)
+                if use_25d:
+                    K = self.params.ref_stack_size
+                    dummy = real_a.repeat(1, K, 1, 1)
+                else:
+                    dummy = real_a  # 2D: use real_a as neutral style
+
                 if self.params.use_triple_outputs:
                     n_layers = len(self.params.nce_layers)
-                    merged_input_1 = torch.cat((fake_b, real_a, real_a, real_a), dim=1)
+                    merged_input_1 = torch.cat((fake_b, dummy, dummy, dummy), dim=1)
                     feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
 
-                    merged_input_2 = torch.cat((fake_c, real_a, real_a, real_a), dim=1)
+                    merged_input_2 = torch.cat((fake_c, dummy, dummy, dummy), dim=1)
                     feat_c = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
 
-                    merged_input_3 = torch.cat((fake_d, real_a, real_a, real_a), dim=1)
+                    merged_input_3 = torch.cat((fake_d, dummy, dummy, dummy), dim=1)
                     feat_d = self.netG_A(merged_input_3, self.params.nce_layers, encode_only=True)
 
                     flipped_for_equivariance = np.random.random() < 0.5
@@ -203,7 +248,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                         feat_c = [torch.flip(fc, [3]) for fc in feat_c]
                         feat_d = [torch.flip(fd, [3]) for fd in feat_d]
 
-                    merged_input_real = torch.cat((real_a, real_b, real_c, real_d), dim=1)
+                    merged_input_real = torch.cat((real_a, eff_b, eff_c, eff_d), dim=1)
                     feat_a = self.netG_A(merged_input_real, self.params.nce_layers, encode_only=True)
                     feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
                     feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
@@ -220,10 +265,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
                 elif self.params.use_multiple_outputs:
                     n_layers = len(self.params.nce_layers)
-                    merged_input_1 = torch.cat((fake_b, real_a, real_a), dim=1)
+                    merged_input_1 = torch.cat((fake_b, dummy, dummy), dim=1)
                     feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
 
-                    merged_input_2 = torch.cat((fake_c, real_a, real_a), dim=1)
+                    merged_input_2 = torch.cat((fake_c, dummy, dummy), dim=1)
                     feat_c = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
 
                     flipped_for_equivariance = np.random.random() < 0.5
@@ -231,8 +276,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                         feat_b = [torch.flip(fb, [3]) for fb in feat_b]
                         feat_c = [torch.flip(fc, [3]) for fc in feat_c]
 
-                    merged_input_2 = torch.cat((real_a, real_b, real_c), dim=1)
-                    feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+                    merged_input_real = torch.cat((real_a, eff_b, eff_c), dim=1)
+                    feat_a = self.netG_A(merged_input_real, self.params.nce_layers, encode_only=True)
                     feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
                     feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
                     feat_c_pool, _ = self.netF_A(feat_c, 256, sample_ids)
@@ -247,15 +292,15 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
                 else:
                     n_layers = len(self.params.nce_layers)
-                    merged_input_1 = torch.cat((fake_b, real_a), dim=1)
+                    merged_input_1 = torch.cat((fake_b, dummy), dim=1)
                     feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
 
                     flipped_for_equivariance = np.random.random() < 0.5
                     if self.params.flip_equivariance and flipped_for_equivariance:
                         feat_b = [torch.flip(fb, [3]) for fb in feat_b]
 
-                    merged_input_2 = torch.cat((real_a, real_b), dim=1)
-                    feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+                    merged_input_real = torch.cat((real_a, eff_b), dim=1)
+                    feat_a = self.netG_A(merged_input_real, self.params.nce_layers, encode_only=True)
                     feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
                     feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
 
@@ -284,17 +329,22 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_G += loss_mind_d
 
         if self.criterionL1:
-            loss_l1_b = self.criterionL1(real_b_ref, fake_b) * self.params.lambda_l1
+            # For 2.5D: L1 uses center slice of stack
+            def _center_slice(t):
+                if t is not None and use_25d and t.shape[1] > 1:
+                    return t[:, t.shape[1] // 2: t.shape[1] // 2 + 1]
+                return t
+            loss_l1_b = self.criterionL1(_center_slice(real_b_ref), fake_b) * self.params.lambda_l1
             self.log("L1_b_Loss", loss_l1_b.detach(), prog_bar=True)
             loss_G += loss_l1_b
 
             if self.params.use_multiple_outputs or self.params.use_triple_outputs:
-                loss_l1_c = self.criterionL1(real_c_ref, fake_c) * self.params.lambda_l1
+                loss_l1_c = self.criterionL1(_center_slice(real_c_ref), fake_c) * self.params.lambda_l1
                 self.log("L1_c_Loss", loss_l1_c.detach(), prog_bar=True)
                 loss_G += loss_l1_c
 
             if self.params.use_triple_outputs and fake_d is not None and real_d_ref is not None:
-                loss_l1_d = self.criterionL1(real_d_ref, fake_d) * self.params.lambda_l1
+                loss_l1_d = self.criterionL1(_center_slice(real_d_ref), fake_d) * self.params.lambda_l1
                 self.log("L1_d_Loss", loss_l1_d.detach(), prog_bar=True)
                 loss_G += loss_l1_d
 
@@ -389,48 +439,38 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
         real_c = real_d = fake_c = fake_d = None
         real_b_ref = real_c_ref = real_d_ref = None
+        use_25d = getattr(self.params, 'use_25d_style', False)
+        need_ref = self.params.use_misalign_simul or use_25d
 
         if self.params.use_triple_outputs:
             optimizer_G_A, optimizer_D_A, optimizer_D_B, optimizer_D_C, optimizer_F_A = self.optimizers()
-
-            if self.params.use_misalign_simul:
+            if need_ref:
                 real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref = self.model_step(batch)
             else:
                 real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d = self.model_step(batch)
         elif self.params.use_multiple_outputs:
             optimizer_G_A, optimizer_D_A, optimizer_D_B, optimizer_F_A = self.optimizers()
-
-            if self.params.use_misalign_simul:
+            if need_ref:
                 real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref = self.model_step(batch)
             else:
                 real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d = self.model_step(batch)
         else:
             optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
-            if self.params.use_misalign_simul:
+            if need_ref:
                 real_a, real_b, fake_b, real_b_ref = self.model_step(batch)
             else:
                 real_a, real_b, fake_b = self.model_step(batch)
 
-
         with optimizer_G_A.toggle_model():
             if self.params.use_triple_outputs:
-                if self.params.use_misalign_simul:
-                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
-                else:
-                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, None, None, None)
+                loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
             elif self.params.use_multiple_outputs:
-                if self.params.use_misalign_simul:
-                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
-                else:
-                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, None, None, None)
+                loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
             else:
-                if self.params.use_misalign_simul:
-                    loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
+                if self.params.is_3d and not use_25d:
+                    loss_G = self.backward_G_3D(real_a, real_b, None, None, fake_b, None, None, None, None, None)
                 else:
-                    if self.params.is_3d:
-                        loss_G = self.backward_G_3D(real_a, real_b, None, None, fake_b, None, None, None, None, None)
-                    else:
-                        loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, None, None, None)
+                    loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
@@ -443,9 +483,15 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             optimizer_G_A.zero_grad()
             optimizer_F_A.zero_grad()
 
-        real_b_disc = real_b_ref if self.params.use_misalign_simul else real_b
-        real_c_disc = real_c_ref if self.params.use_misalign_simul and (self.params.use_multiple_outputs or self.params.use_triple_outputs) else real_c
-        real_d_disc = real_d_ref if self.params.use_misalign_simul and self.params.use_triple_outputs else real_d
+        # Discriminator real target: for 2.5D use center slice of stack
+        def _disc_real(ref, gt):
+            if use_25d and ref is not None and ref.shape[1] > 1:
+                return ref[:, ref.shape[1] // 2: ref.shape[1] // 2 + 1]
+            return ref if self.params.use_misalign_simul else gt
+
+        real_b_disc = _disc_real(real_b_ref, real_b)
+        real_c_disc = _disc_real(real_c_ref, real_c) if (self.params.use_multiple_outputs or self.params.use_triple_outputs) else real_c
+        real_d_disc = _disc_real(real_d_ref, real_d) if self.params.use_triple_outputs else real_d
 
         with optimizer_D_A.toggle_model():
             if self.params.is_3d:

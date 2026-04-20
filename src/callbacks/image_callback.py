@@ -45,16 +45,22 @@ class ImageLoggingCallback(Callback):
     def normalize_img(self, tensor):
         return tensor if self.norm_ZeroToOne else (tensor + 1) / 2
     
+    @staticmethod
+    def _to_vis(t):
+        """Collapse multi-channel tensors (e.g. 2.5D K-slice stacks) to center channel."""
+        if t is not None and isinstance(t, torch.Tensor) and t.ndim >= 2 and t.shape[1] > 1:
+            k = t.shape[1]
+            return t[:, k // 2: k // 2 + 1]
+        return t
+
     def saving_to_grid(self, res):
-        # def gray2rgb(tensor):
-        #     if tensor.size(0) == 1:  # Grayscale image with 1 channel
-        #         tensor = tensor.repeat(3, 1, 1)  # Repeat the channel 3 times
-        #     return tensor
-        
         if not isinstance(res, (list, tuple)):
             print(f"Unexpected input to saving_to_grid: {type(res)}")
             print(f"Input content: {res}")
             return
+
+        # Collapse any multi-channel tensors (2.5D ref stacks) to center channel
+        res = tuple(self._to_vis(r) for r in res)
         
         if len(res) == 10: # multi-contrast generation with moved references
             a, b, c, d, preds_b, preds_c, preds_d, b_ref, c_ref, d_ref = res

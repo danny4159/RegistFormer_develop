@@ -176,6 +176,8 @@ class dataset_SynthRAD(Dataset):
         crop_size: Optional[Tuple[int, int]] = None,
         reverse: bool = False,
         norm_ZeroToOne: bool = False,
+        use_25d_style: bool = False,
+        ref_stack_size: int = 3,
         *args,
         **kwargs,
     ):
@@ -193,6 +195,8 @@ class dataset_SynthRAD(Dataset):
         self.crop_size = crop_size
         self.reverse = reverse
         self.norm_ZeroToOne = norm_ZeroToOne
+        self.use_25d_style = use_25d_style
+        self.ref_stack_size = ref_stack_size
 
         os.environ["HDF5_USE_FILE_LOCKING"] = "TRUE"
 
@@ -232,6 +236,16 @@ class dataset_SynthRAD(Dataset):
                 ]
             )
 
+    def _load_slice_stack(self, file, group, patient_key, slice_idx):
+        """Load K neighboring slices centered at slice_idx; repeat at volume boundaries."""
+        total = file[group][patient_key].shape[-1]
+        N = self.ref_stack_size // 2
+        slices = []
+        for k in range(-N, N + 1):
+            s = min(max(slice_idx + k, 0), total - 1)
+            slices.append(file[group][patient_key][..., s])
+        return np.stack(slices, axis=0)  # [K, H, W]
+
     def __len__(self):
         if self.is_3d:
             return len(self.patient_keys)
@@ -263,26 +277,35 @@ class dataset_SynthRAD(Dataset):
                 A = file[self.data_group_1][patient_key][..., slice_idx]
                 B = file[self.data_group_2][patient_key][..., slice_idx]
                 if self.data_group_3:
-                    C = file[self.data_group_3][patient_key][..., slice_idx]
+                    if self.use_25d_style:
+                        C = self._load_slice_stack(file, self.data_group_3, patient_key, slice_idx)
+                    else:
+                        C = file[self.data_group_3][patient_key][..., slice_idx]
                 if self.data_group_4:
-                    D = file[self.data_group_4][patient_key][..., slice_idx]
+                    if self.use_25d_style:
+                        D = self._load_slice_stack(file, self.data_group_4, patient_key, slice_idx)
+                    else:
+                        D = file[self.data_group_4][patient_key][..., slice_idx]
                 if self.data_group_5:
                     E = file[self.data_group_5][patient_key][..., slice_idx]
                 if self.data_group_6:
-                    F = file[self.data_group_6][patient_key][..., slice_idx]
+                    if self.use_25d_style:
+                        F = self._load_slice_stack(file, self.data_group_6, patient_key, slice_idx)
+                    else:
+                        F = file[self.data_group_6][patient_key][..., slice_idx]
                 if self.data_group_7:
                     G = file[self.data_group_7][patient_key][..., slice_idx]
 
         A = torch.from_numpy(A).unsqueeze(0).float()
         B = torch.from_numpy(B).unsqueeze(0).float()
         if self.data_group_3:
-            C = torch.from_numpy(C).unsqueeze(0).float()
+            C = torch.from_numpy(C).float() if self.use_25d_style else torch.from_numpy(C).unsqueeze(0).float()
         if self.data_group_4:
-            D = torch.from_numpy(D).unsqueeze(0).float()
+            D = torch.from_numpy(D).float() if self.use_25d_style else torch.from_numpy(D).unsqueeze(0).float()
         if self.data_group_5:
             E = torch.from_numpy(E).unsqueeze(0).float()
         if self.data_group_6:
-            F = torch.from_numpy(F).unsqueeze(0).float()
+            F = torch.from_numpy(F).float() if self.use_25d_style else torch.from_numpy(F).unsqueeze(0).float()
         if self.data_group_7:
             G = torch.from_numpy(G).unsqueeze(0).float()
 

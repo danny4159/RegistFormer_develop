@@ -27,6 +27,8 @@ use_sliding_inference: False
 use_multiple_outputs: False
 use_triple_outputs: False  # Set True for 3 outputs (T1, PD, MRA)
 use_misalign_simul: True
+use_25d_style: False
+ref_stack_size: 3
 
 ## Dataset File Name
 # prepared_data_0_0_0_0_0_ver3_final.h5

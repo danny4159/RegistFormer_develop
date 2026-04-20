@@ -27,6 +27,9 @@ netG_A:
   is_3d: ${data.is_3d}
   use_separate_style_layers: false
   noise_independent: false  # false: cat 후 noise 주입 (기존), true: chunk별 개별 noise 주입
+  use_25d_style: ${data.use_25d_style}
+  ref_stack_size: ${data.ref_stack_size}
+  z_agg_deep: false          # true: 3-layer z_agg (K->hidden->hidden->1), false: 2-layer (K->hidden->1)
   # init_type: 'kaiming'
 
 netD_A:
@@ -87,3 +90,8 @@ params: # Other params
   is_3d: ${data.is_3d}
   crop_size: ${data.crop_size} # [128,128] or [128,128,16]
   is_registration: false
+  use_25d_style: ${data.use_25d_style}
+  ref_stack_size: ${data.ref_stack_size}
+  ctx_center_only: false     # true: 2.5D에서도 center slice만으로 ctx loss 계산 (2D equivalent)
+  ctx_softmin_tau: 0.3       # soft-min temperature (작을수록 hard-min에 가까움)
+  ctx_shift_penalty: 0.05    # center slice preference bias per neighbor step

@@ -161,9 +161,21 @@ class BaseModule_AtoB(LightningModule):  # single direction
             fake_a = self.inferer.sample(input_noise=noise, autoencoder_model=self.autoencoder, diffusion_model=self.netG_A, scheduler=self.scheduler)
             return real_a, real_b, fake_a # 여기서 fake_a는 랜덤하게 생성된 output
 
+        use_25d = getattr(self.params, 'use_25d_style', False)
+
         if getattr(self.params, 'use_triple_outputs', False):
             # Triple outputs: T1, PD, MRA (3 outputs)
-            if self.params.use_misalign_simul == False:
+            if use_25d:
+                # batch = (real_a, real_b, real_c, real_d, real_b_stack, real_c_stack, real_d_stack)
+                if len(batch) == 7:
+                    real_a, real_b, real_c, real_d, real_b_ref, real_c_ref, real_d_ref = batch
+                else:
+                    raise ValueError(f"2.5D triple outputs expects batch of 7, got {len(batch)}")
+                real_merged = torch.cat((real_b_ref, real_c_ref, real_d_ref), dim=1)
+                fake_merged = self.forward(real_a, real_merged)
+                fake_b, fake_c, fake_d = fake_merged[:, :1], fake_merged[:, 1:2], fake_merged[:, 2:]
+                return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref
+            elif self.params.use_misalign_simul == False:
                 if len(batch) == 4:  # real_a, real_b, real_c, real_d
                     real_a, real_b, real_c, real_d = batch
                     real_merged = torch.cat((real_b, real_c, real_d), dim=1)
@@ -184,7 +196,17 @@ class BaseModule_AtoB(LightningModule):  # single direction
 
         elif self.params.use_multiple_outputs:
             # Multiple outputs: T1, PD (2 outputs)
-            if self.params.use_misalign_simul == False:
+            if use_25d:
+                # batch = (real_a, real_b, real_c, real_b_stack, real_c_stack)
+                if len(batch) == 5:
+                    real_a, real_b, real_c, real_b_ref, real_c_ref = batch
+                else:
+                    raise ValueError(f"2.5D dual outputs expects batch of 5, got {len(batch)}")
+                real_merged = torch.cat((real_b_ref, real_c_ref), dim=1)
+                fake_merged = self.forward(real_a, real_merged)
+                fake_b, fake_c = fake_merged[:, :1], fake_merged[:, 1:]
+                return real_a, real_b, real_c, None, fake_b, fake_c, None, real_b_ref, real_c_ref, None
+            elif self.params.use_misalign_simul == False:
                 if len(batch) == 3:  # real_a, real_b, real_c
                     real_a, real_b, real_c = batch
                     real_merged = torch.cat((real_b, real_c), dim=1)
@@ -203,28 +225,30 @@ class BaseModule_AtoB(LightningModule):  # single direction
             else:  # use_misalign_simul == True:
                 if len(batch) == 5:
                     real_a, real_b, real_b_ref, real_c, real_c_ref = batch
-
                     real_merged = torch.cat((real_b_ref, real_c_ref), dim=1)
                     fake_merged = self.forward(real_a, real_merged)
                     fake_b, fake_c = fake_merged[:, :1, :, :], fake_merged[:, 1:, :, :]
                     real_d, fake_d, real_d_ref = None, None, None
                 else:
                     raise ValueError(f"Expected batch size of 5 for misaligned simulation, but got {len(batch)}")
-
             return real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref  # real: GT, fake: syn by Ref
 
         else: # use_multiple_outputs=False, Single generation
-            if self.params.use_misalign_simul == False: # Registformer
-
+            if use_25d:
+                # batch = (real_a, real_b_center, real_b_stack)
+                if len(batch) == 3:
+                    real_a, real_b, real_b_ref = batch
+                else:
+                    raise ValueError(f"2.5D single output expects batch of 3, got {len(batch)}")
+                fake_b = self.forward(real_a, real_b_ref)
+                return real_a, real_b, fake_b, real_b_ref
+            elif self.params.use_misalign_simul == False: # Registformer
                 if getattr(self.params, "skip_stage1_infer", False): # Registformer: Use already synthesised initial output (Save inference memory, and time for training)
                     real_a, real_b, synth_b = batch
                     fake_b = self.forward(real_a, real_b, synth_b)
                     return real_a, real_b, fake_b
                 else:
                     real_a, real_b = batch
-                    # if not self.training: # TODO: Registformer 3D: val,test때는 전체 slice로 해야 sliding window때 문제없어서. 근데 시간 절약하고싶을땐 빼둬
-                    #     real_a = self.pad_slice_to_128(real_a, padding_value=-1) # No on registformer
-                    #     real_b = self.pad_slice_to_128(real_b, padding_value=-1)
                     fake_b = self.forward(real_a, real_b)
                     real_b_ref = None
                     return real_a, real_b, fake_b

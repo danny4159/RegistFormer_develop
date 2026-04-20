@@ -21,6 +21,9 @@ class ProposedSynthesisModule(nn.Module):
             self.is_3d = kwargs.get('is_3d', False)
             self.use_separate_style_layers = kwargs.get('use_separate_style_layers', False)
             self.noise_independent = kwargs.get('noise_independent', False)
+            self.use_25d_style = kwargs.get('use_25d_style', False)
+            self.ref_stack_size = kwargs.get('ref_stack_size', 3)
+            self.z_agg_deep = kwargs.get('z_agg_deep', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -30,10 +33,34 @@ class ProposedSynthesisModule(nn.Module):
         # Determine channel multiplier based on output mode
         if self.use_triple_outputs:
             ch = 3
+            self.num_style_streams = 3
         elif self.use_multiple_outputs:
             ch = 2
+            self.num_style_streams = 2
         else:
             ch = 1
+            self.num_style_streams = 1
+
+        # 2.5D: compress ref stack [B, K, H, W] -> [B, 1, H, W] per style stream
+        if self.use_25d_style:
+            hidden = max(8, self.feat_ch // 8)
+            if self.z_agg_deep:
+                def _make_z_agg():
+                    return nn.Sequential(
+                        nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
+                        nn.LeakyReLU(0.2, inplace=True),
+                        nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+                        nn.LeakyReLU(0.2, inplace=True),
+                        nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
+                    )
+            else:
+                def _make_z_agg():
+                    return nn.Sequential(
+                        nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
+                        nn.LeakyReLU(0.2, inplace=True),
+                        nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
+                    )
+            self.z_aggs = nn.ModuleList([_make_z_agg() for _ in range(self.num_style_streams)])
 
         self.guide_net = nn.Sequential(
             nn.Conv2d(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
@@ -124,17 +151,26 @@ class ProposedSynthesisModule(nn.Module):
         #     self.conv_final = nn.Conv2d(self.feat_ch * ch // 4, self.output_nc, kernel_size=3, padding=1)
         self.conv_final = Conv(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
 
+    def _aggregate_ref_stack(self, ref_all):
+        """2.5D: [B, num_streams*K, H, W] -> [B, num_streams, H, W]"""
+        if not self.use_25d_style:
+            return ref_all
+        chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
+        style_maps = [z_agg(chunk) for chunk, z_agg in zip(chunks, self.z_aggs)]
+        return torch.cat(style_maps, dim=1)
+
     def forward(self, merged_input, layers=[], encode_only=False):
 
         x = merged_input[:, :1, ...]
-        ref = merged_input[:, 1:, ...]
-        
+        ref_all = merged_input[:, 1:, ...]
+        ref = self._aggregate_ref_stack(ref_all)  # 2.5D: K-ch stack -> 1/2/3-ch map; 2D: passthrough
+
         if self.is_3d:
             ref = ref.permute(0, 1, 4, 2, 3)
             style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
             style_guidance_1 = style_guidance_1.permute(0, 1, 3, 4, 2)
         else:
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯 
+            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯
         
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Ablation
