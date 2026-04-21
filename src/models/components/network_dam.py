@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.ops.upfirdn2d import upfirdn2d
+# from mmcv.ops.upfirdn2d import upfirdn2d
 
 
 class DAModule(nn.Module):

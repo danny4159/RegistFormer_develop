@@ -69,6 +69,7 @@ params: # Other params
   # lambda_cycle_a: 1
   # lambda_cycle_b: 1
   # lambda_sc: 0.1
+  lambda_gan: 1
   lambda_nce: 5
   lambda_mind: 0
   lambda_l1: 0

@@ -49,6 +49,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         self.optimizer = optimizer
         self.params = params
         self.scheduler = scheduler
+        self.strict_loading = False  # allow cross-stage ckpt loading (e.g., lambda_style/gan differ between stages)
 
         if self.params.nce_on_vgg: # vgg for patchNCE
             # choose layers what you want # "conv_1_2", "conv_2_2", "conv_3_4", "conv_4_4", "conv_5_4"
@@ -67,7 +68,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
         # loss function
         self.criterionContextual = Contextual_Loss(style_feat_layers) if params.lambda_style != 0 else None
-        self.criterionGAN = GANLoss(gan_type='lsgan')
+        self.criterionGAN = GANLoss(gan_type='lsgan') if getattr(params, 'lambda_gan', 1) != 0 else None
         self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size) if params.lambda_nce != 0 else None
 
         # Loss for ablation
@@ -79,10 +80,29 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # self.nce_layers = [0,2,4,6] # range: 0~6
         # self.flip_equivariance = params.flip_equivariance
 
+    def on_load_checkpoint(self, checkpoint):
+        use_gan = getattr(self.params, 'lambda_gan', 1) != 0
+        expected = 1  # G_A
+        if use_gan:
+            expected += 1  # D_A
+            if self.params.use_multiple_outputs or self.params.use_triple_outputs:
+                expected += 1  # D_B
+            if self.params.use_triple_outputs:
+                expected += 1  # D_C
+        expected += 1  # F_A
+        ckpt_opt_count = len(checkpoint.get('optimizer_states', []))
+        if ckpt_opt_count != expected:
+            checkpoint['optimizer_states'] = []
+            checkpoint['lr_schedulers'] = []
+
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device) 
         if self.params.use_misalign_simul:
             real_b, real_c, real_d = real_b_ref, real_c_ref, real_d_ref # Misaligned simulated data is ref. It is assigned to real
+        # Clamp NaN/Inf in fake outputs (can occur during cross-stage loading when zero-weight style MLPs warm up)
+        def _safe(t):
+            return torch.nan_to_num(t, nan=0.0, posinf=1.0, neginf=-1.0) if t is not None else None
+        fake_b, fake_c, fake_d = _safe(fake_b), _safe(fake_c), _safe(fake_d)
         ##################################################################################################################
         ## 1. GAN Loss
         if self.criterionGAN:
@@ -284,17 +304,26 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_G += loss_mind_d
 
         if self.criterionL1:
-            loss_l1_b = self.criterionL1(real_b_ref, fake_b) * self.params.lambda_l1
+            use_25d = getattr(self.params, 'use_25d_style', False)
+
+            def _l1_target(ref, gt):
+                if ref is None:
+                    return gt
+                if use_25d and ref.shape[1] > 1:
+                    return ref[:, ref.shape[1] // 2: ref.shape[1] // 2 + 1]
+                return ref
+
+            loss_l1_b = self.criterionL1(_l1_target(real_b_ref, real_b), fake_b) * self.params.lambda_l1
             self.log("L1_b_Loss", loss_l1_b.detach(), prog_bar=True)
             loss_G += loss_l1_b
 
             if self.params.use_multiple_outputs or self.params.use_triple_outputs:
-                loss_l1_c = self.criterionL1(real_c_ref, fake_c) * self.params.lambda_l1
+                loss_l1_c = self.criterionL1(_l1_target(real_c_ref, real_c), fake_c) * self.params.lambda_l1
                 self.log("L1_c_Loss", loss_l1_c.detach(), prog_bar=True)
                 loss_G += loss_l1_c
 
-            if self.params.use_triple_outputs and fake_d is not None and real_d_ref is not None:
-                loss_l1_d = self.criterionL1(real_d_ref, fake_d) * self.params.lambda_l1
+            if self.params.use_triple_outputs and fake_d is not None:
+                loss_l1_d = self.criterionL1(_l1_target(real_d_ref, real_d), fake_d) * self.params.lambda_l1
                 self.log("L1_d_Loss", loss_l1_d.detach(), prog_bar=True)
                 loss_G += loss_l1_d
 
@@ -389,59 +418,51 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
         real_c = real_d = fake_c = fake_d = None
         real_b_ref = real_c_ref = real_d_ref = None
+        use_gan = getattr(self.params, 'lambda_gan', 1) != 0
 
-        if self.params.use_triple_outputs:
-            optimizer_G_A, optimizer_D_A, optimizer_D_B, optimizer_D_C, optimizer_F_A = self.optimizers()
+        all_opts = self.optimizers()
+        if not isinstance(all_opts, list):
+            all_opts = [all_opts]
 
-            if self.params.use_misalign_simul:
+        opt_idx = 0
+        optimizer_G_A = all_opts[opt_idx]; opt_idx += 1
+        if use_gan:
+            optimizer_D_A = all_opts[opt_idx]; opt_idx += 1
+            if self.params.use_multiple_outputs or self.params.use_triple_outputs:
+                optimizer_D_B = all_opts[opt_idx]; opt_idx += 1
+            if self.params.use_triple_outputs:
+                optimizer_D_C = all_opts[opt_idx]; opt_idx += 1
+        optimizer_F_A = all_opts[opt_idx]
+
+        if self.params.use_misalign_simul:
+            if self.params.use_triple_outputs or self.params.use_multiple_outputs:
                 real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref = self.model_step(batch)
             else:
-                real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d = self.model_step(batch)
-        elif self.params.use_multiple_outputs:
-            optimizer_G_A, optimizer_D_A, optimizer_D_B, optimizer_F_A = self.optimizers()
-
-            if self.params.use_misalign_simul:
-                real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref = self.model_step(batch)
-            else:
-                real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d = self.model_step(batch)
-        else:
-            optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
-            if self.params.use_misalign_simul:
                 real_a, real_b, fake_b, real_b_ref = self.model_step(batch)
+        else:
+            if self.params.use_triple_outputs or self.params.use_multiple_outputs:
+                real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d = self.model_step(batch)
             else:
                 real_a, real_b, fake_b = self.model_step(batch)
 
-
         with optimizer_G_A.toggle_model():
-            if self.params.use_triple_outputs:
-                if self.params.use_misalign_simul:
-                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
-                else:
-                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, None, None, None)
-            elif self.params.use_multiple_outputs:
-                if self.params.use_misalign_simul:
-                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
-                else:
-                    loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, None, None, None)
+            if self.params.use_triple_outputs or self.params.use_multiple_outputs:
+                loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
             else:
-                if self.params.use_misalign_simul:
-                    loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
+                if self.params.is_3d and not use_gan:
+                    loss_G = self.backward_G_3D(real_a, real_b, None, None, fake_b, None, None, None, None, None)
                 else:
-                    if self.params.is_3d:
-                        loss_G = self.backward_G_3D(real_a, real_b, None, None, fake_b, None, None, None, None, None)
-                    else:
-                        loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, None, None, None)
+                    loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
             self.manual_backward(loss_G)
-            self.clip_gradients(
-                optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-            )
-            self.clip_gradients(
-                optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-            )
+            self.clip_gradients(optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm")
+            self.clip_gradients(optimizer_F_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm")
             optimizer_G_A.step()
             optimizer_F_A.step()
             optimizer_G_A.zero_grad()
             optimizer_F_A.zero_grad()
+
+        if not use_gan:
+            return
 
         real_b_disc = real_b_ref if self.params.use_misalign_simul else real_b
         real_c_disc = real_c_ref if self.params.use_misalign_simul and (self.params.use_multiple_outputs or self.params.use_triple_outputs) else real_c
@@ -453,20 +474,16 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             else:
                 loss_D_A = self.backward_D_A(real_b_disc, fake_b)
             self.manual_backward(loss_D_A)
-            self.clip_gradients(
-                optimizer_D_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-            )
+            self.clip_gradients(optimizer_D_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm")
             optimizer_D_A.step()
             optimizer_D_A.zero_grad()
         self.log("D_A_Loss", loss_D_A.detach(), prog_bar=True)
-        
+
         if self.params.use_multiple_outputs or self.params.use_triple_outputs:
             with optimizer_D_B.toggle_model():
                 loss_D_B = self.backward_D_B(real_c_disc, fake_c)
                 self.manual_backward(loss_D_B)
-                self.clip_gradients(
-                    optimizer_D_B, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-                )
+                self.clip_gradients(optimizer_D_B, gradient_clip_val=0.5, gradient_clip_algorithm="norm")
                 optimizer_D_B.step()
                 optimizer_D_B.zero_grad()
             self.log("D_B_Loss", loss_D_B.detach(), prog_bar=True)
@@ -475,9 +492,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             with optimizer_D_C.toggle_model():
                 loss_D_C = self.backward_D_C(real_d_disc, fake_d)
                 self.manual_backward(loss_D_C)
-                self.clip_gradients(
-                    optimizer_D_C, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
-                )
+                self.clip_gradients(optimizer_D_C, gradient_clip_val=0.5, gradient_clip_algorithm="norm")
                 optimizer_D_C.step()
                 optimizer_D_C.zero_grad()
             self.log("D_C_Loss", loss_D_C.detach(), prog_bar=True)
@@ -492,32 +507,36 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         optimizers = []
         schedulers = []
 
+        use_gan = getattr(self.params, 'lambda_gan', 1) != 0
+
         optimizer_G_A = self.hparams.optimizer(params=self.netG_A.parameters())
         optimizers.append(optimizer_G_A)
-        optimizer_D_A = self.hparams.optimizer(params=self.netD_A.parameters())
-        optimizers.append(optimizer_D_A)
-        if self.params.use_multiple_outputs or self.params.use_triple_outputs:
-            optimizer_D_B = self.hparams.optimizer(params=self.netD_B.parameters())
-            optimizers.append(optimizer_D_B)
-        if self.params.use_triple_outputs:
-            optimizer_D_C = self.hparams.optimizer(params=self.netD_C.parameters())
-            optimizers.append(optimizer_D_C)
+        if use_gan:
+            optimizer_D_A = self.hparams.optimizer(params=self.netD_A.parameters())
+            optimizers.append(optimizer_D_A)
+            if self.params.use_multiple_outputs or self.params.use_triple_outputs:
+                optimizer_D_B = self.hparams.optimizer(params=self.netD_B.parameters())
+                optimizers.append(optimizer_D_B)
+            if self.params.use_triple_outputs:
+                optimizer_D_C = self.hparams.optimizer(params=self.netD_C.parameters())
+                optimizers.append(optimizer_D_C)
         optimizer_F_A = self.hparams.optimizer(params=self.netF_A.parameters())
         optimizers.append(optimizer_F_A)
 
         if self.hparams.scheduler is not None:
             scheduler_G_A = self.hparams.scheduler(optimizer=optimizer_G_A)
             schedulers.append(scheduler_G_A)
-            scheduler_D_A = self.hparams.scheduler(optimizer=optimizer_D_A)
-            schedulers.append(scheduler_D_A)
-            if self.params.use_multiple_outputs or self.params.use_triple_outputs:
-                scheduler_D_B = self.hparams.scheduler(optimizer=optimizer_D_B)
-                schedulers.append(scheduler_D_B)
-            if self.params.use_triple_outputs:
-                scheduler_D_C = self.hparams.scheduler(optimizer=optimizer_D_C)
-                schedulers.append(scheduler_D_C)
+            if use_gan:
+                scheduler_D_A = self.hparams.scheduler(optimizer=optimizer_D_A)
+                schedulers.append(scheduler_D_A)
+                if self.params.use_multiple_outputs or self.params.use_triple_outputs:
+                    scheduler_D_B = self.hparams.scheduler(optimizer=optimizer_D_B)
+                    schedulers.append(scheduler_D_B)
+                if self.params.use_triple_outputs:
+                    scheduler_D_C = self.hparams.scheduler(optimizer=optimizer_D_C)
+                    schedulers.append(scheduler_D_C)
             scheduler_F_A = self.hparams.scheduler(optimizer=optimizer_F_A)
             schedulers.append(scheduler_F_A)
             return optimizers, schedulers
-        
+
         return optimizers

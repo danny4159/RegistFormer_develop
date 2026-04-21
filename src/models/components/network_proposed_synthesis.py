@@ -449,7 +449,8 @@ class StyleConv(nn.Module):
 
             # 3. 거기서 감마 베타 나눠서 denorm
             x = x * gamma + beta
-        
+            x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
+
         # activation (LeakyReLU)
         if self.activate:
             x = self.activation(x)
