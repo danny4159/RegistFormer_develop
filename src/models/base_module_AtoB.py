@@ -166,9 +166,10 @@ class BaseModule_AtoB(LightningModule):  # single direction
         if getattr(self.params, 'use_triple_outputs', False):
             # Triple outputs: T1, PD, MRA (3 outputs)
             if use_25d:
-                # batch = (real_a, real_b, real_c, real_d, real_b_stack, real_c_stack, real_d_stack)
+                # batch = (real_a, real_b, real_b_stack, real_c, real_c_stack, real_d, real_d_stack)
+                # groups: 1=src, 2=GT1, 3=ref1(K-stack), 4=GT2, 5=ref2(K-stack), 6=GT3, 7=ref3(K-stack)
                 if len(batch) == 7:
-                    real_a, real_b, real_c, real_d, real_b_ref, real_c_ref, real_d_ref = batch
+                    real_a, real_b, real_b_ref, real_c, real_c_ref, real_d, real_d_ref = batch
                 else:
                     raise ValueError(f"2.5D triple outputs expects batch of 7, got {len(batch)}")
                 real_merged = torch.cat((real_b_ref, real_c_ref, real_d_ref), dim=1)
@@ -197,9 +198,10 @@ class BaseModule_AtoB(LightningModule):  # single direction
         elif self.params.use_multiple_outputs:
             # Multiple outputs: T1, PD (2 outputs)
             if use_25d:
-                # batch = (real_a, real_b, real_c, real_b_stack, real_c_stack)
+                # batch = (real_a, real_b, real_b_stack, real_c, real_c_stack)
+                # groups: 1=src, 2=GT1, 3=ref1(K-stack), 4=GT2, 5=ref2(K-stack)
                 if len(batch) == 5:
-                    real_a, real_b, real_c, real_b_ref, real_c_ref = batch
+                    real_a, real_b, real_b_ref, real_c, real_c_ref = batch
                 else:
                     raise ValueError(f"2.5D dual outputs expects batch of 5, got {len(batch)}")
                 real_merged = torch.cat((real_b_ref, real_c_ref), dim=1)

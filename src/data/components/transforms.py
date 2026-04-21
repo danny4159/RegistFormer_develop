@@ -282,32 +282,36 @@ class dataset_SynthRAD(Dataset):
                     else:
                         C = file[self.data_group_3][patient_key][..., slice_idx]
                 if self.data_group_4:
-                    if self.use_25d_style:
-                        D = self._load_slice_stack(file, self.data_group_4, patient_key, slice_idx)
-                    else:
-                        D = file[self.data_group_4][patient_key][..., slice_idx]
+                    # group_4 is GT (even) → always single slice
+                    D = file[self.data_group_4][patient_key][..., slice_idx]
                 if self.data_group_5:
-                    E = file[self.data_group_5][patient_key][..., slice_idx]
-                if self.data_group_6:
+                    # group_5 is moved ref (odd) → K-stack when use_25d_style
                     if self.use_25d_style:
-                        F = self._load_slice_stack(file, self.data_group_6, patient_key, slice_idx)
+                        E = self._load_slice_stack(file, self.data_group_5, patient_key, slice_idx)
                     else:
-                        F = file[self.data_group_6][patient_key][..., slice_idx]
+                        E = file[self.data_group_5][patient_key][..., slice_idx]
+                if self.data_group_6:
+                    # group_6 is GT (even) → always single slice
+                    F = file[self.data_group_6][patient_key][..., slice_idx]
                 if self.data_group_7:
-                    G = file[self.data_group_7][patient_key][..., slice_idx]
+                    # group_7 is moved ref (odd) → K-stack when use_25d_style
+                    if self.use_25d_style:
+                        G = self._load_slice_stack(file, self.data_group_7, patient_key, slice_idx)
+                    else:
+                        G = file[self.data_group_7][patient_key][..., slice_idx]
 
         A = torch.from_numpy(A).unsqueeze(0).float()
         B = torch.from_numpy(B).unsqueeze(0).float()
         if self.data_group_3:
             C = torch.from_numpy(C).float() if self.use_25d_style else torch.from_numpy(C).unsqueeze(0).float()
         if self.data_group_4:
-            D = torch.from_numpy(D).float() if self.use_25d_style else torch.from_numpy(D).unsqueeze(0).float()
+            D = torch.from_numpy(D).unsqueeze(0).float()  # GT, always single
         if self.data_group_5:
-            E = torch.from_numpy(E).unsqueeze(0).float()
+            E = torch.from_numpy(E).float() if self.use_25d_style else torch.from_numpy(E).unsqueeze(0).float()
         if self.data_group_6:
-            F = torch.from_numpy(F).float() if self.use_25d_style else torch.from_numpy(F).unsqueeze(0).float()
+            F = torch.from_numpy(F).unsqueeze(0).float()  # GT, always single
         if self.data_group_7:
-            G = torch.from_numpy(G).unsqueeze(0).float()
+            G = torch.from_numpy(G).float() if self.use_25d_style else torch.from_numpy(G).unsqueeze(0).float()
 
         # Create a dictionary for the data
         data_dict = {"A": A, "B": B}
