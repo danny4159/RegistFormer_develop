@@ -148,11 +148,11 @@ class ProposedSynthesisModule(nn.Module):
         feat2 = self.conv22(feat2, style_guidance_1) # [1, feat_ch, H/4, W/4]
         feat3 = self.conv31(feat2, style_guidance_1) # [1, feat_ch, H/4, W/4] #TODO: 메모리 많아서 뺌.
         feat3 = self.conv32(feat3, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat4 = self.conv41(feat3 + feat2, style_guidance_1)# [1, feat_ch, H/2, W/2] #TODO: 원래 intput feat3 + feat2
-        feat4 = self.conv42(feat4, style_guidance_1)        # [1, feat_ch, H/2, W/2]
-        feat5 = self.conv51(feat4 + feat1, style_guidance_1)# [1, feat_ch, H, W]
-        feat5 = self.conv52(feat5, style_guidance_1)        # [1, feat_ch, H, W]
-        feat6 = self.conv6(feat5 + feat0, style_guidance_1) # [1, feat_ch, H, W]
+        feat4 = self.conv41(torch.nan_to_num(feat3 + feat2, nan=0.0, posinf=1.0, neginf=-1.0), style_guidance_1)
+        feat4 = self.conv42(feat4, style_guidance_1)
+        feat5 = self.conv51(torch.nan_to_num(feat4 + feat1, nan=0.0, posinf=1.0, neginf=-1.0), style_guidance_1)
+        feat5 = self.conv52(feat5, style_guidance_1)
+        feat6 = self.conv6(torch.nan_to_num(feat5 + feat0, nan=0.0, posinf=1.0, neginf=-1.0), style_guidance_1)
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 처리
         if self.use_separate_style_layers and self.use_triple_outputs:
@@ -204,6 +204,8 @@ class ProposedSynthesisModule(nn.Module):
         else:
             out = self.conv_final(feat6)
             out = torch.tanh(out)
+
+        out = torch.nan_to_num(out, nan=0.0, posinf=1.0, neginf=-1.0)
 
         if encode_only:
             layers_dict = {0: feat0, 1: feat1, 2: feat2, 3: feat3, 4: feat4, 5: feat5, 6: feat6}
