@@ -75,6 +75,17 @@ params: # Other params
   lambda_nce: 5
   lambda_mind: 0
   lambda_l1: 0
+  # Photometric auxiliary losses (misalignment-robust)
+  lambda_lowfreq: 2.0        # masked low-frequency L1 (pooled)
+  lambda_stat: 0.2           # masked global mean/std matching
+  lowfreq_pool_ks: 16        # avg-pool kernel/stride for low-frequency smoothing
+  lowfreq_softmin_tau: 0.3   # soft-min temperature for 2.5D slice aggregation
+  lowfreq_shift_penalty: 0.05
+  lowfreq_min_valid: 0.05    # min mask density per pooled cell to count
+  stat_softmin_tau: 0.3
+  stat_shift_penalty: 0.05
+  stat_use_std: true         # include std matching (false: mean only)
+  fg_mask_threshold: 0.0     # foreground mask threshold on ref intensity
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
