@@ -279,14 +279,15 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     loss_G += loss_style_d.squeeze()
 
         ##################################################################################################################
-        ## 2.5 Photometric auxiliary losses: masked low-frequency L1 + masked global mean/std
-        ##    - 2D  : ref_img [B,1,H,W]  -> single-image path
-        ##    - 2.5D: ref_img [B,K,H,W]  -> slice-wise loss + center-biased soft-min
-        loss_G += self._compute_photometric_aux_loss(fake_b, eff_b, prefix="b")
+        ## 2.5 Photometric auxiliary losses: anchored to aligned GT (real_b/c/d), single-image path.
+        ##    Stack soft-min path is still supported in the wrapper for K-stack inputs, but here we
+        ##    intentionally use the aligned 1-channel GT so brightness bias is corrected against the
+        ##    true target (not the misaligned ref).
+        loss_G += self._compute_photometric_aux_loss(fake_b, real_b, prefix="b")
         if self.params.use_multiple_outputs or self.params.use_triple_outputs:
-            loss_G += self._compute_photometric_aux_loss(fake_c, eff_c, prefix="c")
+            loss_G += self._compute_photometric_aux_loss(fake_c, real_c, prefix="c")
             if self.params.use_triple_outputs and fake_d is not None:
-                loss_G += self._compute_photometric_aux_loss(fake_d, eff_d, prefix="d")
+                loss_G += self._compute_photometric_aux_loss(fake_d, real_d, prefix="d")
 
         ##################################################################################################################
         ## 3. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
