@@ -81,6 +81,13 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # self.flip_equivariance = params.flip_equivariance
 
     @staticmethod
+    def _conf_tv_loss(x):
+        """Total-variation smoothness over the confidence map. x: [B,C,H,W]."""
+        loss_h = (x[:, :, 1:, :] - x[:, :, :-1, :]).abs().mean()
+        loss_w = (x[:, :, :, 1:] - x[:, :, :, :-1]).abs().mean()
+        return loss_h + loss_w
+
+    @staticmethod
     def _softmin_contextual(cx_list, shift_penalties=None, tau=0.3):
         """Soft-min over a list of contextual losses (center-biased)."""
         losses = torch.stack(cx_list)
@@ -221,6 +228,11 @@ class ProposedSynthesisModule(BaseModule_AtoB):
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
         use_25d = getattr(self.params, 'use_25d_style', False)
+
+        # Capture confidence map from the main forward (in model_step) BEFORE
+        # NCE encode_only calls below overwrite netG_A.last_conf_map. Holding the
+        # tensor reference keeps gradients alive for the regularization terms.
+        conf_for_reg = getattr(self.netG_A, 'last_conf_map', None)
 
         # Effective style refs for contextual and NCE real-side
         # 2.5D: real_b_ref is K-channel stack
@@ -471,6 +483,20 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_l1_d = self.criterionL1(_center_slice(real_d_ref), fake_d) * self.params.lambda_l1
                 self.log("L1_d_Loss", loss_l1_d.detach(), prog_bar=True)
                 loss_G += loss_l1_d
+
+        # Confidence regularization (active only when lambdas > 0 AND gating ran).
+        if conf_for_reg is not None:
+            lambda_conf_smooth = float(getattr(self.params, 'lambda_conf_smooth', 0.0) or 0.0)
+            lambda_conf_mean = float(getattr(self.params, 'lambda_conf_mean', 0.0) or 0.0)
+            if lambda_conf_smooth > 0:
+                loss_conf_smooth = self._conf_tv_loss(conf_for_reg) * lambda_conf_smooth
+                self.log("ConfSmooth_Loss", loss_conf_smooth.detach(), prog_bar=True)
+                loss_G += loss_conf_smooth
+            if lambda_conf_mean > 0:
+                conf_min_mean = float(getattr(self.params, 'conf_min_mean', 0.5))
+                loss_conf_mean = F.relu(conf_min_mean - conf_for_reg.mean()).pow(2) * lambda_conf_mean
+                self.log("ConfMean_Loss", loss_conf_mean.detach(), prog_bar=True)
+                loss_G += loss_conf_mean
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
