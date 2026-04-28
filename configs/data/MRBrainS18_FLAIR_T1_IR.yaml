@@ -27,6 +27,8 @@ use_triple_outputs: False
 use_misalign_simul: False
 use_25d_style: False
 ref_stack_size: 3
+apply_rigid_registration: True  # True: training 시작 시 3D rigid registration 수행 후 캐싱
+registration_targets: [2, 3]     # group_1(FLAIR) 기준, T1/IR 모두 등록 (정의 안된 group은 자동 스킵)
 
 ## Dataset File Name
 # prepared_data_0_0_0_0_0_ver3_final.h5

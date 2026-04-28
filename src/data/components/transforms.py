@@ -17,6 +17,62 @@ from scipy.fft import fftn, ifftn, fftshift, ifftshift
 from monai.transforms import Affine
 import random
 import math
+from tqdm import tqdm
+
+
+def _register_3d_rigid(fixed_np: np.ndarray, moving_np: np.ndarray, z_pad: int = 20) -> np.ndarray:
+    """Rigid 3D registration of moving → fixed using SimpleITK.
+
+    z_pad slices are reflect-padded before registration and cropped after,
+    preventing diagonal boundary artifacts caused by z-direction translation/rotation.
+
+    Args:
+        fixed_np:  (H, W, D) float32 array, [-1, 1] normalized
+        moving_np: (H, W, D) float32 array, [-1, 1] normalized
+        z_pad:     number of slices to pad on each end in z before registration
+    Returns:
+        registered moving volume (H, W, D) float32, background filled with -1
+    """
+    import SimpleITK as sitk
+
+    D_orig = fixed_np.shape[2]
+
+    # replicate-pad in z (edge slice repeated) so registration sees continuous signal at boundaries
+    fixed_pad  = np.pad(fixed_np,  ((0, 0), (0, 0), (z_pad, z_pad)), mode='edge')
+    moving_pad = np.pad(moving_np, ((0, 0), (0, 0), (z_pad, z_pad)), mode='edge')
+
+    # numpy (H, W, D) → SimpleITK expects (z, y, x) = (D, H, W)
+    fixed_sitk  = sitk.GetImageFromArray(fixed_pad.transpose(2, 0, 1).astype(np.float32))
+    moving_sitk = sitk.GetImageFromArray(moving_pad.transpose(2, 0, 1).astype(np.float32))
+
+    initial_tf = sitk.CenteredTransformInitializer(
+        fixed_sitk, moving_sitk,
+        sitk.Euler3DTransform(),
+        sitk.CenteredTransformInitializerFilter.GEOMETRY,
+    )
+
+    R = sitk.ImageRegistrationMethod()
+    R.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
+    R.SetOptimizerAsRegularStepGradientDescent(
+        learningRate=1.0, minStep=1e-4, numberOfIterations=200
+    )
+    R.SetOptimizerScalesFromIndexShift()
+    R.SetInterpolator(sitk.sitkLinear)
+    R.SetInitialTransform(initial_tf, inPlace=False)
+    R.SetShrinkFactorsPerLevel([4, 2, 1])
+    R.SetSmoothingSigmasPerLevel([2, 1, 0])
+    R.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
+
+    final_tf = R.Execute(fixed_sitk, moving_sitk)
+
+    resampled = sitk.Resample(
+        moving_sitk, fixed_sitk, final_tf,
+        sitk.sitkBSpline, -1.0, moving_sitk.GetPixelID(),
+    )
+
+    # SimpleITK (D, H, W) → numpy (H, W, D), then crop back to original z
+    result_pad = sitk.GetArrayFromImage(resampled).transpose(1, 2, 0).astype(np.float32)
+    return result_pad[:, :, z_pad:z_pad + D_orig]
 
 def _collect_present_tensors(*tensors):
     return tuple(tensor for tensor in tensors if tensor is not None)
@@ -178,6 +234,8 @@ class dataset_SynthRAD(Dataset):
         norm_ZeroToOne: bool = False,
         use_25d_style: bool = False,
         ref_stack_size: int = 3,
+        apply_rigid_registration: bool = False,
+        registration_targets: list = None,
         *args,
         **kwargs,
     ):
@@ -197,6 +255,8 @@ class dataset_SynthRAD(Dataset):
         self.norm_ZeroToOne = norm_ZeroToOne
         self.use_25d_style = use_25d_style
         self.ref_stack_size = ref_stack_size
+        self.apply_rigid_registration = apply_rigid_registration
+        self.registration_targets = registration_targets or []
 
         os.environ["HDF5_USE_FILE_LOCKING"] = "TRUE"
 
@@ -236,6 +296,34 @@ class dataset_SynthRAD(Dataset):
                 ]
             )
 
+        # 3D rigid registration cache: registration_targets에 명시된 group → group_1 기준으로 정합
+        _group_map = {
+            2: ('B', self.data_group_2), 3: ('C', self.data_group_3),
+            4: ('D', self.data_group_4), 5: ('E', self.data_group_5),
+            6: ('F', self.data_group_6), 7: ('G', self.data_group_7),
+        }
+        self.reg_cache = {}
+        if self.apply_rigid_registration and self.registration_targets:
+            # target 번호 중 해당 group이 실제로 정의된 것만 사용
+            moving_group_map = {
+                cache_key: group
+                for t in self.registration_targets
+                if t in _group_map
+                for cache_key, group in [_group_map[t]]
+                if group is not None
+            }
+            if moving_group_map:
+                log.info(f"[RigidReg] Running 3D rigid registration for {len(self.patient_keys)} patients "
+                         f"(targets: {self.registration_targets}, active: {list(moving_group_map.values())}) ...")
+                with h5py.File(self.data_dir, 'r') as file:
+                    for patient_key in tqdm(self.patient_keys, desc="[RigidReg]"):
+                        fixed_vol = file[self.data_group_1][patient_key][...]
+                        self.reg_cache[patient_key] = {}
+                        for cache_key, group in moving_group_map.items():
+                            moving_vol = file[group][patient_key][...]
+                            self.reg_cache[patient_key][cache_key] = _register_3d_rigid(fixed_vol, moving_vol)
+                log.info("[RigidReg] Done.")
+
     def _load_slice_stack(self, file, group, patient_key, slice_idx):
         """Load K neighboring slices centered at slice_idx; repeat at volume boundaries."""
         total = file[group][patient_key].shape[-1]
@@ -244,6 +332,16 @@ class dataset_SynthRAD(Dataset):
         for k in range(-N, N + 1):
             s = min(max(slice_idx + k, 0), total - 1)
             slices.append(file[group][patient_key][..., s])
+        return np.stack(slices, axis=0)  # [K, H, W]
+
+    def _load_slice_stack_from_vol(self, vol, slice_idx):
+        """Load K neighboring slices from a cached (H, W, D) volume."""
+        total = vol.shape[-1]
+        N = self.ref_stack_size // 2
+        slices = []
+        for k in range(-N, N + 1):
+            s = min(max(slice_idx + k, 0), total - 1)
+            slices.append(vol[..., s])
         return np.stack(slices, axis=0)  # [K, H, W]
 
     def __len__(self):
@@ -259,15 +357,15 @@ class dataset_SynthRAD(Dataset):
                 A = file[self.data_group_1][patient_key][...]
                 B = file[self.data_group_2][patient_key][...]
                 if self.data_group_3:
-                    C = file[self.data_group_3][patient_key][...]
+                    C = self.reg_cache[patient_key]['C'] if self.apply_rigid_registration else file[self.data_group_3][patient_key][...]
                 if self.data_group_4:
                     D = file[self.data_group_4][patient_key][...]
                 if self.data_group_5:
-                    E = file[self.data_group_5][patient_key][...]
+                    E = self.reg_cache[patient_key]['E'] if self.apply_rigid_registration else file[self.data_group_5][patient_key][...]
                 if self.data_group_6:
                     F = file[self.data_group_6][patient_key][...]
                 if self.data_group_7:
-                    G = file[self.data_group_7][patient_key][...]
+                    G = self.reg_cache[patient_key]['G'] if self.apply_rigid_registration else file[self.data_group_7][patient_key][...]
 
         else:
             patient_idx = np.searchsorted(self.cumulative_slice_counts, idx + 1) - 1
@@ -277,7 +375,10 @@ class dataset_SynthRAD(Dataset):
                 A = file[self.data_group_1][patient_key][..., slice_idx]
                 B = file[self.data_group_2][patient_key][..., slice_idx]
                 if self.data_group_3:
-                    if self.use_25d_style:
+                    if self.apply_rigid_registration:
+                        vol_C = self.reg_cache[patient_key]['C']
+                        C = self._load_slice_stack_from_vol(vol_C, slice_idx) if self.use_25d_style else vol_C[..., slice_idx]
+                    elif self.use_25d_style:
                         C = self._load_slice_stack(file, self.data_group_3, patient_key, slice_idx)
                     else:
                         C = file[self.data_group_3][patient_key][..., slice_idx]
@@ -286,7 +387,10 @@ class dataset_SynthRAD(Dataset):
                     D = file[self.data_group_4][patient_key][..., slice_idx]
                 if self.data_group_5:
                     # group_5 is moved ref (odd) → K-stack when use_25d_style
-                    if self.use_25d_style:
+                    if self.apply_rigid_registration:
+                        vol_E = self.reg_cache[patient_key]['E']
+                        E = self._load_slice_stack_from_vol(vol_E, slice_idx) if self.use_25d_style else vol_E[..., slice_idx]
+                    elif self.use_25d_style:
                         E = self._load_slice_stack(file, self.data_group_5, patient_key, slice_idx)
                     else:
                         E = file[self.data_group_5][patient_key][..., slice_idx]
@@ -295,7 +399,10 @@ class dataset_SynthRAD(Dataset):
                     F = file[self.data_group_6][patient_key][..., slice_idx]
                 if self.data_group_7:
                     # group_7 is moved ref (odd) → K-stack when use_25d_style
-                    if self.use_25d_style:
+                    if self.apply_rigid_registration:
+                        vol_G = self.reg_cache[patient_key]['G']
+                        G = self._load_slice_stack_from_vol(vol_G, slice_idx) if self.use_25d_style else vol_G[..., slice_idx]
+                    elif self.use_25d_style:
                         G = self._load_slice_stack(file, self.data_group_7, patient_key, slice_idx)
                     else:
                         G = file[self.data_group_7][patient_key][..., slice_idx]

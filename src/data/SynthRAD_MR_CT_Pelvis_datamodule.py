@@ -40,6 +40,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         norm_ZeroToOne: bool = False,
         use_25d_style: bool = False,
         ref_stack_size: int = 3,
+        apply_rigid_registration: bool = False,
+        registration_targets: list = None,
         **kwargs: Any
     ):
         super().__init__()
@@ -72,6 +74,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         self.norm_ZeroToOne = norm_ZeroToOne
         self.use_25d_style = use_25d_style
         self.ref_stack_size = ref_stack_size
+        self.apply_rigid_registration = apply_rigid_registration
+        self.registration_targets = registration_targets
 
         self.data_train: Optional[Dataset] = None
         self.data_val: Optional[Dataset] = None
@@ -100,6 +104,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             norm_ZeroToOne=self.norm_ZeroToOne,
             use_25d_style=self.use_25d_style,
             ref_stack_size=self.ref_stack_size,
+            apply_rigid_registration=self.apply_rigid_registration,
+            registration_targets=self.registration_targets,
         )  # Use flip and crop augmentation for training data
         self.data_val = dataset_SynthRAD(
             self.val_dir,
@@ -119,6 +125,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             norm_ZeroToOne=self.norm_ZeroToOne,
             use_25d_style=self.use_25d_style,
             ref_stack_size=self.ref_stack_size,
+            apply_rigid_registration=self.apply_rigid_registration,
+            registration_targets=self.registration_targets,
         )
         self.data_test = dataset_SynthRAD(
             self.test_dir,
@@ -138,6 +146,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             norm_ZeroToOne=self.norm_ZeroToOne,
             use_25d_style=self.use_25d_style,
             ref_stack_size=self.ref_stack_size,
+            apply_rigid_registration=self.apply_rigid_registration,
+            registration_targets=self.registration_targets,
         )
 
     def train_dataloader(self):

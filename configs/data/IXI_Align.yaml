@@ -29,6 +29,8 @@ use_triple_outputs: False  # Set True for 3 outputs (T1, PD, MRA)
 use_misalign_simul: True
 use_25d_style: False
 ref_stack_size: 3
+apply_rigid_registration: True  # True: training 시작 시 3D rigid registration 수행 후 캐싱
+registration_targets: [3, 5, 7]  # group_1 기준 fixed, 여기 명시된 group만 moving으로 등록 (정의 안된 group은 자동 스킵)
 
 ## Dataset File Name
 # prepared_data_0_0_0_0_0_ver3_final.h5
