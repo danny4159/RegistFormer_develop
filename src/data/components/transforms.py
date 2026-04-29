@@ -67,7 +67,7 @@ def _register_3d_rigid(fixed_np: np.ndarray, moving_np: np.ndarray, z_pad: int =
 
     resampled = sitk.Resample(
         moving_sitk, fixed_sitk, final_tf,
-        sitk.sitkBSpline, -1.0, moving_sitk.GetPixelID(),
+        sitk.sitkLinear, -1.0, moving_sitk.GetPixelID(),
     )
 
     # SimpleITK (D, H, W) → numpy (H, W, D), then crop back to original z
