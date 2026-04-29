@@ -79,17 +79,6 @@ params: # Other params
   lambda_nce: 5
   lambda_mind: 0
   lambda_l1: 0
-  # Photometric auxiliary losses (Experiment A: anchored to aligned GT real_b, lowfreq-only)
-  lambda_lowfreq: 0.3        # masked low-frequency L1 (pooled)
-  lambda_stat: 0.0           # mean matching (off in Experiment A)
-  lowfreq_pool_ks: 32        # larger pool -> more global tone, less anatomy
-  lowfreq_softmin_tau: 0.3   # soft-min temp (only used when anchor is a K-stack)
-  lowfreq_shift_penalty: 0.05
-  lowfreq_min_valid: 0.05    # min mask density per pooled cell to count
-  stat_softmin_tau: 0.3
-  stat_shift_penalty: 0.05
-  stat_use_std: false        # mean-only (std off)
-  fg_mask_threshold: 0.0     # foreground mask threshold on ref intensity
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False

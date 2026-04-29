@@ -113,118 +113,6 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             shift_penalties.append(abs(i - center_idx) * shift_penalty_base)
         return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
 
-    # ---------------------------------------------------------------------
-    # Photometric auxiliary losses (masked low-frequency L1 / masked stat)
-    # 2D  : ref_img [B,1,H,W]     -> single-image path
-    # 2.5D: ref_img [B,K,H,W]     -> slice-wise loss + center-biased soft-min
-    # ---------------------------------------------------------------------
-    def _build_fg_mask(self, ref_img):
-        """ref_img: [B,1,H,W] or [B,1,D,H,W] -> binary foreground mask."""
-        thr = getattr(self.params, 'fg_mask_threshold', 0.0)
-        return (ref_img > thr).float()
-
-    @staticmethod
-    def _masked_mean_std(x, mask, eps=1e-6):
-        reduce_dims = tuple(range(2, x.ndim))
-        denom = mask.sum(dim=reduce_dims, keepdim=True).clamp_min(eps)
-        mean = (x * mask).sum(dim=reduce_dims, keepdim=True) / denom
-        var = (((x - mean) * mask) ** 2).sum(dim=reduce_dims, keepdim=True) / denom
-        std = torch.sqrt(var + eps)
-        return mean, std
-
-    def _masked_lowfreq_l1(self, x, y, mask):
-        k = getattr(self.params, 'lowfreq_pool_ks', 16)
-        min_valid = getattr(self.params, 'lowfreq_min_valid', 0.05)
-        if x.ndim == 4:
-            pool_fn = F.avg_pool2d
-        elif x.ndim == 5:
-            pool_fn = F.avg_pool3d
-        else:
-            raise ValueError(f"Unsupported ndim for lowfreq loss: {x.ndim}")
-
-        x_num = pool_fn(x * mask, kernel_size=k, stride=k)
-        y_num = pool_fn(y * mask, kernel_size=k, stride=k)
-        m_den = pool_fn(mask, kernel_size=k, stride=k).clamp_min(1e-6)
-
-        x_lf = x_num / m_den
-        y_lf = y_num / m_den
-
-        valid = (m_den > min_valid).float()
-        return (torch.abs(x_lf - y_lf) * valid).sum() / valid.sum().clamp_min(1.0)
-
-    def _masked_stat_loss_single(self, x, y, mask):
-        mean_x, std_x = self._masked_mean_std(x, mask)
-        mean_y, std_y = self._masked_mean_std(y, mask)
-        loss = torch.abs(mean_x - mean_y).mean()
-        if getattr(self.params, 'stat_use_std', True):
-            loss = loss + torch.abs(std_x - std_y).mean()
-        return loss
-
-    def _lowfreq_single_loss(self, fake_img, ref_img, lambda_w):
-        mask = self._build_fg_mask(ref_img)
-        return self._masked_lowfreq_l1(fake_img, ref_img, mask) * lambda_w
-
-    def _stat_single_loss(self, fake_img, ref_img, lambda_w):
-        mask = self._build_fg_mask(ref_img)
-        return self._masked_stat_loss_single(fake_img, ref_img, mask) * lambda_w
-
-    def _lowfreq_stack_loss(self, fake_img, ref_stack, lambda_w):
-        """ref_stack: [B,K,H,W], fake_img: [B,1,H,W]. Slice-wise + soft-min."""
-        K = ref_stack.shape[1]
-        center_idx = K // 2
-        tau = getattr(self.params, 'lowfreq_softmin_tau', 0.3)
-        shift_penalty_base = getattr(self.params, 'lowfreq_shift_penalty', 0.05)
-        losses, shift_penalties = [], []
-        for i in range(K):
-            ref_i = ref_stack[:, i:i+1]
-            mask_i = self._build_fg_mask(ref_i)
-            losses.append(self._masked_lowfreq_l1(fake_img, ref_i, mask_i))
-            shift_penalties.append(abs(i - center_idx) * shift_penalty_base)
-        return self._softmin_contextual(losses, shift_penalties, tau) * lambda_w
-
-    def _stat_stack_loss(self, fake_img, ref_stack, lambda_w):
-        """ref_stack: [B,K,H,W], fake_img: [B,1,H,W]. Slice-wise + soft-min."""
-        K = ref_stack.shape[1]
-        center_idx = K // 2
-        tau = getattr(self.params, 'stat_softmin_tau', 0.3)
-        shift_penalty_base = getattr(self.params, 'stat_shift_penalty', 0.05)
-        losses, shift_penalties = [], []
-        for i in range(K):
-            ref_i = ref_stack[:, i:i+1]
-            mask_i = self._build_fg_mask(ref_i)
-            losses.append(self._masked_stat_loss_single(fake_img, ref_i, mask_i))
-            shift_penalties.append(abs(i - center_idx) * shift_penalty_base)
-        return self._softmin_contextual(losses, shift_penalties, tau) * lambda_w
-
-    def _compute_photometric_aux_loss(self, fake_img, ref_img, prefix="b"):
-        """fake_img: [B,1,H,W]; ref_img: [B,1,H,W] (2D) or [B,K,H,W] (2.5D)."""
-        total_loss = torch.tensor(0.0, device=fake_img.device)
-        if ref_img is None:
-            return total_loss
-
-        lambda_lowfreq = float(getattr(self.params, 'lambda_lowfreq', 0.0) or 0.0)
-        lambda_stat = float(getattr(self.params, 'lambda_stat', 0.0) or 0.0)
-
-        is_stack = (ref_img.ndim == 4 and ref_img.shape[1] > 1)
-
-        if lambda_lowfreq > 0:
-            if is_stack:
-                loss_lowfreq = self._lowfreq_stack_loss(fake_img, ref_img, lambda_lowfreq)
-            else:
-                loss_lowfreq = self._lowfreq_single_loss(fake_img, ref_img, lambda_lowfreq)
-            self.log(f"LowFreq_{prefix}_Loss", loss_lowfreq.detach(), prog_bar=True)
-            total_loss = total_loss + loss_lowfreq.squeeze()
-
-        if lambda_stat > 0:
-            if is_stack:
-                loss_stat = self._stat_stack_loss(fake_img, ref_img, lambda_stat)
-            else:
-                loss_stat = self._stat_single_loss(fake_img, ref_img, lambda_stat)
-            self.log(f"Stat_{prefix}_Loss", loss_stat.detach(), prog_bar=True)
-            total_loss = total_loss + loss_stat.squeeze()
-
-        return total_loss
-
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
         use_25d = getattr(self.params, 'use_25d_style', False)
@@ -289,17 +177,6 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                         loss_style_d = self.criterionContextual(eff_d, fake_d) * self.params.lambda_style
                     self.log("Context_d_Loss", loss_style_d.detach(), prog_bar=True)
                     loss_G += loss_style_d.squeeze()
-
-        ##################################################################################################################
-        ## 2.5 Photometric auxiliary losses: anchored to aligned GT (real_b/c/d), single-image path.
-        ##    Stack soft-min path is still supported in the wrapper for K-stack inputs, but here we
-        ##    intentionally use the aligned 1-channel GT so brightness bias is corrected against the
-        ##    true target (not the misaligned ref).
-        loss_G += self._compute_photometric_aux_loss(fake_b, real_b, prefix="b")
-        if self.params.use_multiple_outputs or self.params.use_triple_outputs:
-            loss_G += self._compute_photometric_aux_loss(fake_c, real_c, prefix="c")
-            if self.params.use_triple_outputs and fake_d is not None:
-                loss_G += self._compute_photometric_aux_loss(fake_d, real_d, prefix="d")
 
         ##################################################################################################################
         ## 3. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
