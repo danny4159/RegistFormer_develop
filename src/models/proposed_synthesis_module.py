@@ -58,8 +58,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             
         # assign contextual loss
         style_feat_layers = {
-            # "conv_1_2": 1.0,
-            # "conv_2_1": 1.0,
+            "conv_1_2": 1.0,
+            "conv_2_1": 1.0,
             "conv_2_2": 1.0,
             "conv_3_2": 1.0,
             "conv_4_2": 1.0,
