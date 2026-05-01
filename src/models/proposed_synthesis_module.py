@@ -35,9 +35,9 @@ def _gaussian_blur_2d(x):
     return F.conv2d(x, kernel, padding=1, groups=x.shape[1])
 
 
-def scanner_like_aug(ref, p_blur=0.5, p_intensity=0.8, p_banding=0.5, p_noise=0.5):
+def scanner_like_aug(ref, p_blur=0.8, p_intensity=1.0, p_banding=0.8, p_noise=0.7):
     """
-    Apply scanner-like augmentation to a reference image.
+    Apply scanner-like augmentation to a reference image (Ver.2 — stronger).
 
     Preserves anatomy while perturbing acquisition-related characteristics
     (intensity scale/shift, blur, slice banding, noise).
@@ -47,21 +47,24 @@ def scanner_like_aug(ref, p_blur=0.5, p_intensity=0.8, p_banding=0.5, p_noise=0.
     dev = ref.device
 
     if torch.rand(1, device=dev) < p_intensity:
-        scale = torch.empty(1, device=dev, dtype=ref.dtype).uniform_(0.85, 1.15)
-        shift = torch.empty(1, device=dev, dtype=ref.dtype).uniform_(-0.08, 0.08)
+        scale = torch.empty(1, device=dev, dtype=ref.dtype).uniform_(0.75, 1.25)
+        shift = torch.empty(1, device=dev, dtype=ref.dtype).uniform_(-0.15, 0.15)
         out = out * scale + shift
 
     if torch.rand(1, device=dev) < p_blur:
         out = _gaussian_blur_2d(out)
+        # 50% chance of a second blur pass for stronger smoothing
+        if torch.rand(1, device=dev) < 0.5:
+            out = _gaussian_blur_2d(out)
 
     if torch.rand(1, device=dev) < p_banding:
         B, C, H, W = out.shape
-        ch_scale = torch.empty(B, C, 1, 1, device=dev, dtype=ref.dtype).uniform_(0.85, 1.15)
-        ch_shift = torch.empty(B, C, 1, 1, device=dev, dtype=ref.dtype).uniform_(-0.05, 0.05)
+        ch_scale = torch.empty(B, C, 1, 1, device=dev, dtype=ref.dtype).uniform_(0.70, 1.30)
+        ch_shift = torch.empty(B, C, 1, 1, device=dev, dtype=ref.dtype).uniform_(-0.10, 0.10)
         out = out * ch_scale + ch_shift
 
     if torch.rand(1, device=dev) < p_noise:
-        noise_std = torch.empty(1, device=dev, dtype=ref.dtype).uniform_(0.0, 0.04)
+        noise_std = torch.empty(1, device=dev, dtype=ref.dtype).uniform_(0.0, 0.08)
         out = out + torch.randn_like(out) * noise_std
 
     return out.clamp(-1.0, 1.0)
@@ -543,6 +546,14 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         """Low-frequency L1 between two generator outputs."""
         return F.l1_loss(self._sirm_lowpass(fake_orig), self._sirm_lowpass(fake_aug))
 
+    def _sirm_mod_magnitude(self, stats):
+        """Mean absolute gamma/beta magnitude across all StyleConv layers."""
+        total, count = 0.0, 0
+        for v in stats.values():
+            total += v["gamma"].abs().mean() + v["beta"].abs().mean()
+            count += 2
+        return torch.tensor(total / count) if count > 0 else torch.tensor(0.0)
+
     def training_step(self, batch: Any, batch_idx: int):
 
         real_c = real_d = fake_c = fake_d = None
@@ -595,6 +606,15 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 merged_orig = torch.cat([real_a, ref_orig_cat], dim=1)
                 merged_aug = torch.cat([real_a, ref_aug_cat], dim=1)
 
+                # ref_diff / style_diff diagnostics (no grad needed)
+                with torch.no_grad():
+                    style_orig = self.netG_A._aggregate_ref_stack(ref_orig_cat)
+                    style_aug = self.netG_A._aggregate_ref_stack(ref_aug_cat)
+                    ref_diff = (ref_orig_cat - ref_aug_cat).abs().mean()
+                    style_diff = (style_orig - style_aug).abs().mean()
+                self.log("SIRM_ref_diff", ref_diff, prog_bar=True)
+                self.log("SIRM_style_diff", style_diff, prog_bar=True)
+
                 fake_orig_sirm = self.netG_A(merged_orig)
                 mod_orig = self.netG_A.get_mod_stats()
 
@@ -604,6 +624,15 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 detach_target = getattr(self.params, 'sirm_detach_target', True)
                 lambda_mod = float(getattr(self.params, 'lambda_mod_consistency', 0.5))
                 lambda_out = float(getattr(self.params, 'lambda_out_consistency', 0.1))
+
+                # Modulation magnitude diagnostics
+                with torch.no_grad():
+                    mag_orig = self._sirm_mod_magnitude(mod_orig)
+                    mag_aug = self._sirm_mod_magnitude(mod_aug)
+                self.log("SIRM_mod_mag_orig", mag_orig, prog_bar=False)
+                self.log("SIRM_mod_mag_aug", mag_aug, prog_bar=False)
+                rel_mod = (mag_orig - mag_aug).abs() / (mag_orig + 1e-8)
+                self.log("SIRM_rel_mod", rel_mod, prog_bar=True)
 
                 # Raw losses (before weighting)
                 raw_mod = self._sirm_mod_consistency_loss(mod_orig, mod_aug, detach_target)
