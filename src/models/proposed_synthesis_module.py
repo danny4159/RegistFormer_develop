@@ -19,6 +19,54 @@ from src.models.base_module_AtoB import BaseModule_AtoB
 log = utils.get_pylogger(__name__)
 
 gray2rgb = lambda x : torch.cat((x, x, x), dim=1)
+
+
+# ---------------------------------------------------------------------------
+# SIRM (Scanner-Invariant Reference Modulation) helper functions
+# ---------------------------------------------------------------------------
+
+def _gaussian_blur_2d(x):
+    """Simple 3x3 Gaussian blur applied channel-wise. x: [B, C, H, W]."""
+    kernel = torch.tensor(
+        [[1., 2., 1.], [2., 4., 2.], [1., 2., 1.]],
+        device=x.device, dtype=x.dtype
+    )
+    kernel = (kernel / kernel.sum()).view(1, 1, 3, 3).repeat(x.shape[1], 1, 1, 1)
+    return F.conv2d(x, kernel, padding=1, groups=x.shape[1])
+
+
+def scanner_like_aug(ref, p_blur=0.5, p_intensity=0.8, p_banding=0.5, p_noise=0.5):
+    """
+    Apply scanner-like augmentation to a reference image.
+
+    Preserves anatomy while perturbing acquisition-related characteristics
+    (intensity scale/shift, blur, slice banding, noise).
+    Works for both 2D [B,1,H,W] and 2.5D stacks [B,K,H,W].
+    """
+    out = ref.clone()
+    dev = ref.device
+
+    if torch.rand(1, device=dev) < p_intensity:
+        scale = torch.empty(1, device=dev, dtype=ref.dtype).uniform_(0.85, 1.15)
+        shift = torch.empty(1, device=dev, dtype=ref.dtype).uniform_(-0.08, 0.08)
+        out = out * scale + shift
+
+    if torch.rand(1, device=dev) < p_blur:
+        out = _gaussian_blur_2d(out)
+
+    if torch.rand(1, device=dev) < p_banding:
+        B, C, H, W = out.shape
+        ch_scale = torch.empty(B, C, 1, 1, device=dev, dtype=ref.dtype).uniform_(0.85, 1.15)
+        ch_shift = torch.empty(B, C, 1, 1, device=dev, dtype=ref.dtype).uniform_(-0.05, 0.05)
+        out = out * ch_scale + ch_shift
+
+    if torch.rand(1, device=dev) < p_noise:
+        noise_std = torch.empty(1, device=dev, dtype=ref.dtype).uniform_(0.0, 0.04)
+        out = out + torch.randn_like(out) * noise_std
+
+    return out.clamp(-1.0, 1.0)
+
+
 class ProposedSynthesisModule(BaseModule_AtoB):
 
     def __init__(
@@ -462,6 +510,39 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
         return loss_G
 
+    # -------------------------------------------------------------------
+    # SIRM (Scanner-Invariant Reference Modulation) loss helpers
+    # -------------------------------------------------------------------
+
+    def _sirm_lowpass(self, x):
+        return F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
+
+    def _sirm_mod_consistency_loss(self, stats_orig, stats_aug, detach_target=True):
+        """L1 between gamma/beta of original and augmented reference forwards.
+
+        detach_target=True treats the original branch as a fixed teacher so
+        only the augmented branch is pulled toward it (avoids modulation collapse).
+        """
+        loss = torch.tensor(0.0, device=self.device)
+        count = 0
+        for key in stats_orig:
+            if key not in stats_aug:
+                continue
+            g_o = stats_orig[key]["gamma"]
+            b_o = stats_orig[key]["beta"]
+            g_a = stats_aug[key]["gamma"]
+            b_a = stats_aug[key]["beta"]
+            if detach_target:
+                g_o = g_o.detach()
+                b_o = b_o.detach()
+            loss = loss + F.l1_loss(g_a, g_o) + F.l1_loss(b_a, b_o)
+            count += 2
+        return loss / count if count > 0 else loss
+
+    def _sirm_output_consistency_loss(self, fake_orig, fake_aug):
+        """Low-frequency L1 between two generator outputs."""
+        return F.l1_loss(self._sirm_lowpass(fake_orig), self._sirm_lowpass(fake_aug))
+
     def training_step(self, batch: Any, batch_idx: int):
 
         real_c = real_d = fake_c = fake_d = None
@@ -498,6 +579,61 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     loss_G = self.backward_G_3D(real_a, real_b, None, None, fake_b, None, None, None, None, None)
                 else:
                     loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
+
+            # SIRM: scanner-invariant reference modulation consistency
+            if getattr(self.params, 'use_sirm', False) and real_b_ref is not None:
+                # Collect all available refs and aug each independently
+                refs_orig = [real_b_ref]
+                if real_c_ref is not None:
+                    refs_orig.append(real_c_ref)
+                if real_d_ref is not None:
+                    refs_orig.append(real_d_ref)
+                refs_aug = [scanner_like_aug(r) for r in refs_orig]
+
+                ref_orig_cat = torch.cat(refs_orig, dim=1)
+                ref_aug_cat = torch.cat(refs_aug, dim=1)
+                merged_orig = torch.cat([real_a, ref_orig_cat], dim=1)
+                merged_aug = torch.cat([real_a, ref_aug_cat], dim=1)
+
+                fake_orig_sirm = self.netG_A(merged_orig)
+                mod_orig = self.netG_A.get_mod_stats()
+
+                fake_aug_sirm = self.netG_A(merged_aug)
+                mod_aug = self.netG_A.get_mod_stats()
+
+                detach_target = getattr(self.params, 'sirm_detach_target', True)
+                lambda_mod = float(getattr(self.params, 'lambda_mod_consistency', 0.5))
+                lambda_out = float(getattr(self.params, 'lambda_out_consistency', 0.1))
+
+                # Raw losses (before weighting)
+                raw_mod = self._sirm_mod_consistency_loss(mod_orig, mod_aug, detach_target)
+                raw_out = self._sirm_output_consistency_loss(fake_orig_sirm.detach(), fake_aug_sirm)
+
+                # Weighted losses
+                loss_mod = raw_mod * lambda_mod
+                loss_out = raw_out * lambda_out
+
+                loss_G = loss_G + loss_mod + loss_out
+
+                # Logging: raw values for debugging
+                self.log("SIRM_raw_mod", raw_mod.detach(), prog_bar=False)
+                self.log("SIRM_raw_out", raw_out.detach(), prog_bar=False)
+                self.log("SIRM_weighted_mod", loss_mod.detach(), prog_bar=True)
+                self.log("SIRM_weighted_out", loss_out.detach(), prog_bar=True)
+
+                # Loss ratio monitoring
+                base_loss_approx = loss_G - (loss_mod + loss_out)
+                sirm_total = loss_mod + loss_out
+                loss_ratio = sirm_total.detach() / (base_loss_approx.detach().abs() + 1e-8)
+
+                # Debug logging (configurable via debug_sirm_scale)
+                debug_sirm = getattr(self.params, 'debug_sirm_scale', False)
+                if debug_sirm:
+                    self.log("SIRM_Loss_Ratio", loss_ratio, prog_bar=True)
+                    self.log("SIRM_Base_Loss_Approx", base_loss_approx.detach(), prog_bar=False)
+                else:
+                    self.log("SIRM_Loss_Ratio", loss_ratio, prog_bar=False)
+
             self.manual_backward(loss_G)
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
