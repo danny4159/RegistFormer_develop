@@ -554,6 +554,15 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             count += 2
         return torch.tensor(total / count) if count > 0 else torch.tensor(0.0)
 
+    def _sirm_mod_mag_loss(self, stats):
+        """L2 regularization on gamma/beta magnitudes to prevent runaway."""
+        loss = torch.tensor(0.0, device=self.device)
+        count = 0
+        for v in stats.values():
+            loss = loss + v["gamma"].pow(2).mean() + v["beta"].pow(2).mean()
+            count += 2
+        return loss / count if count > 0 else loss
+
     def training_step(self, batch: Any, batch_idx: int):
 
         real_c = real_d = fake_c = fake_d = None
@@ -637,29 +646,48 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 # Raw losses (before weighting)
                 raw_mod = self._sirm_mod_consistency_loss(mod_orig, mod_aug, detach_target)
                 raw_out = self._sirm_output_consistency_loss(fake_orig_sirm.detach(), fake_aug_sirm)
+                raw_mag = self._sirm_mod_mag_loss(mod_aug)
 
-                # Weighted losses
+                # Weighted losses (before ratio guard)
                 loss_mod = raw_mod * lambda_mod
                 loss_out = raw_out * lambda_out
+                lambda_mag = float(getattr(self.params, 'lambda_mod_mag', 1.0e-4))
+                loss_mag = raw_mag * lambda_mag
 
-                loss_G = loss_G + loss_mod + loss_out
+                sirm_total_pre = loss_mod + loss_out
+
+                # SIRM loss ratio guard: prevent runaway by capping SIRM as fraction of base G loss
+                base_loss_pre_sirm = loss_G.detach()
+                sirm_max_ratio = float(getattr(self.params, 'sirm_max_ratio', 0.02))
+                max_sirm_allowed = base_loss_pre_sirm.abs() * sirm_max_ratio
+
+                scale_guard = 1.0
+                if sirm_total_pre.detach() > max_sirm_allowed:
+                    scale_guard = (max_sirm_allowed / (sirm_total_pre.detach() + 1e-8)).clamp(0.0, 1.0)
+
+                loss_mod = loss_mod * scale_guard
+                loss_out = loss_out * scale_guard
+
+                loss_G = loss_G + loss_mod + loss_out + loss_mag
 
                 # Logging: raw values for debugging
                 self.log("SIRM_raw_mod", raw_mod.detach(), prog_bar=False)
                 self.log("SIRM_raw_out", raw_out.detach(), prog_bar=False)
+                self.log("SIRM_raw_mag", raw_mag.detach(), prog_bar=False)
                 self.log("SIRM_weighted_mod", loss_mod.detach(), prog_bar=True)
                 self.log("SIRM_weighted_out", loss_out.detach(), prog_bar=True)
+                self.log("SIRM_weighted_mag", loss_mag.detach(), prog_bar=False)
+                self.log("SIRM_scale_guard", torch.tensor(scale_guard), prog_bar=True)
 
                 # Loss ratio monitoring
-                base_loss_approx = loss_G - (loss_mod + loss_out)
-                sirm_total = loss_mod + loss_out
-                loss_ratio = sirm_total.detach() / (base_loss_approx.detach().abs() + 1e-8)
+                sirm_total = loss_mod + loss_out + loss_mag
+                loss_ratio = sirm_total.detach() / (base_loss_pre_sirm.detach().abs() + 1e-8)
 
                 # Debug logging (configurable via debug_sirm_scale)
                 debug_sirm = getattr(self.params, 'debug_sirm_scale', False)
                 if debug_sirm:
                     self.log("SIRM_Loss_Ratio", loss_ratio, prog_bar=True)
-                    self.log("SIRM_Base_Loss_Approx", base_loss_approx.detach(), prog_bar=False)
+                    self.log("SIRM_Base_Loss_Pre_SIRM", base_loss_pre_sirm.detach(), prog_bar=False)
                 else:
                     self.log("SIRM_Loss_Ratio", loss_ratio, prog_bar=False)
 

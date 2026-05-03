@@ -192,7 +192,10 @@ class ProposedSynthesisModule(nn.Module):
             return ref_all
         chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
         style_maps = [z_agg(chunk) for chunk, z_agg in zip(chunks, self.z_aggs)]
-        return torch.cat(style_maps, dim=1)
+        style = torch.cat(style_maps, dim=1)
+        # Clamp style guidance to prevent scale runaway during SIRM optimization
+        style = torch.clamp(style, -3.0, 3.0)
+        return style
 
     def _build_style_and_conf(self, ref_all):
         """Returns (style, conf). conf is None when gating is inactive.

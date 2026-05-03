@@ -105,8 +105,10 @@ params: # Other params
   conf_min_mean: 0.5         # 위 lambda_conf_mean 사용 시 conf 평균 하한선
   # SIRM: Scanner-Invariant Reference Modulation consistency
   # false (default) -> 기존 동작과 완전히 동일.
-  use_sirm: false
-  lambda_mod_consistency: 0.5   # modulation (gamma/beta) consistency loss weight
-  lambda_out_consistency: 0.1   # low-frequency output consistency loss weight
+  use_sirm: true
+  lambda_mod_consistency: 5.0   # modulation (gamma/beta) consistency loss weight (reduced from 50 to prevent runaway)
+  lambda_out_consistency: 1.0   # low-frequency output consistency loss weight (reduced from 2.0)
+  lambda_mod_mag: 1.0e-4        # gamma/beta magnitude regularization (prevent scale explosion)
   sirm_detach_target: true      # true: original branch as teacher (recommended)
-  debug_sirm_scale: false       # true: log SIRM_Loss_Ratio in console (prog_bar)
+  sirm_max_ratio: 0.02          # max SIRM loss as fraction of base G loss (guard against runaway)
+  debug_sirm_scale: true        # true: log SIRM_Loss_Ratio in console (prog_bar)
