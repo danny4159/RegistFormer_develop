@@ -103,3 +103,8 @@ params: # Other params
   lambda_conf_smooth: 0.0    # TV smoothness on conf map. 추천 시작값: 1.0e-4
   lambda_conf_mean: 0.0      # collapse 방지 (conf가 0으로 가는 걸 막음). 추천 시작값: 1.0e-3
   conf_min_mean: 0.5         # 위 lambda_conf_mean 사용 시 conf 평균 하한선
+  # Source-side Consistency v1 (single-output + 2.5D only)
+  use_source_consistency: false
+  lambda_source_consistency: 0.5
+  source_cons_warmup_steps: 3000
+  source_cons_max_ratio: 0.02

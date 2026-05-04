@@ -573,37 +573,52 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
 
             # ============================================================
-            # Source-side Consistency v1 (single-output / 2.5D compatible)
+            # Source-side Consistency v1 (single-output / 2.5D only)
             # ============================================================
-            if not self.params.is_3d and real_b_ref is not None:
-                # 1) Teacher = clean output (detached)
+            if (
+                getattr(self.params, "use_source_consistency", False)
+                and not self.params.is_3d
+                and real_b_ref is not None
+                and not self.params.use_multiple_outputs
+                and not self.params.use_triple_outputs
+            ):
+                # 1) Teacher = clean output
                 fake_teacher = fake_b.detach()
 
                 # 2) Augmented source
                 real_a_aug = self.source_like_aug(real_a)
 
+                # Optional diagnostic: track augmentation strength
+                src_aug_diff = (real_a - real_a_aug).abs().mean()
+                self.log("Source_aug_diff", src_aug_diff.detach(), prog_bar=True)
+
                 # 3) Forward with augmented source
                 merged_aug = torch.cat((real_a_aug, real_b_ref), dim=1)
                 fake_src_aug = self.netG_A(merged_aug)
 
-                # 4) Raw consistency loss (lowpass)
-                raw_src_cons = self._source_output_consistency_loss(fake_teacher, fake_src_aug)
+                # 4) Raw consistency loss
+                raw_src_cons = self._source_output_consistency_loss(
+                    fake_teacher,
+                    fake_src_aug
+                )
 
-                # 5) Warm-up weight
+                # 5) Warm-up weight from config
                 lambda_src = self._get_source_consistency_weight(
-                    max_weight=0.5,
-                    warmup_steps=3000
+                    max_weight=float(getattr(self.params, "lambda_source_consistency", 0.5)),
+                    warmup_steps=int(getattr(self.params, "source_cons_warmup_steps", 3000))
                 )
 
                 loss_src_cons = raw_src_cons * lambda_src
 
-                # 6) Ratio guard (cap at 2% of base loss)
-                max_ratio = 0.02
-                max_allowed = loss_G.detach().abs() * max_ratio
+                # 6) Ratio guard
+                base_loss_pre_src = loss_G.detach()
+                max_ratio = float(getattr(self.params, "source_cons_max_ratio", 0.02))
+                max_allowed = base_loss_pre_src.abs() * max_ratio
 
+                scale_guard = torch.tensor(1.0, device=real_a.device)
                 if loss_src_cons.detach() > max_allowed:
-                    scale = max_allowed / (loss_src_cons.detach() + 1e-8)
-                    loss_src_cons = loss_src_cons * scale
+                    scale_guard = max_allowed / (loss_src_cons.detach() + 1e-8)
+                    loss_src_cons = loss_src_cons * scale_guard
 
                 # 7) Add to total loss
                 loss_G = loss_G + loss_src_cons
@@ -611,9 +626,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 # 8) Logging
                 self.log("Source_raw_cons", raw_src_cons.detach(), prog_bar=False)
                 self.log("Source_weighted_cons", loss_src_cons.detach(), prog_bar=True)
+                self.log("Source_scale_guard", scale_guard.detach(), prog_bar=True)
                 self.log(
                     "Source_Loss_Ratio",
-                    loss_src_cons.detach() / (loss_G.detach().abs() + 1e-8),
+                    loss_src_cons.detach() / (base_loss_pre_src.abs() + 1e-8),
                     prog_bar=True
                 )
 
