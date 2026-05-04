@@ -548,11 +548,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
     def _sirm_mod_magnitude(self, stats):
         """Mean absolute gamma/beta magnitude across all StyleConv layers."""
-        total, count = 0.0, 0
+        total = torch.tensor(0.0, device=self.device)
+        count = 0
         for v in stats.values():
-            total += v["gamma"].abs().mean() + v["beta"].abs().mean()
+            total = total + v["gamma"].abs().mean() + v["beta"].abs().mean()
             count += 2
-        return torch.tensor(total / count) if count > 0 else torch.tensor(0.0)
+        return total / count if count > 0 else total
 
     def _sirm_mod_mag_loss(self, stats):
         """L2 regularization on gamma/beta magnitudes to prevent runaway."""

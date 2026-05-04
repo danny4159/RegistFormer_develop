@@ -107,7 +107,7 @@ params: # Other params
   # false (default) -> 기존 동작과 완전히 동일.
   use_sirm: true
   lambda_mod_consistency: 5.0   # modulation (gamma/beta) consistency loss weight (reduced from 50 to prevent runaway)
-  lambda_out_consistency: 1.0   # low-frequency output consistency loss weight (reduced from 2.0)
+  lambda_out_consistency: 0.0   # output consistency (disabled: was causing smoothing / sharpness drop)
   lambda_mod_mag: 1.0e-4        # gamma/beta magnitude regularization (prevent scale explosion)
   sirm_detach_target: true      # true: original branch as teacher (recommended)
   sirm_max_ratio: 0.02          # max SIRM loss as fraction of base G loss (guard against runaway)
