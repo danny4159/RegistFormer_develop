@@ -192,10 +192,7 @@ class ProposedSynthesisModule(nn.Module):
             return ref_all
         chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
         style_maps = [z_agg(chunk) for chunk, z_agg in zip(chunks, self.z_aggs)]
-        style = torch.cat(style_maps, dim=1)
-        # Clamp style guidance to prevent scale runaway during SIRM optimization
-        style = torch.clamp(style, -3.0, 3.0)
-        return style
+        return torch.cat(style_maps, dim=1)
 
     def _build_style_and_conf(self, ref_all):
         """Returns (style, conf). conf is None when gating is inactive.
@@ -330,24 +327,6 @@ class ProposedSynthesisModule(nn.Module):
 
         return out
 
-    def get_mod_stats(self):
-        """Collect last_gamma/last_beta from all StyleConv layers (SIRM use)."""
-        conv_names = [
-            "conv0", "conv11", "conv12",
-            "conv21", "conv22", "conv31", "conv32",
-            "conv41", "conv42", "conv51", "conv52", "conv6",
-            "conv7_1", "conv7_2", "conv7_3",
-            "conv8_1", "conv8_2", "conv8_3",
-        ]
-        stats = {}
-        for name in conv_names:
-            layer = getattr(self, name, None)
-            if layer is None:
-                continue
-            if layer.last_gamma is not None and layer.last_beta is not None:
-                stats[name] = {"gamma": layer.last_gamma, "beta": layer.last_beta}
-        return stats
-
 
 class StyleConv(nn.Module):
     def __init__(self,
@@ -468,10 +447,6 @@ class StyleConv(nn.Module):
                         nn.init.zeros_(layer.bias)
 
         self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
-        # SIRM: cached modulation stats from the most recent forward pass
-        self.last_gamma = None
-        self.last_beta = None
-
         self.randomize_noise = True
         # noise_independent=True: chunk별로 개별 noise_strength (독립적)
         # noise_independent=False: 기존처럼 하나의 noise_strength (cat된 상태에서 noise 주입)
@@ -597,10 +572,6 @@ class StyleConv(nn.Module):
                 beta_3 = self.mlp_beta_3(actv_3)
                 gamma = torch.cat((gamma, gamma_2, gamma_3), dim=1)  # B, feat_ch, f_H, f_W
                 beta = torch.cat((beta, beta_2, beta_3), dim=1)
-
-            # SIRM: cache modulation params for consistency loss
-            self.last_gamma = gamma
-            self.last_beta = beta
 
             # 3. 거기서 감마 베타 나눠서 denorm
             if conf is None:
