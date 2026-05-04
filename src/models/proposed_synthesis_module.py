@@ -83,6 +83,76 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # self.nce_layers = [0,2,4,6] # range: 0~6
         # self.flip_equivariance = params.flip_equivariance
 
+    # ========== Source-side Consistency v1 ==========
+    def _rand_uniform_scalar(self, ref, low, high):
+        """Sample a random scalar uniformly in [low, high]."""
+        return torch.empty(1, device=ref.device, dtype=ref.dtype).uniform_(low, high)
+
+    def _gaussian_blur_2d(self, x):
+        """Apply Gaussian blur kernel (3x3) to input."""
+        kernel = torch.tensor(
+            [[1., 2., 1.],
+             [2., 4., 2.],
+             [1., 2., 1.]],
+            device=x.device,
+            dtype=x.dtype
+        )
+        kernel = kernel / kernel.sum()
+        kernel = kernel.view(1, 1, 3, 3)
+        kernel = kernel.repeat(x.shape[1], 1, 1, 1)
+        return F.conv2d(x, kernel, padding=1, groups=x.shape[1])
+
+    def _random_bias_field_2d(self, x, strength=0.15, grid_size=4):
+        """Apply smooth multiplicative bias field (scanner-like quality variation)."""
+        B, C, H, W = x.shape
+        lowres = torch.randn(B, 1, grid_size, grid_size, device=x.device, dtype=x.dtype) * strength
+        field = F.interpolate(lowres, size=(H, W), mode='bicubic', align_corners=False)
+        field = torch.exp(field).clamp(0.7, 1.3)
+        return x * field
+
+    def source_like_aug(self, src, p_intensity=0.8, p_bias=0.7, p_blur=0.5, p_noise=0.5):
+        """Scanner-like quality augmentation on source (geometry-preserving).
+        Only modulates intensity, bias field, blur, and noise. NO geometric transforms.
+        src: [B, 1, H, W]
+        """
+        out = src.clone()
+
+        # 1) Global intensity scale + shift
+        if torch.rand(1, device=src.device) < p_intensity:
+            scale = self._rand_uniform_scalar(src, 0.90, 1.10)
+            shift = self._rand_uniform_scalar(src, -0.05, 0.05)
+            out = out * scale + shift
+
+        # 2) Smooth bias field (multiplicative)
+        if torch.rand(1, device=src.device) < p_bias:
+            strength = float(self._rand_uniform_scalar(src, 0.05, 0.20))
+            out = self._random_bias_field_2d(out, strength=strength, grid_size=4)
+
+        # 3) Mild Gaussian blur
+        if torch.rand(1, device=src.device) < p_blur:
+            out = self._gaussian_blur_2d(out)
+
+        # 4) Mild Gaussian noise
+        if torch.rand(1, device=src.device) < p_noise:
+            noise_std = self._rand_uniform_scalar(src, 0.0, 0.03)
+            out = out + torch.randn_like(out) * noise_std
+
+        return out.clamp(-1.0, 1.0)
+
+    def _lowpass(self, x):
+        """Apply low-pass filter (3x3 average pooling)."""
+        return F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
+
+    def _source_output_consistency_loss(self, fake_teacher, fake_student):
+        """L1 loss on low-frequency components (v1: lowpass only)."""
+        return F.l1_loss(self._lowpass(fake_teacher), self._lowpass(fake_student))
+
+    def _get_source_consistency_weight(self, max_weight, warmup_steps=3000):
+        """Warm-up schedule for source consistency loss."""
+        if self.global_step < warmup_steps:
+            return 0.0
+        return max_weight
+
     @staticmethod
     def _conf_tv_loss(x):
         """Total-variation smoothness over the confidence map. x: [B,C,H,W]."""
@@ -501,6 +571,51 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     loss_G = self.backward_G_3D(real_a, real_b, None, None, fake_b, None, None, None, None, None)
                 else:
                     loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
+
+            # ============================================================
+            # Source-side Consistency v1 (single-output / 2.5D compatible)
+            # ============================================================
+            if not self.params.is_3d and real_b_ref is not None:
+                # 1) Teacher = clean output (detached)
+                fake_teacher = fake_b.detach()
+
+                # 2) Augmented source
+                real_a_aug = self.source_like_aug(real_a)
+
+                # 3) Forward with augmented source
+                merged_aug = torch.cat((real_a_aug, real_b_ref), dim=1)
+                fake_src_aug = self.netG_A(merged_aug)
+
+                # 4) Raw consistency loss (lowpass)
+                raw_src_cons = self._source_output_consistency_loss(fake_teacher, fake_src_aug)
+
+                # 5) Warm-up weight
+                lambda_src = self._get_source_consistency_weight(
+                    max_weight=0.5,
+                    warmup_steps=3000
+                )
+
+                loss_src_cons = raw_src_cons * lambda_src
+
+                # 6) Ratio guard (cap at 2% of base loss)
+                max_ratio = 0.02
+                max_allowed = loss_G.detach().abs() * max_ratio
+
+                if loss_src_cons.detach() > max_allowed:
+                    scale = max_allowed / (loss_src_cons.detach() + 1e-8)
+                    loss_src_cons = loss_src_cons * scale
+
+                # 7) Add to total loss
+                loss_G = loss_G + loss_src_cons
+
+                # 8) Logging
+                self.log("Source_raw_cons", raw_src_cons.detach(), prog_bar=False)
+                self.log("Source_weighted_cons", loss_src_cons.detach(), prog_bar=True)
+                self.log(
+                    "Source_Loss_Ratio",
+                    loss_src_cons.detach() / (loss_G.detach().abs() + 1e-8),
+                    prog_bar=True
+                )
 
             self.manual_backward(loss_G)
             self.clip_gradients(
