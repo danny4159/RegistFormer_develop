@@ -1,0 +1,38 @@
+##### Dataset Processing Code Implementation #####
+_target_: src.data.SynthRAD_MR_CT_Pelvis_datamodule.SynthRAD_MR_CT_Pelvis_DataModule
+
+name: SynthRAD_CBCT_CT_Brain_Sag25D
+type: nifti
+data_dir: ${paths.root_dir}/data/SynthRAD_CBCT_CT_Brain
+data_group_1: "CBCT"
+data_group_2: "CT"
+data_group_3: "CBCT"
+data_group_4: null
+data_group_5: null
+data_group_6: null
+data_group_7: null
+is_3d: False
+batch_size: 4
+num_workers: 6
+pin_memory: False
+use_split_inference: False
+eval_on_align: True
+use_sliding_inference: False
+use_multiple_outputs: False
+use_misalign_simul: False
+
+train_file: "preprocessed_data_NoPercentClip_final2.h5"
+val_file: "preprocessed_data_NoPercentClip_final2_onlyOne.h5"
+test_file: "preprocessed_data_NoPercentClip_final2.h5"
+
+reverse: False
+flip_prob: 0.0
+rot_prob: 0.0
+padding_size: [224, 224]
+crop_size: null
+norm_ZeroToOne: False
+use_25d_style: True
+ref_stack_size: 3
+slice_axis: 0
+apply_rigid_registration: False
+registration_targets: null

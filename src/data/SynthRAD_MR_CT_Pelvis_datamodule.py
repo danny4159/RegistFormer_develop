@@ -40,6 +40,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         norm_ZeroToOne: bool = False,
         use_25d_style: bool = False,
         ref_stack_size: int = 3,
+        slice_axis: int = 2,
         apply_rigid_registration: bool = False,
         registration_targets: list = None,
         **kwargs: Any
@@ -74,6 +75,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         self.norm_ZeroToOne = norm_ZeroToOne
         self.use_25d_style = use_25d_style
         self.ref_stack_size = ref_stack_size
+        self.slice_axis = slice_axis
         self.apply_rigid_registration = apply_rigid_registration
         self.registration_targets = registration_targets
 
@@ -104,6 +106,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             norm_ZeroToOne=self.norm_ZeroToOne,
             use_25d_style=self.use_25d_style,
             ref_stack_size=self.ref_stack_size,
+            slice_axis=self.slice_axis,
             apply_rigid_registration=self.apply_rigid_registration,
             registration_targets=self.registration_targets,
         )  # Use flip and crop augmentation for training data
@@ -117,7 +120,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             data_group_6=self.data_group_6,
             data_group_7=self.data_group_7,
             is_3d=self.is_3d,
-            # padding_size=self.padding_size,
+            padding_size=self.padding_size,
             # flip_prob=0.0,
             # rot_prob=0.0,
             # crop_size=self.crop_size,
@@ -125,6 +128,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             norm_ZeroToOne=self.norm_ZeroToOne,
             use_25d_style=self.use_25d_style,
             ref_stack_size=self.ref_stack_size,
+            slice_axis=self.slice_axis,
             apply_rigid_registration=self.apply_rigid_registration,
             registration_targets=self.registration_targets,
         )
@@ -138,7 +142,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             data_group_6=self.data_group_6,
             data_group_7=self.data_group_7,
             is_3d=self.is_3d,
-            # padding_size=self.padding_size,
+            padding_size=self.padding_size,
             # flip_prob=0.0,
             # rot_prob=0.0,
             # crop_size=self.crop_size,
@@ -146,6 +150,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             norm_ZeroToOne=self.norm_ZeroToOne,
             use_25d_style=self.use_25d_style,
             ref_stack_size=self.ref_stack_size,
+            slice_axis=self.slice_axis,
             apply_rigid_registration=self.apply_rigid_registration,
             registration_targets=self.registration_targets,
         )

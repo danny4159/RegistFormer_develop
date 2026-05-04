@@ -1,0 +1,41 @@
+_target_: src.models.unetplusplus_synthesis_module.UnetPlusPlusSynthesisModule
+
+name: UnetPlusPlus_sCT
+
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 0.0002
+  weight_decay: 0.00001
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.MultiStepLR
+  _partial_: true
+  milestones: [100, 150]
+  gamma: 0.5
+
+netG_A:
+  _target_: segmentation_models_pytorch.UnetPlusPlus
+  encoder_name: resnext101_32x8d
+  encoder_weights: null
+  in_channels: 3
+  classes: 1
+  activation: null
+
+params:
+  lambda_mae: 1.0
+  lambda_perc: 0.01
+  perceptual_layers: [4, 9, 18]
+  mask_threshold: -0.95
+  norm_ZeroToOne: ${data.norm_ZeroToOne}
+  reverse: ${data.reverse}
+  batch_size: ${data.batch_size}
+  eval_on_align: ${data.eval_on_align}
+  use_sliding_inference: ${data.use_sliding_inference}
+  use_multiple_outputs: false
+  use_misalign_simul: false
+  use_25d_style: ${data.use_25d_style}
+  ref_stack_size: ${data.ref_stack_size}
+  is_3d: false
+  crop_size: ${data.crop_size}
+  is_registration: false

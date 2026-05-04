@@ -214,6 +214,19 @@ def even_crop_height_width(
 
 log = utils.get_pylogger(__name__)
 
+
+def _normalize_slice_axis(slice_axis):
+    if isinstance(slice_axis, str):
+        slice_axis = slice_axis.lower()
+        axis_map = {"sagittal": 0, "coronal": 1, "axial": 2}
+        if slice_axis not in axis_map:
+            raise ValueError(f"Unsupported slice_axis: {slice_axis}")
+        return axis_map[slice_axis]
+
+    if slice_axis not in (0, 1, 2):
+        raise ValueError(f"slice_axis must be 0, 1, or 2, got {slice_axis}")
+    return slice_axis
+
 class dataset_SynthRAD(Dataset):
     def __init__(
         self,
@@ -234,6 +247,7 @@ class dataset_SynthRAD(Dataset):
         norm_ZeroToOne: bool = False,
         use_25d_style: bool = False,
         ref_stack_size: int = 3,
+        slice_axis: int = 2,
         apply_rigid_registration: bool = False,
         registration_targets: list = None,
         *args,
@@ -255,6 +269,7 @@ class dataset_SynthRAD(Dataset):
         self.norm_ZeroToOne = norm_ZeroToOne
         self.use_25d_style = use_25d_style
         self.ref_stack_size = ref_stack_size
+        self.slice_axis = _normalize_slice_axis(slice_axis)
         self.apply_rigid_registration = apply_rigid_registration
         self.registration_targets = registration_targets or []
 
@@ -286,7 +301,7 @@ class dataset_SynthRAD(Dataset):
         else:
             with h5py.File(self.data_dir, "r") as file:
                 self.patient_keys = list(file[self.data_group_1].keys())
-                self.slice_counts = [file[self.data_group_1][key].shape[-1] for key in self.patient_keys]
+                self.slice_counts = [file[self.data_group_1][key].shape[self.slice_axis] for key in self.patient_keys]
                 self.cumulative_slice_counts = np.cumsum([0] + self.slice_counts)
 
             self.aug_func = Compose(
@@ -324,24 +339,27 @@ class dataset_SynthRAD(Dataset):
                             self.reg_cache[patient_key][cache_key] = _register_3d_rigid(fixed_vol, moving_vol)
                 log.info("[RigidReg] Done.")
 
+    def _extract_slice(self, volume, slice_idx):
+        return np.take(volume, indices=slice_idx, axis=self.slice_axis)
+
     def _load_slice_stack(self, file, group, patient_key, slice_idx):
         """Load K neighboring slices centered at slice_idx; repeat at volume boundaries."""
-        total = file[group][patient_key].shape[-1]
+        total = file[group][patient_key].shape[self.slice_axis]
         N = self.ref_stack_size // 2
         slices = []
         for k in range(-N, N + 1):
             s = min(max(slice_idx + k, 0), total - 1)
-            slices.append(file[group][patient_key][..., s])
+            slices.append(self._extract_slice(file[group][patient_key][...], s))
         return np.stack(slices, axis=0)  # [K, H, W]
 
     def _load_slice_stack_from_vol(self, vol, slice_idx):
         """Load K neighboring slices from a cached (H, W, D) volume."""
-        total = vol.shape[-1]
+        total = vol.shape[self.slice_axis]
         N = self.ref_stack_size // 2
         slices = []
         for k in range(-N, N + 1):
             s = min(max(slice_idx + k, 0), total - 1)
-            slices.append(vol[..., s])
+            slices.append(self._extract_slice(vol, s))
         return np.stack(slices, axis=0)  # [K, H, W]
 
     def __len__(self):
@@ -372,40 +390,42 @@ class dataset_SynthRAD(Dataset):
             slice_idx = idx - self.cumulative_slice_counts[patient_idx]
             patient_key = self.patient_keys[patient_idx]
             with h5py.File(self.data_dir, "r") as file:
-                A = file[self.data_group_1][patient_key][..., slice_idx]
-                B = file[self.data_group_2][patient_key][..., slice_idx]
+                vol_A = file[self.data_group_1][patient_key][...]
+                vol_B = file[self.data_group_2][patient_key][...]
+                A = self._extract_slice(vol_A, slice_idx)
+                B = self._extract_slice(vol_B, slice_idx)
                 if self.data_group_3:
                     if self.apply_rigid_registration:
                         vol_C = self.reg_cache[patient_key]['C']
-                        C = self._load_slice_stack_from_vol(vol_C, slice_idx) if self.use_25d_style else vol_C[..., slice_idx]
+                        C = self._load_slice_stack_from_vol(vol_C, slice_idx) if self.use_25d_style else self._extract_slice(vol_C, slice_idx)
                     elif self.use_25d_style:
                         C = self._load_slice_stack(file, self.data_group_3, patient_key, slice_idx)
                     else:
-                        C = file[self.data_group_3][patient_key][..., slice_idx]
+                        C = self._extract_slice(file[self.data_group_3][patient_key][...], slice_idx)
                 if self.data_group_4:
                     # group_4 is GT (even) → always single slice
-                    D = file[self.data_group_4][patient_key][..., slice_idx]
+                    D = self._extract_slice(file[self.data_group_4][patient_key][...], slice_idx)
                 if self.data_group_5:
                     # group_5 is moved ref (odd) → K-stack when use_25d_style
                     if self.apply_rigid_registration:
                         vol_E = self.reg_cache[patient_key]['E']
-                        E = self._load_slice_stack_from_vol(vol_E, slice_idx) if self.use_25d_style else vol_E[..., slice_idx]
+                        E = self._load_slice_stack_from_vol(vol_E, slice_idx) if self.use_25d_style else self._extract_slice(vol_E, slice_idx)
                     elif self.use_25d_style:
                         E = self._load_slice_stack(file, self.data_group_5, patient_key, slice_idx)
                     else:
-                        E = file[self.data_group_5][patient_key][..., slice_idx]
+                        E = self._extract_slice(file[self.data_group_5][patient_key][...], slice_idx)
                 if self.data_group_6:
                     # group_6 is GT (even) → always single slice
-                    F = file[self.data_group_6][patient_key][..., slice_idx]
+                    F = self._extract_slice(file[self.data_group_6][patient_key][...], slice_idx)
                 if self.data_group_7:
                     # group_7 is moved ref (odd) → K-stack when use_25d_style
                     if self.apply_rigid_registration:
                         vol_G = self.reg_cache[patient_key]['G']
-                        G = self._load_slice_stack_from_vol(vol_G, slice_idx) if self.use_25d_style else vol_G[..., slice_idx]
+                        G = self._load_slice_stack_from_vol(vol_G, slice_idx) if self.use_25d_style else self._extract_slice(vol_G, slice_idx)
                     elif self.use_25d_style:
                         G = self._load_slice_stack(file, self.data_group_7, patient_key, slice_idx)
                     else:
-                        G = file[self.data_group_7][patient_key][..., slice_idx]
+                        G = self._extract_slice(file[self.data_group_7][patient_key][...], slice_idx)
 
         A = torch.from_numpy(A).unsqueeze(0).float()
         B = torch.from_numpy(B).unsqueeze(0).float()
