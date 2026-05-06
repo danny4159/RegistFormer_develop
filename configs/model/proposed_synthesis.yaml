@@ -92,9 +92,12 @@ params: # Other params
   # lambda_cycle_a: 1
   # lambda_cycle_b: 1
   # lambda_sc: 0.1
-  lambda_nce: 5
+  lambda_nce: 3
   lambda_mind: 0
   lambda_l1: 0
+  lambda_gt_low: 0.5        # weak aligned-GT low-frequency intensity anchor
+  lambda_gt_grad: 0.1       # weak aligned-GT finite-difference edge anchor
+  gt_low_kernel: 5
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False

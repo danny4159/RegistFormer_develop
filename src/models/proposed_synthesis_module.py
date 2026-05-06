@@ -91,6 +91,46 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         return loss_h + loss_w
 
     @staticmethod
+    def _lowpass_2d(x, kernel_size=5):
+        """Average-pool low-pass filter for weak aligned-GT intensity anchoring."""
+        if kernel_size <= 1:
+            return x
+        pad = kernel_size // 2
+        x_pad = F.pad(x, (pad, pad, pad, pad), mode="replicate")
+        return F.avg_pool2d(x_pad, kernel_size=kernel_size, stride=1)
+
+    @staticmethod
+    def _gradient_2d(x):
+        """Forward finite-difference gradients."""
+        gx = x[:, :, :, 1:] - x[:, :, :, :-1]
+        gy = x[:, :, 1:, :] - x[:, :, :-1, :]
+        return gx, gy
+
+    def _gradient_l1_loss(self, pred, target):
+        pred_gx, pred_gy = self._gradient_2d(pred)
+        target_gx, target_gy = self._gradient_2d(target)
+        return F.l1_loss(pred_gx, target_gx) + F.l1_loss(pred_gy, target_gy)
+
+    def _aligned_gt_aux_loss(self, fake, real, suffix, lambda_gt_low, lambda_gt_grad, gt_low_kernel):
+        """Weak aligned-GT anchor for low-frequency intensity and edge preservation."""
+        loss = torch.tensor(0.0, device=fake.device)
+
+        if lambda_gt_low > 0:
+            loss_gt_low = F.l1_loss(
+                self._lowpass_2d(fake, kernel_size=gt_low_kernel),
+                self._lowpass_2d(real, kernel_size=gt_low_kernel),
+            ) * lambda_gt_low
+            self.log(f"GTLow_{suffix}_Loss", loss_gt_low.detach(), prog_bar=(suffix == "b"))
+            loss = loss + loss_gt_low
+
+        if lambda_gt_grad > 0:
+            loss_gt_grad = self._gradient_l1_loss(fake, real) * lambda_gt_grad
+            self.log(f"GTGrad_{suffix}_Loss", loss_gt_grad.detach(), prog_bar=(suffix == "b"))
+            loss = loss + loss_gt_grad
+
+        return loss
+
+    @staticmethod
     def _softmin_contextual(cx_list, shift_penalties=None, tau=0.3):
         """Soft-min over a list of contextual losses (center-biased)."""
         losses = torch.stack(cx_list)
@@ -217,6 +257,28 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                         loss_style_d = self.criterionContextual(eff_d, fake_d) * self.params.lambda_style
                     self.log("Context_d_Loss", loss_style_d.detach(), prog_bar=True)
                     loss_G += loss_style_d.squeeze()
+
+        ##################################################################################################################
+        ## 2.5. Aligned-GT auxiliary losses for texture / edge preservation
+        lambda_gt_low = float(getattr(self.params, "lambda_gt_low", 0.0) or 0.0)
+        lambda_gt_grad = float(getattr(self.params, "lambda_gt_grad", 0.0) or 0.0)
+        gt_low_kernel = int(getattr(self.params, "gt_low_kernel", 5))
+
+        if lambda_gt_low > 0 or lambda_gt_grad > 0:
+            if fake_b is not None and real_b is not None:
+                loss_G += self._aligned_gt_aux_loss(
+                    fake_b, real_b, "b", lambda_gt_low, lambda_gt_grad, gt_low_kernel
+                )
+
+            if (self.params.use_multiple_outputs or self.params.use_triple_outputs) and fake_c is not None and real_c is not None:
+                loss_G += self._aligned_gt_aux_loss(
+                    fake_c, real_c, "c", lambda_gt_low, lambda_gt_grad, gt_low_kernel
+                )
+
+            if self.params.use_triple_outputs and fake_d is not None and real_d is not None:
+                loss_G += self._aligned_gt_aux_loss(
+                    fake_d, real_d, "d", lambda_gt_low, lambda_gt_grad, gt_low_kernel
+                )
 
         ##################################################################################################################
         ## 3. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
