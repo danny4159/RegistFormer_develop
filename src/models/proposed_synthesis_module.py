@@ -427,6 +427,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 ent = -(local_w * torch.log(local_w)).sum(dim=(1, 2)).mean()
                 self.log("local_attn_entropy", ent, prog_bar=False)
 
+        if getattr(self.netG_A, "use_local_ref_attn", False) and hasattr(self.netG_A, "local_ref_blend_logits"):
+            with torch.no_grad():
+                alpha_vals = torch.sigmoid(self.netG_A.local_ref_blend_logits.detach())
+                for i, alpha in enumerate(alpha_vals):
+                    self.log(f"local_ref_alpha_{i}", alpha, prog_bar=(i == 0))
+
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
         # assert not torch.isnan(loss_G).any(), "Total Loss is NaN"

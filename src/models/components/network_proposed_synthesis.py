@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,6 +22,7 @@ class SourceAnchoredLocal2DAttentionAggregator(nn.Module):
         z_weights:     [B, K, H, W]
         local_weights: [B, K, R*R, H, W]
         disp: dict with expected dz/dx/dy maps
+        aligned_ref:   [B, 1, H, W]
     """
 
     def __init__(
@@ -150,7 +153,7 @@ class SourceAnchoredLocal2DAttentionAggregator(nn.Module):
             "exp_dx": exp_dx,
             "exp_dy": exp_dy,
         }
-        return style_map, z_weights, local_weights, disp
+        return style_map, z_weights, local_weights, disp, aligned_ref
 
 
 class ProposedSynthesisModule(nn.Module):
@@ -177,6 +180,9 @@ class ProposedSynthesisModule(nn.Module):
             self.local_attn_center_bias_z = kwargs.get('local_attn_center_bias_z', 0.05)
             self.local_attn_center_bias_xy = kwargs.get('local_attn_center_bias_xy', 0.02)
             self.local_attn_post_conv = kwargs.get('local_attn_post_conv', False)
+            self.local_ref_blend_mode = kwargs.get('local_ref_blend_mode', 'zagg')
+            self.local_ref_blend_alpha_init = kwargs.get('local_ref_blend_alpha_init', 0.1)
+            self.local_ref_blend_learnable = kwargs.get('local_ref_blend_learnable', True)
             # Confidence gating (opt-in). When True, build a confidence branch
             # that gates StyleConv modulation residually. Disabled in 3D path.
             self.use_confidence_gating = kwargs.get('use_confidence_gating', False)
@@ -209,6 +215,8 @@ class ProposedSynthesisModule(nn.Module):
             raise NotImplementedError(
                 "use_z_attn_agg is not implemented in this branch. Use use_local_ref_attn or vanilla z aggregation."
             )
+        if self.use_local_ref_attn and self.local_ref_blend_mode not in ("zagg", "center"):
+            raise ValueError(f"Unknown local_ref_blend_mode: {self.local_ref_blend_mode}")
 
         Conv, _, _ = get_layer_by_dim(self.is_3d)
 
@@ -223,9 +231,33 @@ class ProposedSynthesisModule(nn.Module):
             ch = 1
             self.num_style_streams = 1
 
+        if self.use_local_ref_attn:
+            init_logit = self._safe_logit(self.local_ref_blend_alpha_init)
+            blend_logits = torch.full((self.num_style_streams,), init_logit)
+            if self.local_ref_blend_learnable:
+                self.local_ref_blend_logits = nn.Parameter(blend_logits)
+            else:
+                self.register_buffer("local_ref_blend_logits", blend_logits)
+
         # 2.5D: compress ref stack [B, K, H, W] -> [B, 1, H, W] per style stream
         if self.use_25d_style:
             hidden = max(8, self.feat_ch // 8)
+
+            def _make_vanilla_z_agg():
+                if self.z_agg_deep:
+                    return nn.Sequential(
+                        nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
+                        nn.LeakyReLU(0.2, inplace=True),
+                        nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+                        nn.LeakyReLU(0.2, inplace=True),
+                        nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
+                    )
+                return nn.Sequential(
+                    nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
+                )
+
             if self.use_local_ref_attn:
                 self.z_aggs = nn.ModuleList([
                     SourceAnchoredLocal2DAttentionAggregator(
@@ -239,24 +271,15 @@ class ProposedSynthesisModule(nn.Module):
                     )
                     for _ in range(self.num_style_streams)
                 ])
+                self.vanilla_z_aggs = nn.ModuleList([
+                    _make_vanilla_z_agg()
+                    for _ in range(self.num_style_streams)
+                ])
             else:
-                if self.z_agg_deep:
-                    def _make_z_agg():
-                        return nn.Sequential(
-                            nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
-                            nn.LeakyReLU(0.2, inplace=True),
-                            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
-                            nn.LeakyReLU(0.2, inplace=True),
-                            nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
-                        )
-                else:
-                    def _make_z_agg():
-                        return nn.Sequential(
-                            nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
-                            nn.LeakyReLU(0.2, inplace=True),
-                            nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
-                        )
-                self.z_aggs = nn.ModuleList([_make_z_agg() for _ in range(self.num_style_streams)])
+                self.z_aggs = nn.ModuleList([
+                    _make_vanilla_z_agg()
+                    for _ in range(self.num_style_streams)
+                ])
 
         # Confidence head(s). Built only when gating is active.
         # 2.5D: per-stream head consumes K-channel ref stack -> 1ch logit.
@@ -373,6 +396,11 @@ class ProposedSynthesisModule(nn.Module):
         #     self.conv_final = nn.Conv2d(self.feat_ch * ch // 4, self.output_nc, kernel_size=3, padding=1)
         self.conv_final = Conv(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
 
+    @staticmethod
+    def _safe_logit(p):
+        p = max(min(float(p), 1.0 - 1e-4), 1e-4)
+        return math.log(p / (1.0 - p))
+
     def _aggregate_ref_stack(self, source, ref_all, store_weights=False):
         """2.5D: [B, num_streams*K, H, W] -> [B, num_streams, H, W]"""
         if not self.use_25d_style:
@@ -386,9 +414,21 @@ class ProposedSynthesisModule(nn.Module):
         local_weights_all = []
         local_disp_all = []
 
-        for chunk, z_agg in zip(chunks, self.z_aggs):
+        for i, (chunk, z_agg) in enumerate(zip(chunks, self.z_aggs)):
             if self.use_local_ref_attn:
-                style_map, z_weights, local_weights, disp = z_agg(source, chunk)
+                _, z_weights, local_weights, disp, aligned_ref = z_agg(source, chunk)
+                alpha = torch.sigmoid(self.local_ref_blend_logits[i]).view(1, 1, 1, 1)
+
+                if self.local_ref_blend_mode == "zagg":
+                    vanilla_ref = self.vanilla_z_aggs[i](chunk)
+                    style_map = (1.0 - alpha) * vanilla_ref + alpha * aligned_ref
+                elif self.local_ref_blend_mode == "center":
+                    center_idx = self.ref_stack_size // 2
+                    center_ref = chunk[:, center_idx:center_idx + 1, :, :]
+                    style_map = center_ref + alpha * (aligned_ref - center_ref)
+                else:
+                    raise ValueError(f"Unknown local_ref_blend_mode: {self.local_ref_blend_mode}")
+
                 style_maps.append(style_map)
                 z_weights_all.append(z_weights)
                 local_weights_all.append(local_weights)

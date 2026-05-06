@@ -40,6 +40,12 @@ netG_A:
   local_attn_center_bias_z: 0.05
   local_attn_center_bias_xy: 0.02
   local_attn_post_conv: false
+  # Baseline-preserving residual blend:
+  # zagg:   style=(1-alpha)*vanilla_z_agg(ref_stack)+alpha*local_aligned_ref
+  # center: style=center_ref+alpha*(local_aligned_ref-center_ref)
+  local_ref_blend_mode: "zagg"
+  local_ref_blend_alpha_init: 0.1
+  local_ref_blend_learnable: true
   # Confidence gating (opt-in). false -> 기존 동작과 완전히 동일.
   use_confidence_gating: false   # true: ref에서 confidence map 추출 + StyleConv residual gating
   conf_init_bias: 2.0            # sigmoid(2.0)≈0.88, 학습 초기 conf high (baseline에 가깝게 출발)
