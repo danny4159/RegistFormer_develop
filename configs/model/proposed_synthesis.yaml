@@ -30,6 +30,16 @@ netG_A:
   use_25d_style: ${data.use_25d_style}
   ref_stack_size: ${data.ref_stack_size}
   z_agg_deep: false          # true: 3-layer z_agg (K->hidden->hidden->1), false: 2-layer (K->hidden->1)
+  # Source-anchored local 2.5D correspondence attention.
+  # For first experiments, use with use_25d_style=true and keep use_z_attn_agg=false.
+  use_local_ref_attn: false
+  use_z_attn_agg: false
+  local_attn_hidden: 16
+  local_attn_window: 3
+  local_attn_temperature: 1.0
+  local_attn_center_bias_z: 0.05
+  local_attn_center_bias_xy: 0.02
+  local_attn_post_conv: false
   # Confidence gating (opt-in). false -> 기존 동작과 완전히 동일.
   use_confidence_gating: false   # true: ref에서 confidence map 추출 + StyleConv residual gating
   conf_init_bias: 2.0            # sigmoid(2.0)≈0.88, 학습 초기 conf high (baseline에 가깝게 출발)
@@ -67,7 +77,7 @@ netF_A: # For PatchNCELoss
   init_type: 'xavier' #'xavier'
   init_gain: 0.02
   nc: 256
-  input_nc: 512 # ${model.netG_A.feat_ch} #TODO: input_nc must be 'feat_ch * output_nc'  for multiple/triple outputs
+  input_nc: 128 # ${model.netG_A.feat_ch} # single-output + feat_ch=128
 
 
 
@@ -99,6 +109,8 @@ params: # Other params
   ctx_center_only: false     # true: 2.5D에서도 center slice만으로 ctx loss 계산 (2D equivalent)
   ctx_softmin_tau: 0.3       # soft-min temperature (작을수록 hard-min에 가까움)
   ctx_shift_penalty: 0.05    # center slice preference bias per neighbor step
+  ctx_use_z_attn_prior: true # local attention의 z_weights를 contextual stack prior로 재사용
+  ctx_z_attn_alpha: 0.2
   # Confidence regularization (only active when use_confidence_gating=true AND lambda > 0).
   lambda_conf_smooth: 0.0    # TV smoothness on conf map. 추천 시작값: 1.0e-4
   lambda_conf_mean: 0.0      # collapse 방지 (conf가 0으로 가는 걸 막음). 추천 시작값: 1.0e-3

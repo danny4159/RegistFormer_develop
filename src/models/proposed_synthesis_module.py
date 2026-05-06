@@ -99,7 +99,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             losses = losses + penalties
         return -tau * torch.logsumexp(-losses / tau, dim=0)
 
-    def _contextual_stack_loss(self, fake_img, ref_stack, lambda_style):
+    def _contextual_stack_loss(self, fake_img, ref_stack, lambda_style, z_weights=None):
         """Contextual loss for 2.5D ref stack.
         ctx_center_only=True: use center slice only (2D equivalent).
         ctx_center_only=False: center-biased soft-min over K slices.
@@ -114,7 +114,20 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         for i in range(K):
             cx_losses.append(self.criterionContextual(ref_stack[:, i:i+1], fake_img).squeeze())
             shift_penalties.append(abs(i - center_idx) * shift_penalty_base)
-        return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
+        softmin_loss = self._softmin_contextual(cx_losses, shift_penalties, tau)
+
+        if getattr(self.params, 'ctx_use_z_attn_prior', False) and z_weights is not None:
+            z_prior = z_weights.mean(dim=(2, 3))
+            z_prior = z_prior / z_prior.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            cx_losses_tensor = torch.stack([loss.reshape(-1) for loss in cx_losses], dim=1)
+            if cx_losses_tensor.shape[0] == z_prior.shape[0]:
+                prior_loss = (z_prior * cx_losses_tensor).sum(dim=1).mean()
+            else:
+                prior_loss = (z_prior.mean(dim=0) * cx_losses_tensor.mean(dim=0)).sum()
+            alpha = float(getattr(self.params, 'ctx_z_attn_alpha', 0.2))
+            softmin_loss = (1.0 - alpha) * softmin_loss + alpha * prior_loss
+
+        return softmin_loss * lambda_style
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
@@ -124,6 +137,9 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # NCE encode_only calls below overwrite netG_A.last_conf_map. Holding the
         # tensor reference keeps gradients alive for the regularization terms.
         conf_for_reg = getattr(self.netG_A, 'last_conf_map', None)
+        z_weights_for_reg = getattr(self.netG_A, 'last_z_weights', None)
+        local_disp_for_log = getattr(self.netG_A, 'last_local_disp', None)
+        local_w_for_log = getattr(self.netG_A, 'last_local_attn_weights', None)
 
         # Effective style refs for contextual and NCE real-side
         # 2.5D: real_b_ref is K-channel stack
@@ -160,7 +176,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         ## 2. Contextual loss
         if self.criterionContextual:
             if use_25d and eff_b is not None:
-                loss_style_b = self._contextual_stack_loss(fake_b, eff_b, self.params.lambda_style)
+                loss_style_b = self._contextual_stack_loss(
+                    fake_b,
+                    eff_b,
+                    self.params.lambda_style,
+                    z_weights=z_weights_for_reg,
+                )
             else:
                 loss_style_b = self.criterionContextual(eff_b, fake_b) * self.params.lambda_style
             self.log("Context_b_Loss", loss_style_b.detach(), prog_bar=True)
@@ -168,14 +189,30 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
             if self.params.use_multiple_outputs or self.params.use_triple_outputs:
                 if use_25d and eff_c is not None:
-                    loss_style_c = self._contextual_stack_loss(fake_c, eff_c, self.params.lambda_style)
+                    z_weights_c = None
+                    if z_weights_for_reg is not None and z_weights_for_reg.dim() == 5:
+                        z_weights_c = z_weights_for_reg[:, 1]
+                    loss_style_c = self._contextual_stack_loss(
+                        fake_c,
+                        eff_c,
+                        self.params.lambda_style,
+                        z_weights=z_weights_c,
+                    )
                 else:
                     loss_style_c = self.criterionContextual(eff_c, fake_c) * self.params.lambda_style
                 self.log("Context_c_Loss", loss_style_c.detach(), prog_bar=True)
                 loss_G += loss_style_c.squeeze()
                 if self.params.use_triple_outputs and fake_d is not None:
                     if use_25d and eff_d is not None:
-                        loss_style_d = self._contextual_stack_loss(fake_d, eff_d, self.params.lambda_style)
+                        z_weights_d = None
+                        if z_weights_for_reg is not None and z_weights_for_reg.dim() == 5:
+                            z_weights_d = z_weights_for_reg[:, 2]
+                        loss_style_d = self._contextual_stack_loss(
+                            fake_d,
+                            eff_d,
+                            self.params.lambda_style,
+                            z_weights=z_weights_d,
+                        )
                     else:
                         loss_style_d = self.criterionContextual(eff_d, fake_d) * self.params.lambda_style
                     self.log("Context_d_Loss", loss_style_d.detach(), prog_bar=True)
@@ -377,6 +414,18 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_conf_mean = F.relu(conf_min_mean - conf_for_reg.mean()).pow(2) * lambda_conf_mean
                 self.log("ConfMean_Loss", loss_conf_mean.detach(), prog_bar=True)
                 loss_G += loss_conf_mean
+
+        if local_disp_for_log is not None and isinstance(local_disp_for_log, dict):
+            with torch.no_grad():
+                self.log("local_attn_abs_dz", local_disp_for_log["exp_dz"].abs().mean(), prog_bar=True)
+                self.log("local_attn_abs_dx", local_disp_for_log["exp_dx"].abs().mean(), prog_bar=False)
+                self.log("local_attn_abs_dy", local_disp_for_log["exp_dy"].abs().mean(), prog_bar=False)
+
+        if local_w_for_log is not None:
+            with torch.no_grad():
+                local_w = local_w_for_log.clamp_min(1e-6)
+                ent = -(local_w * torch.log(local_w)).sum(dim=(1, 2)).mean()
+                self.log("local_attn_entropy", ent, prog_bar=False)
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G

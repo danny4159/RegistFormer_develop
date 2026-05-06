@@ -8,6 +8,151 @@ def get_layer_by_dim(is_3d):
     Norm = getattr(nn, f'InstanceNorm{dim}d')
     return Conv, Norm, dim
 
+
+class SourceAnchoredLocal2DAttentionAggregator(nn.Module):
+    """Source-anchored local 2.5D correspondence attention.
+
+    source:    [B, 1, H, W]
+    ref_stack: [B, K, H, W]
+
+    returns:
+        style_map:     [B, 1, H, W]
+        z_weights:     [B, K, H, W]
+        local_weights: [B, K, R*R, H, W]
+        disp: dict with expected dz/dx/dy maps
+    """
+
+    def __init__(
+        self,
+        ref_stack_size=3,
+        hidden=16,
+        window_size=3,
+        temperature=1.0,
+        center_bias_z=0.05,
+        center_bias_xy=0.02,
+        use_post_conv=False,
+    ):
+        super().__init__()
+
+        if window_size % 2 != 1:
+            raise ValueError("window_size must be odd, e.g., 3 or 5.")
+
+        self.K = ref_stack_size
+        self.hidden = hidden
+        self.window_size = window_size
+        self.radius = window_size // 2
+        self.R2 = window_size * window_size
+        self.temperature = temperature
+        self.center_bias_z = center_bias_z
+        self.center_bias_xy = center_bias_xy
+        self.use_post_conv = use_post_conv
+
+        self.src_enc = nn.Sequential(
+            nn.Conv2d(1, hidden, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(hidden, affine=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+        self.ref_enc = nn.Sequential(
+            nn.Conv2d(1, hidden, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(hidden, affine=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+        if use_post_conv:
+            self.post = nn.Sequential(
+                nn.Conv2d(1, hidden, kernel_size=3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
+            )
+        else:
+            self.post = nn.Identity()
+
+        z_offsets = torch.arange(ref_stack_size, dtype=torch.float32) - (ref_stack_size // 2)
+        self.register_buffer("z_offsets", z_offsets)
+
+        dx_list = []
+        dy_list = []
+        for dy in range(-self.radius, self.radius + 1):
+            for dx in range(-self.radius, self.radius + 1):
+                dy_list.append(dy)
+                dx_list.append(dx)
+
+        self.register_buffer("dx_offsets", torch.tensor(dx_list, dtype=torch.float32))
+        self.register_buffer("dy_offsets", torch.tensor(dy_list, dtype=torch.float32))
+
+    def _unfold_2d(self, x, C, H, W):
+        patches = F.unfold(
+            x,
+            kernel_size=self.window_size,
+            padding=self.radius,
+        )
+        return patches.view(x.shape[0], C, self.R2, H, W)
+
+    def forward(self, source, ref_stack):
+        B, K, H, W = ref_stack.shape
+        if K != self.K:
+            raise ValueError(f"Expected K={self.K}, but got K={K}")
+
+        src_feat = self.src_enc(source)
+        C = src_feat.shape[1]
+
+        ref_flat = ref_stack.reshape(B * K, 1, H, W)
+        ref_feat_flat = self.ref_enc(ref_flat)
+
+        ref_feat_patches = self._unfold_2d(ref_feat_flat, C, H, W)
+        ref_feat_patches = ref_feat_patches.view(B, K, C, self.R2, H, W)
+
+        src_query = F.normalize(src_feat, dim=1)[:, None, :, None, :, :]
+        ref_keys = F.normalize(ref_feat_patches, dim=2)
+
+        scores = (src_query * ref_keys).sum(dim=2)
+
+        z_penalty = self.center_bias_z * self.z_offsets.abs().view(1, K, 1, 1, 1)
+        xy_penalty = self.center_bias_xy * (
+            self.dx_offsets.abs() + self.dy_offsets.abs()
+        ).view(1, 1, self.R2, 1, 1)
+        scores = scores - z_penalty - xy_penalty
+
+        scores_flat = scores.reshape(B, K * self.R2, H, W)
+        weights_flat = torch.softmax(
+            scores_flat / max(float(self.temperature), 1e-6),
+            dim=1,
+        )
+        local_weights = weights_flat.view(B, K, self.R2, H, W)
+
+        ref_value_patches = self._unfold_2d(ref_flat, 1, H, W)
+        ref_value_patches = ref_value_patches.view(B, K, 1, self.R2, H, W)
+
+        aligned_ref = (
+            local_weights[:, :, None, :, :, :] * ref_value_patches
+        ).sum(dim=(1, 3))
+        style_map = self.post(aligned_ref)
+
+        z_weights = local_weights.sum(dim=2)
+
+        exp_dz = (
+            local_weights * self.z_offsets.view(1, K, 1, 1, 1)
+        ).sum(dim=(1, 2)).unsqueeze(1)
+        exp_dx = (
+            local_weights * self.dx_offsets.view(1, 1, self.R2, 1, 1)
+        ).sum(dim=(1, 2)).unsqueeze(1)
+        exp_dy = (
+            local_weights * self.dy_offsets.view(1, 1, self.R2, 1, 1)
+        ).sum(dim=(1, 2)).unsqueeze(1)
+
+        disp = {
+            "exp_dz": exp_dz,
+            "exp_dx": exp_dx,
+            "exp_dy": exp_dy,
+        }
+        return style_map, z_weights, local_weights, disp
+
+
 class ProposedSynthesisModule(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
@@ -24,6 +169,14 @@ class ProposedSynthesisModule(nn.Module):
             self.use_25d_style = kwargs.get('use_25d_style', False)
             self.ref_stack_size = kwargs.get('ref_stack_size', 3)
             self.z_agg_deep = kwargs.get('z_agg_deep', False)
+            self.use_z_attn_agg = kwargs.get('use_z_attn_agg', False)
+            self.use_local_ref_attn = kwargs.get('use_local_ref_attn', False)
+            self.local_attn_hidden = kwargs.get('local_attn_hidden', 16)
+            self.local_attn_window = kwargs.get('local_attn_window', 3)
+            self.local_attn_temperature = kwargs.get('local_attn_temperature', 1.0)
+            self.local_attn_center_bias_z = kwargs.get('local_attn_center_bias_z', 0.05)
+            self.local_attn_center_bias_xy = kwargs.get('local_attn_center_bias_xy', 0.02)
+            self.local_attn_post_conv = kwargs.get('local_attn_post_conv', False)
             # Confidence gating (opt-in). When True, build a confidence branch
             # that gates StyleConv modulation residually. Disabled in 3D path.
             self.use_confidence_gating = kwargs.get('use_confidence_gating', False)
@@ -36,6 +189,26 @@ class ProposedSynthesisModule(nn.Module):
         # Effective gating flag: only active in 2D / 2.5D paths.
         self._gating_active = bool(self.use_confidence_gating) and (not self.is_3d)
         self.last_conf_map = None
+        self.last_z_weights = None
+        self.last_local_attn_weights = None
+        self.last_local_disp = None
+
+        if self.use_local_ref_attn and self.use_z_attn_agg:
+            raise ValueError("Use either use_local_ref_attn or use_z_attn_agg, not both.")
+        if self.use_local_ref_attn and not self.use_25d_style:
+            raise ValueError("use_local_ref_attn requires use_25d_style=True.")
+        if self.use_local_ref_attn and (self.use_multiple_outputs or self.use_triple_outputs):
+            raise NotImplementedError(
+                "Local 2.5D reference attention is currently single-output only."
+            )
+        if self.use_local_ref_attn and self.is_3d:
+            raise NotImplementedError(
+                "Local 2.5D reference attention is for 2D/2.5D only."
+            )
+        if self.use_z_attn_agg:
+            raise NotImplementedError(
+                "use_z_attn_agg is not implemented in this branch. Use use_local_ref_attn or vanilla z aggregation."
+            )
 
         Conv, _, _ = get_layer_by_dim(self.is_3d)
 
@@ -53,23 +226,37 @@ class ProposedSynthesisModule(nn.Module):
         # 2.5D: compress ref stack [B, K, H, W] -> [B, 1, H, W] per style stream
         if self.use_25d_style:
             hidden = max(8, self.feat_ch // 8)
-            if self.z_agg_deep:
-                def _make_z_agg():
-                    return nn.Sequential(
-                        nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
-                        nn.LeakyReLU(0.2, inplace=True),
-                        nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
-                        nn.LeakyReLU(0.2, inplace=True),
-                        nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
+            if self.use_local_ref_attn:
+                self.z_aggs = nn.ModuleList([
+                    SourceAnchoredLocal2DAttentionAggregator(
+                        ref_stack_size=self.ref_stack_size,
+                        hidden=self.local_attn_hidden,
+                        window_size=self.local_attn_window,
+                        temperature=self.local_attn_temperature,
+                        center_bias_z=self.local_attn_center_bias_z,
+                        center_bias_xy=self.local_attn_center_bias_xy,
+                        use_post_conv=self.local_attn_post_conv,
                     )
+                    for _ in range(self.num_style_streams)
+                ])
             else:
-                def _make_z_agg():
-                    return nn.Sequential(
-                        nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
-                        nn.LeakyReLU(0.2, inplace=True),
-                        nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
-                    )
-            self.z_aggs = nn.ModuleList([_make_z_agg() for _ in range(self.num_style_streams)])
+                if self.z_agg_deep:
+                    def _make_z_agg():
+                        return nn.Sequential(
+                            nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
+                            nn.LeakyReLU(0.2, inplace=True),
+                            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+                            nn.LeakyReLU(0.2, inplace=True),
+                            nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
+                        )
+                else:
+                    def _make_z_agg():
+                        return nn.Sequential(
+                            nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
+                            nn.LeakyReLU(0.2, inplace=True),
+                            nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
+                        )
+                self.z_aggs = nn.ModuleList([_make_z_agg() for _ in range(self.num_style_streams)])
 
         # Confidence head(s). Built only when gating is active.
         # 2.5D: per-stream head consumes K-channel ref stack -> 1ch logit.
@@ -186,20 +373,51 @@ class ProposedSynthesisModule(nn.Module):
         #     self.conv_final = nn.Conv2d(self.feat_ch * ch // 4, self.output_nc, kernel_size=3, padding=1)
         self.conv_final = Conv(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
 
-    def _aggregate_ref_stack(self, ref_all):
+    def _aggregate_ref_stack(self, source, ref_all, store_weights=False):
         """2.5D: [B, num_streams*K, H, W] -> [B, num_streams, H, W]"""
         if not self.use_25d_style:
+            self.last_z_weights = None
+            self.last_local_attn_weights = None
+            self.last_local_disp = None
             return ref_all
         chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
-        style_maps = [z_agg(chunk) for chunk, z_agg in zip(chunks, self.z_aggs)]
+        style_maps = []
+        z_weights_all = []
+        local_weights_all = []
+        local_disp_all = []
+
+        for chunk, z_agg in zip(chunks, self.z_aggs):
+            if self.use_local_ref_attn:
+                style_map, z_weights, local_weights, disp = z_agg(source, chunk)
+                style_maps.append(style_map)
+                z_weights_all.append(z_weights)
+                local_weights_all.append(local_weights)
+                local_disp_all.append(disp)
+            else:
+                style_maps.append(z_agg(chunk))
+
+        if store_weights and self.use_local_ref_attn:
+            if len(z_weights_all) == 1:
+                self.last_z_weights = z_weights_all[0]
+                self.last_local_attn_weights = local_weights_all[0]
+                self.last_local_disp = local_disp_all[0]
+            else:
+                self.last_z_weights = torch.stack(z_weights_all, dim=1)
+                self.last_local_attn_weights = torch.stack(local_weights_all, dim=1)
+                self.last_local_disp = local_disp_all
+        else:
+            self.last_z_weights = None
+            self.last_local_attn_weights = None
+            self.last_local_disp = None
+
         return torch.cat(style_maps, dim=1)
 
-    def _build_style_and_conf(self, ref_all):
+    def _build_style_and_conf(self, source, ref_all, store_weights=False):
         """Returns (style, conf). conf is None when gating is inactive.
         2D : ref_all [B, num_streams, H, W] -> conf [B, num_streams, H, W]
         2.5D: ref_all [B, num_streams*K, H, W] -> conf [B, num_streams, H, W]
         """
-        style = self._aggregate_ref_stack(ref_all)
+        style = self._aggregate_ref_stack(source, ref_all, store_weights=store_weights)
         if not self._gating_active:
             return style, None
         if self.use_25d_style:
@@ -215,7 +433,11 @@ class ProposedSynthesisModule(nn.Module):
 
         x = merged_input[:, :1, ...]
         ref_all = merged_input[:, 1:, ...]
-        ref, conf = self._build_style_and_conf(ref_all)  # conf is None when gating off
+        ref, conf = self._build_style_and_conf(
+            x,
+            ref_all,
+            store_weights=(not encode_only),
+        )  # conf is None when gating off
 
         if self.is_3d:
             ref = ref.permute(0, 1, 4, 2, 3)
