@@ -328,6 +328,301 @@ class ProposedSynthesisModule(nn.Module):
         return out
 
 
+class ConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(out_ch, affine=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(out_ch, affine=False),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class ConstantChannelEncoder(nn.Module):
+    def __init__(self, in_ch=1, feat_ch=128):
+        super().__init__()
+        self.stem = ConvBlock(in_ch, feat_ch)
+
+        self.down1 = self._make_down(feat_ch)
+        self.down2 = self._make_down(feat_ch)
+        self.down3 = self._make_down(feat_ch)
+        self.down4 = self._make_down(feat_ch)
+
+    @staticmethod
+    def _make_down(feat_ch):
+        return nn.Sequential(
+            nn.Conv2d(feat_ch, feat_ch, kernel_size=3, stride=2, padding=1),
+            nn.InstanceNorm2d(feat_ch, affine=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            ConvBlock(feat_ch, feat_ch),
+        )
+
+    def forward(self, x):
+        f1 = self.stem(x)
+        f2 = self.down1(f1)
+        f3 = self.down2(f2)
+        f4 = self.down3(f3)
+        f5 = self.down4(f4)
+        return [f1, f2, f3, f4, f5]
+
+
+class Local2p5DCrossAttention(nn.Module):
+    def __init__(
+        self,
+        feat_ch=128,
+        attn_ch=64,
+        ref_stack_size=3,
+        window_size=3,
+        temperature=1.0,
+        center_bias_z=0.05,
+        center_bias_xy=0.02,
+    ):
+        super().__init__()
+        if window_size % 2 != 1:
+            raise ValueError("window_size must be odd.")
+
+        self.feat_ch = feat_ch
+        self.attn_ch = attn_ch
+        self.K = ref_stack_size
+        self.window_size = window_size
+        self.radius = window_size // 2
+        self.R2 = window_size * window_size
+        self.temperature = temperature
+        self.center_bias_z = center_bias_z
+        self.center_bias_xy = center_bias_xy
+
+        self.q_proj = nn.Conv2d(feat_ch, attn_ch, kernel_size=1)
+        self.k_proj = nn.Conv2d(feat_ch, attn_ch, kernel_size=1)
+        self.v_proj = nn.Conv2d(feat_ch, feat_ch, kernel_size=1)
+        self.out_proj = nn.Conv2d(feat_ch, feat_ch, kernel_size=1)
+
+        z_offsets = torch.arange(ref_stack_size, dtype=torch.float32) - (ref_stack_size // 2)
+        self.register_buffer("z_offsets", z_offsets)
+
+        dx_list, dy_list = [], []
+        for dy in range(-self.radius, self.radius + 1):
+            for dx in range(-self.radius, self.radius + 1):
+                dy_list.append(dy)
+                dx_list.append(dx)
+        self.register_buffer("dx_offsets", torch.tensor(dx_list, dtype=torch.float32))
+        self.register_buffer("dy_offsets", torch.tensor(dy_list, dtype=torch.float32))
+
+    def _unfold(self, x, channels, h, w):
+        patches = F.unfold(
+            x,
+            kernel_size=self.window_size,
+            padding=self.radius,
+        )
+        return patches.view(x.shape[0], channels, self.R2, h, w)
+
+    def forward(self, src_feat, ref_feat):
+        B, C, h, w = src_feat.shape
+        B2, K, C2, h2, w2 = ref_feat.shape
+        if B != B2 or C != C2 or K != self.K or h != h2 or w != w2:
+            raise ValueError(
+                "Expected src_feat [B,C,h,w] and ref_feat [B,K,C,h,w] "
+                f"with K={self.K}, got {tuple(src_feat.shape)} and {tuple(ref_feat.shape)}."
+            )
+
+        q = self.q_proj(src_feat)
+        q = F.normalize(q, dim=1)
+        q = q[:, None, :, None, :, :]
+
+        ref_flat = ref_feat.reshape(B * K, C, h, w)
+        k_flat = self.k_proj(ref_flat)
+        v_flat = self.v_proj(ref_flat)
+
+        k_patches = self._unfold(k_flat, self.attn_ch, h, w)
+        v_patches = self._unfold(v_flat, C, h, w)
+
+        k_patches = k_patches.view(B, K, self.attn_ch, self.R2, h, w)
+        v_patches = v_patches.view(B, K, C, self.R2, h, w)
+        k_patches = F.normalize(k_patches, dim=2)
+
+        scores = (q * k_patches).sum(dim=2)
+        z_penalty = self.center_bias_z * self.z_offsets.abs().view(1, K, 1, 1, 1)
+        xy_penalty = self.center_bias_xy * (
+            self.dx_offsets.abs() + self.dy_offsets.abs()
+        ).view(1, 1, self.R2, 1, 1)
+        scores = scores - z_penalty - xy_penalty
+
+        scores_flat = scores.reshape(B, K * self.R2, h, w)
+        weights_flat = torch.softmax(
+            scores_flat / max(float(self.temperature), 1e-6),
+            dim=1,
+        )
+        weights = weights_flat.view(B, K, self.R2, h, w)
+
+        attn_feat = (weights[:, :, None, :, :, :] * v_patches).sum(dim=(1, 3))
+        attn_feat = self.out_proj(attn_feat)
+
+        z_weights = weights.sum(dim=2)
+        exp_dz = (
+            weights * self.z_offsets.view(1, K, 1, 1, 1)
+        ).sum(dim=(1, 2)).unsqueeze(1)
+        exp_dx = (
+            weights * self.dx_offsets.view(1, 1, self.R2, 1, 1)
+        ).sum(dim=(1, 2)).unsqueeze(1)
+        exp_dy = (
+            weights * self.dy_offsets.view(1, 1, self.R2, 1, 1)
+        ).sum(dim=(1, 2)).unsqueeze(1)
+
+        aux = {
+            "weights": weights,
+            "z_weights": z_weights,
+            "exp_dz": exp_dz,
+            "exp_dx": exp_dx,
+            "exp_dy": exp_dy,
+        }
+        return attn_feat, aux
+
+
+class CrossAttnFuseBlock(nn.Module):
+    def __init__(self, feat_ch=128):
+        super().__init__()
+        self.fuse = nn.Sequential(
+            nn.Conv2d(feat_ch * 2, feat_ch, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(feat_ch, affine=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(feat_ch, feat_ch, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(feat_ch, affine=False),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+    def forward(self, src_feat, attn_ref_feat):
+        return self.fuse(torch.cat([src_feat, attn_ref_feat], dim=1))
+
+
+class UpBlock(nn.Module):
+    def __init__(self, feat_ch=128):
+        super().__init__()
+        self.conv = ConvBlock(feat_ch * 2, feat_ch)
+
+    def forward(self, x, skip):
+        x = F.interpolate(x, size=skip.shape[2:], mode="nearest")
+        x = torch.cat([x, skip], dim=1)
+        return self.conv(x)
+
+
+class ProposedSynthesisCrossAttn(nn.Module):
+    """StyleConv-free reference-guided synthesis network with local 2.5D cross-attention."""
+
+    def __init__(
+        self,
+        input_nc=1,
+        output_nc=1,
+        feat_ch=128,
+        ref_stack_size=3,
+        cross_attn_ch=64,
+        cross_attn_window=3,
+        cross_attn_temperature=1.0,
+        cross_attn_center_bias_z=0.05,
+        cross_attn_center_bias_xy=0.02,
+        use_multiple_outputs=False,
+        use_triple_outputs=False,
+        is_3d=False,
+        **kwargs,
+    ):
+        super().__init__()
+        if is_3d:
+            raise NotImplementedError("ProposedSynthesisCrossAttn is 2D/2.5D only.")
+        if use_multiple_outputs or use_triple_outputs:
+            raise NotImplementedError("ProposedSynthesisCrossAttn supports single-output only.")
+
+        self.input_nc = input_nc
+        self.output_nc = output_nc
+        self.feat_ch = feat_ch
+        self.ref_stack_size = ref_stack_size
+        self.last_attn_aux = None
+        self.last_conf_map = None
+
+        self.source_encoder = ConstantChannelEncoder(in_ch=input_nc, feat_ch=feat_ch)
+        self.ref_encoder = ConstantChannelEncoder(in_ch=1, feat_ch=feat_ch)
+
+        attn_kwargs = dict(
+            feat_ch=feat_ch,
+            attn_ch=cross_attn_ch,
+            ref_stack_size=ref_stack_size,
+            window_size=cross_attn_window,
+            temperature=cross_attn_temperature,
+            center_bias_z=cross_attn_center_bias_z,
+            center_bias_xy=cross_attn_center_bias_xy,
+        )
+        self.attn3 = Local2p5DCrossAttention(**attn_kwargs)
+        self.attn4 = Local2p5DCrossAttention(**attn_kwargs)
+        self.attn5 = Local2p5DCrossAttention(**attn_kwargs)
+
+        self.fuse3 = CrossAttnFuseBlock(feat_ch)
+        self.fuse4 = CrossAttnFuseBlock(feat_ch)
+        self.fuse5 = CrossAttnFuseBlock(feat_ch)
+
+        self.up4 = UpBlock(feat_ch)
+        self.up3 = UpBlock(feat_ch)
+        self.up2 = UpBlock(feat_ch)
+        self.up1 = UpBlock(feat_ch)
+
+        self.final = nn.Conv2d(feat_ch, output_nc, kernel_size=3, padding=1)
+
+    def _encode_ref_stack(self, ref_stack):
+        B, K, H, W = ref_stack.shape
+        ref_flat = ref_stack.reshape(B * K, 1, H, W)
+        feats_flat = self.ref_encoder(ref_flat)
+
+        feats = []
+        for f in feats_flat:
+            _, C, h, w = f.shape
+            feats.append(f.view(B, K, C, h, w))
+        return feats
+
+    def forward(self, merged_input, layers=[], encode_only=False):
+        x = merged_input[:, :self.input_nc, ...]
+        ref_stack = merged_input[:, self.input_nc:, ...]
+
+        if ref_stack.dim() != 4:
+            raise ValueError(f"Expected 2D merged input [B,1+K,H,W], got {tuple(merged_input.shape)}.")
+        B, K, H, W = ref_stack.shape
+        if K != self.ref_stack_size:
+            raise ValueError(f"Expected K={self.ref_stack_size}, got {K}.")
+
+        Fs1, Fs2, Fs3, Fs4, Fs5 = self.source_encoder(x)
+        Fr1, Fr2, Fr3, Fr4, Fr5 = self._encode_ref_stack(ref_stack)
+
+        A3, aux3 = self.attn3(Fs3, Fr3)
+        A4, aux4 = self.attn4(Fs4, Fr4)
+        A5, aux5 = self.attn5(Fs5, Fr5)
+
+        H3 = self.fuse3(Fs3, A3)
+        H4 = self.fuse4(Fs4, A4)
+        H5 = self.fuse5(Fs5, A5)
+
+        self.last_attn_aux = {
+            "s3": aux3,
+            "s4": aux4,
+            "s5": aux5,
+        }
+
+        D4 = self.up4(H5, H4)
+        D3 = self.up3(D4, H3)
+        D2 = self.up2(D3, Fs2)
+        D1 = self.up1(D2, Fs1)
+
+        out = torch.tanh(self.final(D1))
+
+        if encode_only:
+            feat_list = [Fs1, Fs2, H3, H4, H5, D3, D2]
+            if layers is None or len(layers) == 0:
+                return feat_list
+            return [feat_list[i] for i in layers]
+
+        return out
+
+
 class StyleConv(nn.Module):
     def __init__(self,
                  input_nc,

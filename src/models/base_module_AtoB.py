@@ -86,7 +86,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
     def forward(self, a: torch.Tensor, b: torch.Tensor, c: Optional[torch.Tensor] = None):
         
         # Case1. Refernece guided generation
-        if type(self.netG_A).__name__ in ["RegistFormer", "ProposedSynthesisModule"]:
+        if type(self.netG_A).__name__ in ["RegistFormer", "ProposedSynthesisModule", "ProposedSynthesisCrossAttn"]:
             if c is not None:
                 merged_input = torch.cat((a, b, c), dim=1)
             else:         

@@ -1,0 +1,99 @@
+_target_: src.models.proposed_synthesis_module.ProposedSynthesisModule
+
+name: ProposedSynthesisCrossAttn
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.0001
+  betas: [0.5, 0.999]
+  weight_decay: 0.0001
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.MultiStepLR
+  _partial_: true
+  milestones: [250000, 300000]
+  gamma: 0.5
+
+netG_A:
+  _target_: src.models.components.networks_define.define_G
+  netG_type: 'proposed_synthesis_crossattn'
+  input_nc: 1
+  output_nc: 1
+  feat_ch: 128
+
+  use_multiple_outputs: false
+  use_triple_outputs: false
+  is_3d: false
+
+  ref_stack_size: ${data.ref_stack_size}
+  cross_attn_ch: 64
+  cross_attn_window: 3
+  cross_attn_temperature: 1.0
+  cross_attn_center_bias_z: 0.05
+  cross_attn_center_bias_xy: 0.02
+
+netD_A:
+  _target_: src.models.components.networks_define.define_D
+  input_nc: 1
+  ndf: 64
+  norm: 'instance'
+  n_layers_D: 3
+  init_type: 'normal'
+
+netD_B:
+  _target_: src.models.components.networks_define.define_D
+  input_nc: 1
+  ndf: 64
+  norm: 'instance'
+  n_layers_D: 3
+  init_type: 'normal'
+
+netD_C:
+  _target_: src.models.components.networks_define.define_D
+  input_nc: 1
+  ndf: 64
+  norm: 'instance'
+  n_layers_D: 3
+  init_type: 'normal'
+
+netF_A:
+  _target_: src.models.components.networks_define.define_F
+  netF_type: 'mlp_sample'
+  use_mlp: True
+  init_type: 'xavier'
+  init_gain: 0.02
+  nc: 256
+  input_nc: 128
+
+params:
+  lambda_style: 5
+  lambda_nce: 5
+  lambda_mind: 0
+  lambda_l1: 0
+  reverse: ${data.reverse}
+  use_split_inference: ${data.use_split_inference}
+  flip_equivariance: False
+  batch_size: ${data.batch_size}
+  nce_layers: [0,2,4,6]
+  eval_on_align: ${data.eval_on_align}
+  use_sliding_inference: ${data.use_sliding_inference}
+  use_multiple_outputs: false
+  use_triple_outputs: false
+  nce_on_vgg: false
+  nce_independent: false
+  use_misalign_simul: ${data.use_misalign_simul}
+  is_3d: false
+  crop_size: ${data.crop_size}
+  is_registration: false
+
+  use_25d_style: ${data.use_25d_style}
+  ref_stack_size: ${data.ref_stack_size}
+  ctx_center_only: false
+  ctx_softmin_tau: 0.3
+  ctx_shift_penalty: 0.05
+  ctx_use_z_attn_prior: false
+
+  lambda_conf_smooth: 0.0
+  lambda_conf_mean: 0.0
+  conf_min_mean: 0.5

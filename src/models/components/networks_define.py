@@ -11,7 +11,7 @@ from src.models.components.network_registformer import RegistFormer
 from src.models.components.network_spade import SPADEGenerator, ConvEncoder
 from src.models.components.network_adainGen import AdaINGen
 from src.models.components.network_dam import DAModule
-from src.models.components.network_proposed_synthesis import ProposedSynthesisModule
+from src.models.components.network_proposed_synthesis import ProposedSynthesisCrossAttn, ProposedSynthesisModule
 from src.models.components.network_resnet_generator import ResnetGenerator
 from src.models.components.network_patch_sample_F import PatchSampleF
 from src.models.components.network_G_resnet import G_Resnet
@@ -299,6 +299,8 @@ def define_G(**kwargs):
         net = DAModule(**kwargs)
     elif netG_type == 'proposed_synthesis':
         net = ProposedSynthesisModule(**kwargs)
+    elif netG_type == 'proposed_synthesis_crossattn':
+        net = ProposedSynthesisCrossAttn(**kwargs)
     elif netG_type == 'resnet_generator':
         net = ResnetGenerator(**kwargs)
     elif netG_type == 'resnet_cat':
