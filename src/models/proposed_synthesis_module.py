@@ -137,20 +137,20 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         ##################################################################################################################
         ## 1. GAN Loss
         if self.criterionGAN:
-            pred_fake = self.netD_A(fake_b.detach())
+            pred_fake = self.netD_A(fake_b)
             loss_gan_b = self.criterionGAN(pred_fake, True)
             self.log("Gan_b_Loss", loss_gan_b.detach(), prog_bar=True)
             loss_G += loss_gan_b
             # assert not torch.isnan(loss_gan_b).any(), "GAN Loss is NaN"
             
             if self.params.use_multiple_outputs or self.params.use_triple_outputs:
-                pred_fake = self.netD_B(fake_c.detach())
+                pred_fake = self.netD_B(fake_c)
                 loss_gan_c = self.criterionGAN(pred_fake, True)
                 self.log("Gan_c_Loss", loss_gan_c.detach(), prog_bar=True)
                 loss_G += loss_gan_c
                 # assert not torch.isnan(loss_gan_c).any(), "GAN Loss is NaN"
                 if self.params.use_triple_outputs and fake_d is not None:
-                    pred_fake = self.netD_C(fake_d.detach())
+                    pred_fake = self.netD_C(fake_d)
                     loss_gan_d = self.criterionGAN(pred_fake, True)
                     self.log("Gan_d_Loss", loss_gan_d.detach(), prog_bar=True)
                     loss_G += loss_gan_d
@@ -396,7 +396,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
             ## GAN
             if self.criterionGAN:
-                pred_fake = self.netD_A(fb.detach())
+                pred_fake = self.netD_A(fb)
                 loss_gan_b = self.criterionGAN(pred_fake, True) / D
                 loss_G += loss_gan_b
                 loss_logs.setdefault("Gan_b_Loss", 0.0)
