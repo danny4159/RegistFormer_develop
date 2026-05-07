@@ -106,6 +106,21 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         grad = torch.sqrt(gx * gx + gy * gy + eps)
         return grad / (grad.mean(dim=(2, 3), keepdim=True) + eps)
 
+    @staticmethod
+    def _lowpass_2d(x, kernel_size=5):
+        """Average-pool low-pass filter preserving [B,1,H,W] shape."""
+        if kernel_size <= 1:
+            return x
+        pad = kernel_size // 2
+        x_pad = F.pad(x, (pad, pad, pad, pad), mode="reflect")
+        return F.avg_pool2d(x_pad, kernel_size=kernel_size, stride=1)
+
+    def _highpass_map(self, x, kernel_size=5, eps=1e-6):
+        """Per-image normalized absolute high-pass magnitude. x: [B,1,H,W]."""
+        low = self._lowpass_2d(x, kernel_size=kernel_size)
+        hp = torch.abs(x - low)
+        return hp / (hp.mean(dim=(2, 3), keepdim=True) + eps)
+
     def _apply_slicewise_transform(self, ref_stack, transform_fn):
         """Apply a [B,1,H,W] transform to each channel in a [B,K,H,W] ref stack."""
         outs = []
@@ -144,6 +159,15 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         fake_grad = self._gradient_magnitude_map(fake)
         ref_grad_stack = self._apply_slicewise_transform(ref_stack, self._gradient_magnitude_map)
         return self._contextual_stack_loss(fake_grad, ref_grad_stack, 1.0)
+
+    def _ref_hp_contextual_loss(self, fake, ref_stack, kernel_size=5):
+        """Contextual loss between fake and ref-stack high-pass magnitude maps."""
+        fake_hp = self._highpass_map(fake, kernel_size=kernel_size)
+        ref_hp_stack = self._apply_slicewise_transform(
+            ref_stack,
+            lambda x: self._highpass_map(x, kernel_size=kernel_size),
+        )
+        return self._contextual_stack_loss(fake_hp, ref_hp_stack, 1.0)
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
@@ -217,6 +241,13 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             loss_ref_grad_ctx_b = self._ref_grad_contextual_loss(fake_b, real_b_ref)
             self.log("RefGradCtx_b_Loss", loss_ref_grad_ctx_b.detach(), prog_bar=True)
             loss_G += loss_ref_grad_ctx_b.squeeze() * lambda_ref_grad_ctx
+
+        lambda_ref_hp_ctx = float(getattr(self.params, "lambda_ref_hp_ctx", 0.0) or 0.0)
+        hp_kernel = int(getattr(self.params, "hp_kernel", 5))
+        if lambda_ref_hp_ctx > 0 and real_b_ref is not None and self.criterionContextual:
+            loss_ref_hp_ctx_b = self._ref_hp_contextual_loss(fake_b, real_b_ref, kernel_size=hp_kernel)
+            self.log("RefHpCtx_b_Loss", loss_ref_hp_ctx_b.detach(), prog_bar=True)
+            loss_G += loss_ref_hp_ctx_b.squeeze() * lambda_ref_hp_ctx
 
         ##################################################################################################################
         ## 4. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
