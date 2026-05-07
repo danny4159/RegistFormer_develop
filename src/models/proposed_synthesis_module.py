@@ -91,6 +91,29 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         return loss_h + loss_w
 
     @staticmethod
+    def _image_gradients(x):
+        """Forward image gradients with same-size replicate padding. x: [B,1,H,W]."""
+        gx = x[:, :, :, 1:] - x[:, :, :, :-1]
+        gy = x[:, :, 1:, :] - x[:, :, :-1, :]
+        gx = F.pad(gx, (0, 1, 0, 0), mode="replicate")
+        gy = F.pad(gy, (0, 0, 0, 1), mode="replicate")
+        return gx, gy
+
+    @classmethod
+    def _gradient_magnitude_map(cls, x, eps=1e-6):
+        """Per-image normalized gradient magnitude. x: [B,1,H,W]."""
+        gx, gy = cls._image_gradients(x)
+        grad = torch.sqrt(gx * gx + gy * gy + eps)
+        return grad / (grad.mean(dim=(2, 3), keepdim=True) + eps)
+
+    def _apply_slicewise_transform(self, ref_stack, transform_fn):
+        """Apply a [B,1,H,W] transform to each channel in a [B,K,H,W] ref stack."""
+        outs = []
+        for i in range(ref_stack.shape[1]):
+            outs.append(transform_fn(ref_stack[:, i:i + 1, :, :]))
+        return torch.cat(outs, dim=1)
+
+    @staticmethod
     def _softmin_contextual(cx_list, shift_penalties=None, tau=0.3):
         """Soft-min over a list of contextual losses (center-biased)."""
         losses = torch.stack(cx_list)
@@ -115,6 +138,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             cx_losses.append(self.criterionContextual(ref_stack[:, i:i+1], fake_img).squeeze())
             shift_penalties.append(abs(i - center_idx) * shift_penalty_base)
         return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
+
+    def _ref_grad_contextual_loss(self, fake, ref_stack):
+        """Contextual loss between fake and ref-stack gradient magnitude maps."""
+        fake_grad = self._gradient_magnitude_map(fake)
+        ref_grad_stack = self._apply_slicewise_transform(ref_stack, self._gradient_magnitude_map)
+        return self._contextual_stack_loss(fake_grad, ref_grad_stack, 1.0)
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
@@ -182,7 +211,15 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     loss_G += loss_style_d.squeeze()
 
         ##################################################################################################################
-        ## 3. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
+        ## 3. Ref gradient contextual loss
+        lambda_ref_grad_ctx = float(getattr(self.params, "lambda_ref_grad_ctx", 0.0) or 0.0)
+        if lambda_ref_grad_ctx > 0 and real_b_ref is not None and self.criterionContextual:
+            loss_ref_grad_ctx_b = self._ref_grad_contextual_loss(fake_b, real_b_ref)
+            self.log("RefGradCtx_b_Loss", loss_ref_grad_ctx_b.detach(), prog_bar=True)
+            loss_G += loss_ref_grad_ctx_b.squeeze() * lambda_ref_grad_ctx
+
+        ##################################################################################################################
+        ## 4. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
         if self.criterionNCE:
             if self.params.nce_on_vgg: # 이거 안써
                 real_rgb = real_a.repeat(1, 3, 1, 1)
