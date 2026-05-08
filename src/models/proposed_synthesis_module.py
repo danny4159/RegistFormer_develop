@@ -378,6 +378,23 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 self.log("ConfMean_Loss", loss_conf_mean.detach(), prog_bar=True)
                 loss_G += loss_conf_mean
 
+        attn_aux = getattr(self.netG_A, "last_attn_aux", None)
+        if attn_aux is not None:
+            for scale_name in ("s3", "s4", "s5"):
+                aux = attn_aux.get(scale_name, None)
+                if aux is None:
+                    continue
+                if "entropy" in aux:
+                    self.log(f"{scale_name}_attn_entropy", aux["entropy"], prog_bar=False)
+                if "gate_attn" in aux:
+                    self.log(f"{scale_name}_attn_gate", aux["gate_attn"], prog_bar=False)
+                if "gate_ffn" in aux:
+                    self.log(f"{scale_name}_ffn_gate", aux["gate_ffn"], prog_bar=False)
+                if "exp_dx" in aux and "exp_dy" in aux and "exp_dz" in aux:
+                    self.log(f"{scale_name}_abs_dx", aux["exp_dx"].abs().mean().detach(), prog_bar=False)
+                    self.log(f"{scale_name}_abs_dy", aux["exp_dy"].abs().mean().detach(), prog_bar=False)
+                    self.log(f"{scale_name}_abs_dz", aux["exp_dz"].abs().mean().detach(), prog_bar=False)
+
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
         # assert not torch.isnan(loss_G).any(), "Total Loss is NaN"

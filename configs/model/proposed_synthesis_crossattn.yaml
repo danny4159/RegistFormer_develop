@@ -20,7 +20,7 @@ netG_A:
   netG_type: 'proposed_synthesis_crossattn'
   input_nc: 1
   output_nc: 1
-  feat_ch: 128
+  feat_ch: 192
 
   use_multiple_outputs: false
   use_triple_outputs: false
@@ -28,10 +28,17 @@ netG_A:
 
   ref_stack_size: ${data.ref_stack_size}
   cross_attn_ch: 64
-  cross_attn_window: 3
+  cross_attn_window: 5
   cross_attn_temperature: 1.0
   cross_attn_center_bias_z: 0.05
   cross_attn_center_bias_xy: 0.02
+  residual_fusion: true
+  fusion_gate_init: -2.0
+  use_transformer_attn: true
+  cross_attn_nhead: 4
+  cross_attn_mlp_ratio: 2.0
+  cross_attn_relative_bias: true
+  cross_attn_gate_init: -2.0
 
 netD_A:
   _target_: src.models.components.networks_define.define_D
@@ -64,7 +71,7 @@ netF_A:
   init_type: 'xavier'
   init_gain: 0.02
   nc: 256
-  input_nc: 128
+  input_nc: 192
 
 params:
   lambda_style: 5

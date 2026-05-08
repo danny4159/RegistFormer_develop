@@ -483,6 +483,226 @@ class Local2p5DCrossAttention(nn.Module):
         return attn_feat, aux
 
 
+class MultiHeadLocal2p5DCrossAttention(nn.Module):
+    """Multi-head local 2.5D cross-attention over K slices and a local xy window."""
+
+    def __init__(
+        self,
+        feat_ch=192,
+        nhead=4,
+        ref_stack_size=5,
+        window_size=5,
+        temperature=1.0,
+        center_bias_z=0.05,
+        center_bias_xy=0.02,
+        use_relative_bias=True,
+    ):
+        super().__init__()
+        if window_size % 2 != 1:
+            raise ValueError("window_size must be odd.")
+        if feat_ch % nhead != 0:
+            raise ValueError(f"feat_ch={feat_ch} must be divisible by nhead={nhead}.")
+
+        self.feat_ch = feat_ch
+        self.nhead = nhead
+        self.head_dim = feat_ch // nhead
+        self.K = ref_stack_size
+        self.window_size = window_size
+        self.radius = window_size // 2
+        self.R2 = window_size * window_size
+        self.temperature = temperature
+        self.center_bias_z = center_bias_z
+        self.center_bias_xy = center_bias_xy
+        self.use_relative_bias = use_relative_bias
+
+        self.q_proj = nn.Conv2d(feat_ch, feat_ch, kernel_size=1)
+        self.k_proj = nn.Conv2d(feat_ch, feat_ch, kernel_size=1)
+        self.v_proj = nn.Conv2d(feat_ch, feat_ch, kernel_size=1)
+        self.out_proj = nn.Conv2d(feat_ch, feat_ch, kernel_size=1)
+
+        z_offsets = torch.arange(ref_stack_size, dtype=torch.float32) - (ref_stack_size // 2)
+        self.register_buffer("z_offsets", z_offsets)
+
+        dx_list, dy_list = [], []
+        for dy in range(-self.radius, self.radius + 1):
+            for dx in range(-self.radius, self.radius + 1):
+                dy_list.append(dy)
+                dx_list.append(dx)
+        self.register_buffer("dx_offsets", torch.tensor(dx_list, dtype=torch.float32))
+        self.register_buffer("dy_offsets", torch.tensor(dy_list, dtype=torch.float32))
+
+        if use_relative_bias:
+            self.rel_bias = nn.Parameter(torch.zeros(nhead, ref_stack_size, self.R2))
+        else:
+            self.rel_bias = None
+
+        self.scale = self.head_dim ** -0.5
+
+    def _unfold_heads(self, x, h, w):
+        BK, C, _, _ = x.shape
+        patches = F.unfold(
+            x,
+            kernel_size=self.window_size,
+            padding=self.radius,
+        )
+        return patches.view(BK, self.nhead, self.head_dim, self.R2, h, w)
+
+    def forward(self, src_feat, ref_feat):
+        B, C, h, w = src_feat.shape
+        B2, K, C2, h2, w2 = ref_feat.shape
+
+        if B != B2 or C != C2 or K != self.K or h != h2 or w != w2:
+            raise ValueError(
+                "Expected src_feat [B,C,h,w] and ref_feat [B,K,C,h,w], "
+                f"got {tuple(src_feat.shape)} and {tuple(ref_feat.shape)}."
+            )
+
+        q = self.q_proj(src_feat)
+        q = q.view(B, self.nhead, self.head_dim, h, w)
+        q = F.normalize(q, dim=2)
+
+        ref_flat = ref_feat.reshape(B * K, C, h, w)
+        k_flat = self.k_proj(ref_flat)
+        v_flat = self.v_proj(ref_flat)
+
+        k_patches = self._unfold_heads(k_flat, h, w)
+        v_patches = self._unfold_heads(v_flat, h, w)
+
+        k_patches = k_patches.view(B, K, self.nhead, self.head_dim, self.R2, h, w)
+        v_patches = v_patches.view(B, K, self.nhead, self.head_dim, self.R2, h, w)
+        k_patches = k_patches.permute(0, 2, 1, 4, 3, 5, 6)
+        v_patches = v_patches.permute(0, 2, 1, 4, 3, 5, 6)
+        k_patches = F.normalize(k_patches, dim=4)
+
+        q = q[:, :, None, None, :, :, :]
+        scores = (q * k_patches).sum(dim=4) * self.scale
+
+        z_penalty = self.center_bias_z * self.z_offsets.abs().view(1, 1, K, 1, 1, 1)
+        xy_penalty = self.center_bias_xy * (
+            self.dx_offsets.abs() + self.dy_offsets.abs()
+        ).view(1, 1, 1, self.R2, 1, 1)
+        scores = scores - z_penalty - xy_penalty
+
+        if self.rel_bias is not None:
+            scores = scores + self.rel_bias.view(1, self.nhead, K, self.R2, 1, 1)
+
+        scores_flat = scores.reshape(B, self.nhead, K * self.R2, h, w)
+        weights_flat = torch.softmax(
+            scores_flat / max(float(self.temperature), 1.0e-6),
+            dim=2,
+        )
+        weights = weights_flat.view(B, self.nhead, K, self.R2, h, w)
+
+        out = (weights[:, :, :, :, None, :, :] * v_patches).sum(dim=(2, 3))
+        out = out.reshape(B, C, h, w)
+        out = self.out_proj(out)
+
+        weights_mean = weights.mean(dim=1)
+        z_weights = weights_mean.sum(dim=2)
+        exp_dz = (
+            weights_mean * self.z_offsets.view(1, K, 1, 1, 1)
+        ).sum(dim=(1, 2)).unsqueeze(1)
+        exp_dx = (
+            weights_mean * self.dx_offsets.view(1, 1, self.R2, 1, 1)
+        ).sum(dim=(1, 2)).unsqueeze(1)
+        exp_dy = (
+            weights_mean * self.dy_offsets.view(1, 1, self.R2, 1, 1)
+        ).sum(dim=(1, 2)).unsqueeze(1)
+        weights_safe = weights_flat.clamp_min(1.0e-8)
+        entropy = -(weights_safe * weights_safe.log()).sum(dim=2).mean()
+
+        aux = {
+            "weights": weights_mean,
+            "z_weights": z_weights,
+            "exp_dz": exp_dz,
+            "exp_dx": exp_dx,
+            "exp_dy": exp_dy,
+            "entropy": entropy.detach(),
+        }
+        return out, aux
+
+
+class Local2p5DTransformerBlock(nn.Module):
+    """Source-dominant local 2.5D cross-attention block with gated residual and FFN."""
+
+    def __init__(
+        self,
+        feat_ch=192,
+        nhead=4,
+        ref_stack_size=5,
+        window_size=5,
+        temperature=1.0,
+        center_bias_z=0.05,
+        center_bias_xy=0.02,
+        mlp_ratio=2.0,
+        gate_init=-2.0,
+        use_relative_bias=True,
+    ):
+        super().__init__()
+        self.gate_init = gate_init
+
+        self.norm_src = nn.GroupNorm(1, feat_ch)
+        self.norm_ref = nn.GroupNorm(1, feat_ch)
+        self.norm_ffn = nn.GroupNorm(1, feat_ch)
+
+        self.attn = MultiHeadLocal2p5DCrossAttention(
+            feat_ch=feat_ch,
+            nhead=nhead,
+            ref_stack_size=ref_stack_size,
+            window_size=window_size,
+            temperature=temperature,
+            center_bias_z=center_bias_z,
+            center_bias_xy=center_bias_xy,
+            use_relative_bias=use_relative_bias,
+        )
+
+        self.gate_attn = nn.Conv2d(feat_ch * 2, feat_ch, kernel_size=3, padding=1)
+        hidden = int(feat_ch * mlp_ratio)
+        self.ffn = nn.Sequential(
+            nn.Conv2d(feat_ch, hidden, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1, groups=hidden),
+            nn.GELU(),
+            nn.Conv2d(hidden, feat_ch, kernel_size=1),
+        )
+        self.gate_ffn = nn.Parameter(torch.tensor(float(gate_init)))
+
+        self.last_gate_attn_mean = None
+        self.last_gate_ffn = None
+        self.reset_gate()
+
+    def reset_gate(self):
+        nn.init.zeros_(self.gate_attn.weight)
+        nn.init.constant_(self.gate_attn.bias, self.gate_init)
+        with torch.no_grad():
+            self.gate_ffn.fill_(float(self.gate_init))
+
+    def _norm_ref_stack(self, ref_feat):
+        B, K, C, H, W = ref_feat.shape
+        ref_flat = ref_feat.reshape(B * K, C, H, W)
+        ref_flat = self.norm_ref(ref_flat)
+        return ref_flat.view(B, K, C, H, W)
+
+    def forward(self, src_feat, ref_feat):
+        src_norm = self.norm_src(src_feat)
+        ref_norm = self._norm_ref_stack(ref_feat)
+
+        attn_out, aux = self.attn(src_norm, ref_norm)
+
+        gate = torch.sigmoid(self.gate_attn(torch.cat([src_feat, attn_out], dim=1)))
+        self.last_gate_attn_mean = gate.detach().mean()
+        h = src_feat + gate * attn_out
+
+        ffn_out = self.ffn(self.norm_ffn(h))
+        gate_ffn = torch.sigmoid(self.gate_ffn)
+        self.last_gate_ffn = gate_ffn.detach()
+        h = h + gate_ffn * ffn_out
+
+        aux["gate_attn"] = self.last_gate_attn_mean
+        aux["gate_ffn"] = self.last_gate_ffn
+        return h, aux
+
+
 class CrossAttnFuseBlock(nn.Module):
     def __init__(self, feat_ch=128):
         super().__init__()
@@ -524,6 +744,13 @@ class ProposedSynthesisCrossAttn(nn.Module):
         cross_attn_temperature=1.0,
         cross_attn_center_bias_z=0.05,
         cross_attn_center_bias_xy=0.02,
+        residual_fusion=True,
+        fusion_gate_init=-2.0,
+        use_transformer_attn=False,
+        cross_attn_nhead=4,
+        cross_attn_mlp_ratio=2.0,
+        cross_attn_relative_bias=True,
+        cross_attn_gate_init=-2.0,
         use_multiple_outputs=False,
         use_triple_outputs=False,
         is_3d=False,
@@ -539,28 +766,55 @@ class ProposedSynthesisCrossAttn(nn.Module):
         self.output_nc = output_nc
         self.feat_ch = feat_ch
         self.ref_stack_size = ref_stack_size
+        self.residual_fusion = residual_fusion
+        self.fusion_gate_init = fusion_gate_init
+        self.use_transformer_attn = use_transformer_attn
+        self.cross_attn_nhead = cross_attn_nhead
+        self.cross_attn_mlp_ratio = cross_attn_mlp_ratio
+        self.cross_attn_relative_bias = cross_attn_relative_bias
+        self.cross_attn_gate_init = cross_attn_gate_init
         self.last_attn_aux = None
         self.last_conf_map = None
 
         self.source_encoder = ConstantChannelEncoder(in_ch=input_nc, feat_ch=feat_ch)
         self.ref_encoder = ConstantChannelEncoder(in_ch=1, feat_ch=feat_ch)
 
-        attn_kwargs = dict(
-            feat_ch=feat_ch,
-            attn_ch=cross_attn_ch,
-            ref_stack_size=ref_stack_size,
-            window_size=cross_attn_window,
-            temperature=cross_attn_temperature,
-            center_bias_z=cross_attn_center_bias_z,
-            center_bias_xy=cross_attn_center_bias_xy,
-        )
-        self.attn3 = Local2p5DCrossAttention(**attn_kwargs)
-        self.attn4 = Local2p5DCrossAttention(**attn_kwargs)
-        self.attn5 = Local2p5DCrossAttention(**attn_kwargs)
+        if self.use_transformer_attn:
+            trans_kwargs = dict(
+                feat_ch=feat_ch,
+                nhead=cross_attn_nhead,
+                ref_stack_size=ref_stack_size,
+                window_size=cross_attn_window,
+                temperature=cross_attn_temperature,
+                center_bias_z=cross_attn_center_bias_z,
+                center_bias_xy=cross_attn_center_bias_xy,
+                mlp_ratio=cross_attn_mlp_ratio,
+                gate_init=cross_attn_gate_init,
+                use_relative_bias=cross_attn_relative_bias,
+            )
+            self.trans3 = Local2p5DTransformerBlock(**trans_kwargs)
+            self.trans4 = Local2p5DTransformerBlock(**trans_kwargs)
+            self.trans5 = Local2p5DTransformerBlock(**trans_kwargs)
+            self.attn3 = self.attn4 = self.attn5 = None
+            self.fuse3 = self.fuse4 = self.fuse5 = None
+        else:
+            attn_kwargs = dict(
+                feat_ch=feat_ch,
+                attn_ch=cross_attn_ch,
+                ref_stack_size=ref_stack_size,
+                window_size=cross_attn_window,
+                temperature=cross_attn_temperature,
+                center_bias_z=cross_attn_center_bias_z,
+                center_bias_xy=cross_attn_center_bias_xy,
+            )
+            self.attn3 = Local2p5DCrossAttention(**attn_kwargs)
+            self.attn4 = Local2p5DCrossAttention(**attn_kwargs)
+            self.attn5 = Local2p5DCrossAttention(**attn_kwargs)
+            self.trans3 = self.trans4 = self.trans5 = None
 
-        self.fuse3 = CrossAttnFuseBlock(feat_ch)
-        self.fuse4 = CrossAttnFuseBlock(feat_ch)
-        self.fuse5 = CrossAttnFuseBlock(feat_ch)
+            self.fuse3 = CrossAttnFuseBlock(feat_ch)
+            self.fuse4 = CrossAttnFuseBlock(feat_ch)
+            self.fuse5 = CrossAttnFuseBlock(feat_ch)
 
         self.up4 = UpBlock(feat_ch)
         self.up3 = UpBlock(feat_ch)
@@ -568,6 +822,12 @@ class ProposedSynthesisCrossAttn(nn.Module):
         self.up1 = UpBlock(feat_ch)
 
         self.final = nn.Conv2d(feat_ch, output_nc, kernel_size=3, padding=1)
+
+    def reset_fusion_gates(self):
+        for name in ("trans3", "trans4", "trans5", "fuse3", "fuse4", "fuse5"):
+            module = getattr(self, name, None)
+            if module is not None and hasattr(module, "reset_gate"):
+                module.reset_gate()
 
     def _encode_ref_stack(self, ref_stack):
         B, K, H, W = ref_stack.shape
@@ -593,13 +853,18 @@ class ProposedSynthesisCrossAttn(nn.Module):
         Fs1, Fs2, Fs3, Fs4, Fs5 = self.source_encoder(x)
         Fr1, Fr2, Fr3, Fr4, Fr5 = self._encode_ref_stack(ref_stack)
 
-        A3, aux3 = self.attn3(Fs3, Fr3)
-        A4, aux4 = self.attn4(Fs4, Fr4)
-        A5, aux5 = self.attn5(Fs5, Fr5)
+        if self.use_transformer_attn:
+            H3, aux3 = self.trans3(Fs3, Fr3)
+            H4, aux4 = self.trans4(Fs4, Fr4)
+            H5, aux5 = self.trans5(Fs5, Fr5)
+        else:
+            A3, aux3 = self.attn3(Fs3, Fr3)
+            A4, aux4 = self.attn4(Fs4, Fr4)
+            A5, aux5 = self.attn5(Fs5, Fr5)
 
-        H3 = self.fuse3(Fs3, A3)
-        H4 = self.fuse4(Fs4, A4)
-        H5 = self.fuse5(Fs5, A5)
+            H3 = self.fuse3(Fs3, A3)
+            H4 = self.fuse4(Fs4, A4)
+            H5 = self.fuse5(Fs5, A5)
 
         self.last_attn_aux = {
             "s3": aux3,
