@@ -380,7 +380,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
         attn_aux = getattr(self.netG_A, "last_attn_aux", None)
         if attn_aux is not None:
-            for scale_name in ("s3", "s4", "s5"):
+            for scale_name in ("s2", "s3", "s4", "s5"):
                 aux = attn_aux.get(scale_name, None)
                 if aux is None:
                     continue

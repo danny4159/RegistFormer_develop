@@ -741,6 +741,7 @@ class ProposedSynthesisCrossAttn(nn.Module):
         ref_stack_size=3,
         cross_attn_ch=64,
         cross_attn_window=3,
+        cross_attn_windows=None,
         cross_attn_temperature=1.0,
         cross_attn_center_bias_z=0.05,
         cross_attn_center_bias_xy=0.02,
@@ -773,6 +774,13 @@ class ProposedSynthesisCrossAttn(nn.Module):
         self.cross_attn_mlp_ratio = cross_attn_mlp_ratio
         self.cross_attn_relative_bias = cross_attn_relative_bias
         self.cross_attn_gate_init = cross_attn_gate_init
+        if cross_attn_windows is None:
+            cross_attn_windows = [cross_attn_window] * 4
+        if len(cross_attn_windows) == 3:
+            cross_attn_windows = [cross_attn_windows[0]] + list(cross_attn_windows)
+        if len(cross_attn_windows) != 4:
+            raise ValueError(f"cross_attn_windows must have 4 values for attn2/3/4/5, got {cross_attn_windows}")
+        self.cross_attn_windows = [int(w) for w in cross_attn_windows]
         self.last_attn_aux = None
         self.last_conf_map = None
 
@@ -780,38 +788,48 @@ class ProposedSynthesisCrossAttn(nn.Module):
         self.ref_encoder = ConstantChannelEncoder(in_ch=1, feat_ch=feat_ch)
 
         if self.use_transformer_attn:
-            trans_kwargs = dict(
-                feat_ch=feat_ch,
-                nhead=cross_attn_nhead,
-                ref_stack_size=ref_stack_size,
-                window_size=cross_attn_window,
-                temperature=cross_attn_temperature,
-                center_bias_z=cross_attn_center_bias_z,
-                center_bias_xy=cross_attn_center_bias_xy,
-                mlp_ratio=cross_attn_mlp_ratio,
-                gate_init=cross_attn_gate_init,
-                use_relative_bias=cross_attn_relative_bias,
-            )
-            self.trans3 = Local2p5DTransformerBlock(**trans_kwargs)
-            self.trans4 = Local2p5DTransformerBlock(**trans_kwargs)
-            self.trans5 = Local2p5DTransformerBlock(**trans_kwargs)
+            def make_trans(window_size):
+                return Local2p5DTransformerBlock(
+                    feat_ch=feat_ch,
+                    nhead=cross_attn_nhead,
+                    ref_stack_size=ref_stack_size,
+                    window_size=window_size,
+                    temperature=cross_attn_temperature,
+                    center_bias_z=cross_attn_center_bias_z,
+                    center_bias_xy=cross_attn_center_bias_xy,
+                    mlp_ratio=cross_attn_mlp_ratio,
+                    gate_init=cross_attn_gate_init,
+                    use_relative_bias=cross_attn_relative_bias,
+                )
+
+            self.trans2 = make_trans(self.cross_attn_windows[0])
+            self.trans3 = make_trans(self.cross_attn_windows[1])
+            self.trans4 = make_trans(self.cross_attn_windows[2])
+            self.trans5 = make_trans(self.cross_attn_windows[3])
             self.attn3 = self.attn4 = self.attn5 = None
+            self.attn2 = None
             self.fuse3 = self.fuse4 = self.fuse5 = None
+            self.fuse2 = None
         else:
-            attn_kwargs = dict(
-                feat_ch=feat_ch,
-                attn_ch=cross_attn_ch,
-                ref_stack_size=ref_stack_size,
-                window_size=cross_attn_window,
-                temperature=cross_attn_temperature,
-                center_bias_z=cross_attn_center_bias_z,
-                center_bias_xy=cross_attn_center_bias_xy,
-            )
-            self.attn3 = Local2p5DCrossAttention(**attn_kwargs)
-            self.attn4 = Local2p5DCrossAttention(**attn_kwargs)
-            self.attn5 = Local2p5DCrossAttention(**attn_kwargs)
+            def make_attn(window_size):
+                return Local2p5DCrossAttention(
+                    feat_ch=feat_ch,
+                    attn_ch=cross_attn_ch,
+                    ref_stack_size=ref_stack_size,
+                    window_size=window_size,
+                    temperature=cross_attn_temperature,
+                    center_bias_z=cross_attn_center_bias_z,
+                    center_bias_xy=cross_attn_center_bias_xy,
+                )
+
+            self.attn2 = make_attn(self.cross_attn_windows[0])
+            self.attn3 = make_attn(self.cross_attn_windows[1])
+            self.attn4 = make_attn(self.cross_attn_windows[2])
+            self.attn5 = make_attn(self.cross_attn_windows[3])
+            self.trans2 = None
             self.trans3 = self.trans4 = self.trans5 = None
 
+            self.fuse2 = CrossAttnFuseBlock(feat_ch)
             self.fuse3 = CrossAttnFuseBlock(feat_ch)
             self.fuse4 = CrossAttnFuseBlock(feat_ch)
             self.fuse5 = CrossAttnFuseBlock(feat_ch)
@@ -824,7 +842,7 @@ class ProposedSynthesisCrossAttn(nn.Module):
         self.final = nn.Conv2d(feat_ch, output_nc, kernel_size=3, padding=1)
 
     def reset_fusion_gates(self):
-        for name in ("trans3", "trans4", "trans5", "fuse3", "fuse4", "fuse5"):
+        for name in ("trans2", "trans3", "trans4", "trans5", "fuse2", "fuse3", "fuse4", "fuse5"):
             module = getattr(self, name, None)
             if module is not None and hasattr(module, "reset_gate"):
                 module.reset_gate()
@@ -854,19 +872,23 @@ class ProposedSynthesisCrossAttn(nn.Module):
         Fr1, Fr2, Fr3, Fr4, Fr5 = self._encode_ref_stack(ref_stack)
 
         if self.use_transformer_attn:
+            H2, aux2 = self.trans2(Fs2, Fr2)
             H3, aux3 = self.trans3(Fs3, Fr3)
             H4, aux4 = self.trans4(Fs4, Fr4)
             H5, aux5 = self.trans5(Fs5, Fr5)
         else:
+            A2, aux2 = self.attn2(Fs2, Fr2)
             A3, aux3 = self.attn3(Fs3, Fr3)
             A4, aux4 = self.attn4(Fs4, Fr4)
             A5, aux5 = self.attn5(Fs5, Fr5)
 
+            H2 = self.fuse2(Fs2, A2)
             H3 = self.fuse3(Fs3, A3)
             H4 = self.fuse4(Fs4, A4)
             H5 = self.fuse5(Fs5, A5)
 
         self.last_attn_aux = {
+            "s2": aux2,
             "s3": aux3,
             "s4": aux4,
             "s5": aux5,
@@ -874,13 +896,13 @@ class ProposedSynthesisCrossAttn(nn.Module):
 
         D4 = self.up4(H5, H4)
         D3 = self.up3(D4, H3)
-        D2 = self.up2(D3, Fs2)
+        D2 = self.up2(D3, H2)
         D1 = self.up1(D2, Fs1)
 
         out = torch.tanh(self.final(D1))
 
         if encode_only:
-            feat_list = [Fs1, Fs2, H3, H4, H5, D3, D2]
+            feat_list = [Fs1, H2, H3, H4, H5, D3, D2]
             if layers is None or len(layers) == 0:
                 return feat_list
             return [feat_list[i] for i in layers]
