@@ -31,11 +31,18 @@ netG_A:
   ref_stack_size: ${data.ref_stack_size}
   z_agg_deep: false          # true: 3-layer z_agg (K->hidden->hidden->1), false: 2-layer (K->hidden->1)
   # v23: Z-difference residual affine modulation.
-  use_zdiff_residual: true
+  use_zdiff_residual: false
   zdiff_hidden: 16
   zdiff_use_abs: true
   zdiff_alpha_init: -4.0
   zdiff_mode: "affine"
+  # v24: Slice-token z-attention residual modulation.
+  use_zslice_attn_residual: true
+  zslice_attn_hidden: 16
+  zslice_attn_temperature: 1.0
+  zslice_attn_center_bias: 0.05
+  zslice_attn_alpha_init: -6.0
+  zslice_attn_value_mode: "slice_style"
   # Confidence gating (opt-in). false -> 기존 동작과 완전히 동일.
   use_confidence_gating: false   # true: ref에서 confidence map 추출 + StyleConv residual gating
   conf_init_bias: 2.0            # sigmoid(2.0)≈0.88, 학습 초기 conf high (baseline에 가깝게 출발)

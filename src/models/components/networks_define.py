@@ -318,6 +318,8 @@ def define_G(**kwargs):
     net = init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
     if hasattr(net, 'reset_zdiff_parameters'):
         net.reset_zdiff_parameters()
+    if hasattr(net, 'reset_zslice_attn_parameters'):
+        net.reset_zslice_attn_parameters()
     return net
 
 

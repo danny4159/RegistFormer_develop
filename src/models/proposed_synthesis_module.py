@@ -128,6 +128,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         zdiff_delta_abs = getattr(self.netG_A, 'last_zdiff_delta_abs', None)
         zdiff_scale_abs = getattr(self.netG_A, 'last_zdiff_scale_abs', None)
         zdiff_bias_abs = getattr(self.netG_A, 'last_zdiff_bias_abs', None)
+        zslice_alpha = getattr(self.netG_A, 'last_zslice_alpha', None)
+        zslice_entropy = getattr(self.netG_A, 'last_zslice_entropy', None)
+        zslice_center_mass = getattr(self.netG_A, 'last_zslice_center_mass', None)
+        zslice_neighbor_mass = getattr(self.netG_A, 'last_zslice_neighbor_mass', None)
 
         # Effective style refs for contextual and NCE real-side
         # 2.5D: real_b_ref is K-channel stack
@@ -390,6 +394,14 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             self.log("ZDiff_scale_abs", zdiff_scale_abs, prog_bar=False)
         if zdiff_bias_abs is not None:
             self.log("ZDiff_bias_abs", zdiff_bias_abs, prog_bar=False)
+        if zslice_alpha is not None:
+            self.log("ZSlice_alpha", zslice_alpha, prog_bar=False)
+        if zslice_entropy is not None:
+            self.log("ZSlice_entropy", zslice_entropy, prog_bar=False)
+        if zslice_center_mass is not None:
+            self.log("ZSlice_center_mass", zslice_center_mass, prog_bar=False)
+        if zslice_neighbor_mass is not None:
+            self.log("ZSlice_neighbor_mass", zslice_neighbor_mass, prog_bar=False)
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G

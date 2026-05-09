@@ -8,6 +8,93 @@ def get_layer_by_dim(is_3d):
     Norm = getattr(nn, f'InstanceNorm{dim}d')
     return Conv, Norm, dim
 
+class SliceTokenZAttentionResidual(nn.Module):
+    """Source-conditioned z-slice attention without xy search."""
+
+    def __init__(
+        self,
+        ref_stack_size=3,
+        hidden=16,
+        temperature=1.0,
+        center_bias=0.05,
+        value_mode='slice_style',
+    ):
+        super().__init__()
+        self.K = ref_stack_size
+        self.temperature = temperature
+        self.center_bias = center_bias
+        self.value_mode = value_mode
+
+        self.src_enc = nn.Sequential(
+            nn.Conv2d(1, hidden, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(hidden, affine=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+        self.ref_enc = nn.Sequential(
+            nn.Conv2d(1, hidden, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(hidden, affine=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+        self.score_net = nn.Sequential(
+            nn.Conv2d(hidden * 3, hidden, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden, 1, kernel_size=1),
+        )
+
+        if value_mode == 'slice_style':
+            self.value_proj = nn.Sequential(
+                nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
+            )
+        elif value_mode == 'raw':
+            self.value_proj = None
+        else:
+            raise ValueError(f"Unknown value_mode: {value_mode}")
+
+    def forward(self, source, ref_stack):
+        B, K, H, W = ref_stack.shape
+        if K != self.K:
+            raise ValueError(f"Expected K={self.K}, got K={K}.")
+
+        src_feat = self.src_enc(source)
+        C = src_feat.shape[1]
+
+        ref_flat = ref_stack.reshape(B * K, 1, H, W)
+        ref_feat = self.ref_enc(ref_flat)
+        src_rep = (
+            src_feat[:, None, ...]
+            .expand(B, K, C, H, W)
+            .reshape(B * K, C, H, W)
+        )
+
+        score_in = torch.cat([src_rep, ref_feat, torch.abs(src_rep - ref_feat)], dim=1)
+        logits = self.score_net(score_in).reshape(B, K, H, W)
+
+        center = K // 2
+        penalties = torch.tensor(
+            [abs(i - center) * self.center_bias for i in range(K)],
+            device=logits.device,
+            dtype=logits.dtype,
+        ).view(1, K, 1, 1)
+        logits = logits - penalties
+        z_weights = torch.softmax(
+            logits / max(float(self.temperature), 1.0e-6),
+            dim=1,
+        )
+
+        if self.value_mode == 'raw':
+            values = ref_stack
+        else:
+            values = self.value_proj(ref_feat).reshape(B, K, H, W)
+
+        z_style = torch.sum(z_weights * values, dim=1, keepdim=True)
+        return z_style, z_weights
+
 class ProposedSynthesisModule(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
@@ -29,6 +116,12 @@ class ProposedSynthesisModule(nn.Module):
             self.zdiff_use_abs = kwargs.get('zdiff_use_abs', True)
             self.zdiff_alpha_init = kwargs.get('zdiff_alpha_init', -4.0)
             self.zdiff_mode = kwargs.get('zdiff_mode', 'affine')
+            self.use_zslice_attn_residual = kwargs.get('use_zslice_attn_residual', False)
+            self.zslice_attn_hidden = kwargs.get('zslice_attn_hidden', 16)
+            self.zslice_attn_temperature = kwargs.get('zslice_attn_temperature', 1.0)
+            self.zslice_attn_center_bias = kwargs.get('zslice_attn_center_bias', 0.05)
+            self.zslice_attn_alpha_init = kwargs.get('zslice_attn_alpha_init', -4.0)
+            self.zslice_attn_value_mode = kwargs.get('zslice_attn_value_mode', 'slice_style')
             # Confidence gating (opt-in). When True, build a confidence branch
             # that gates StyleConv modulation residually. Disabled in 3D path.
             self.use_confidence_gating = kwargs.get('use_confidence_gating', False)
@@ -46,6 +139,11 @@ class ProposedSynthesisModule(nn.Module):
         self.last_zdiff_delta_abs = None
         self.last_zdiff_scale_abs = None
         self.last_zdiff_bias_abs = None
+        self._zslice_attn_active = bool(self.use_zslice_attn_residual) and bool(self.use_25d_style) and (not self.is_3d)
+        self.last_zslice_alpha = None
+        self.last_zslice_entropy = None
+        self.last_zslice_center_mass = None
+        self.last_zslice_neighbor_mass = None
 
         Conv, _, _ = get_layer_by_dim(self.is_3d)
 
@@ -117,6 +215,29 @@ class ProposedSynthesisModule(nn.Module):
         else:
             self.zdiff_encoders = None
             self.zdiff_alpha_logits = None
+
+        if self._zslice_attn_active:
+            if self.ref_stack_size < 3:
+                raise ValueError("use_zslice_attn_residual requires ref_stack_size >= 3.")
+            if not hasattr(self, 'z_aggs'):
+                raise ValueError("use_zslice_attn_residual requires use_25d_style=True.")
+
+            self.zslice_attn_aggs = nn.ModuleList([
+                SliceTokenZAttentionResidual(
+                    ref_stack_size=self.ref_stack_size,
+                    hidden=self.zslice_attn_hidden,
+                    temperature=self.zslice_attn_temperature,
+                    center_bias=self.zslice_attn_center_bias,
+                    value_mode=self.zslice_attn_value_mode,
+                )
+                for _ in range(self.num_style_streams)
+            ])
+            self.zslice_attn_alpha_logits = nn.Parameter(
+                torch.full((self.num_style_streams,), float(self.zslice_attn_alpha_init))
+            )
+        else:
+            self.zslice_attn_aggs = None
+            self.zslice_attn_alpha_logits = None
 
         # Confidence head(s). Built only when gating is active.
         # 2.5D: per-stream head consumes K-channel ref stack -> 1ch logit.
@@ -243,11 +364,23 @@ class ProposedSynthesisModule(nn.Module):
         with torch.no_grad():
             self.zdiff_alpha_logits.fill_(float(self.zdiff_alpha_init))
 
+    def reset_zslice_attn_parameters(self):
+        if not self._zslice_attn_active:
+            return
+        with torch.no_grad():
+            self.zslice_attn_alpha_logits.fill_(float(self.zslice_attn_alpha_init))
+
     def _clear_zdiff_logs(self):
         self.last_zdiff_alpha = None
         self.last_zdiff_delta_abs = None
         self.last_zdiff_scale_abs = None
         self.last_zdiff_bias_abs = None
+
+    def _clear_zslice_logs(self):
+        self.last_zslice_alpha = None
+        self.last_zslice_entropy = None
+        self.last_zslice_center_mass = None
+        self.last_zslice_neighbor_mass = None
 
     def _compute_zdiff(self, ref_chunk):
         """Build neighbor-center through-plane difference maps."""
@@ -264,10 +397,11 @@ class ProposedSynthesisModule(nn.Module):
             z_diff = torch.cat([z_diff, z_diff.abs()], dim=1)
         return z_diff
 
-    def _aggregate_ref_stack(self, ref_all):
+    def _aggregate_ref_stack(self, source, ref_all):
         """2.5D: [B, num_streams*K, H, W] -> [B, num_streams, H, W]"""
         if not self.use_25d_style:
             self._clear_zdiff_logs()
+            self._clear_zslice_logs()
             return ref_all
         chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
 
@@ -276,9 +410,32 @@ class ProposedSynthesisModule(nn.Module):
         delta_logs = []
         scale_logs = []
         bias_logs = []
+        zslice_alpha_logs = []
+        zslice_entropy_logs = []
+        zslice_center_logs = []
+        zslice_neighbor_logs = []
 
         for stream_idx, (chunk, z_agg) in enumerate(zip(chunks, self.z_aggs)):
             base_style = z_agg(chunk)
+            style_map = base_style
+
+            if self._zslice_attn_active:
+                z_style, z_weights = self.zslice_attn_aggs[stream_idx](source, chunk)
+                alpha = torch.sigmoid(self.zslice_attn_alpha_logits[stream_idx])
+                alpha_view = alpha.view(1, 1, 1, 1)
+                style_map = style_map + alpha_view * (z_style - base_style)
+
+                center_idx = self.ref_stack_size // 2
+                center_mass = z_weights[:, center_idx:center_idx + 1].mean()
+                neighbor_mass = 1.0 - center_mass
+                entropy = -(
+                    z_weights.clamp_min(1.0e-8) * z_weights.clamp_min(1.0e-8).log()
+                ).sum(dim=1).mean()
+
+                zslice_alpha_logs.append(alpha.detach())
+                zslice_entropy_logs.append(entropy.detach())
+                zslice_center_logs.append(center_mass.detach())
+                zslice_neighbor_logs.append(neighbor_mass.detach())
 
             if self._zdiff_active:
                 z_diff = self._compute_zdiff(chunk)
@@ -290,7 +447,7 @@ class ProposedSynthesisModule(nn.Module):
                     delta_scale = delta[:, 0:1, :, :]
                     delta_bias = delta[:, 1:2, :, :]
                     style_map = (
-                        base_style * (1.0 + alpha_view * torch.tanh(delta_scale))
+                        style_map * (1.0 + alpha_view * torch.tanh(delta_scale))
                         + alpha_view * delta_bias
                     )
                     scale_logs.append(delta_scale.detach().abs().mean())
@@ -300,9 +457,6 @@ class ProposedSynthesisModule(nn.Module):
 
                 alpha_logs.append(alpha.detach())
                 delta_logs.append(delta.detach().abs().mean())
-            else:
-                style_map = base_style
-
             style_maps.append(style_map)
 
         if self._zdiff_active and len(alpha_logs) > 0:
@@ -317,14 +471,22 @@ class ProposedSynthesisModule(nn.Module):
         else:
             self._clear_zdiff_logs()
 
+        if self._zslice_attn_active and len(zslice_alpha_logs) > 0:
+            self.last_zslice_alpha = torch.stack(zslice_alpha_logs).mean()
+            self.last_zslice_entropy = torch.stack(zslice_entropy_logs).mean()
+            self.last_zslice_center_mass = torch.stack(zslice_center_logs).mean()
+            self.last_zslice_neighbor_mass = torch.stack(zslice_neighbor_logs).mean()
+        else:
+            self._clear_zslice_logs()
+
         return torch.cat(style_maps, dim=1)
 
-    def _build_style_and_conf(self, ref_all):
+    def _build_style_and_conf(self, source, ref_all):
         """Returns (style, conf). conf is None when gating is inactive.
         2D : ref_all [B, num_streams, H, W] -> conf [B, num_streams, H, W]
         2.5D: ref_all [B, num_streams*K, H, W] -> conf [B, num_streams, H, W]
         """
-        style = self._aggregate_ref_stack(ref_all)
+        style = self._aggregate_ref_stack(source, ref_all)
         if not self._gating_active:
             return style, None
         if self.use_25d_style:
@@ -340,7 +502,7 @@ class ProposedSynthesisModule(nn.Module):
 
         x = merged_input[:, :1, ...]
         ref_all = merged_input[:, 1:, ...]
-        ref, conf = self._build_style_and_conf(ref_all)  # conf is None when gating off
+        ref, conf = self._build_style_and_conf(x, ref_all)  # conf is None when gating off
 
         if self.is_3d:
             ref = ref.permute(0, 1, 4, 2, 3)
