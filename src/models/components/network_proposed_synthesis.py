@@ -24,6 +24,11 @@ class ProposedSynthesisModule(nn.Module):
             self.use_25d_style = kwargs.get('use_25d_style', False)
             self.ref_stack_size = kwargs.get('ref_stack_size', 3)
             self.z_agg_deep = kwargs.get('z_agg_deep', False)
+            self.use_zdiff_residual = kwargs.get('use_zdiff_residual', False)
+            self.zdiff_hidden = kwargs.get('zdiff_hidden', 16)
+            self.zdiff_use_abs = kwargs.get('zdiff_use_abs', True)
+            self.zdiff_alpha_init = kwargs.get('zdiff_alpha_init', -4.0)
+            self.zdiff_mode = kwargs.get('zdiff_mode', 'affine')
             # Confidence gating (opt-in). When True, build a confidence branch
             # that gates StyleConv modulation residually. Disabled in 3D path.
             self.use_confidence_gating = kwargs.get('use_confidence_gating', False)
@@ -36,6 +41,11 @@ class ProposedSynthesisModule(nn.Module):
         # Effective gating flag: only active in 2D / 2.5D paths.
         self._gating_active = bool(self.use_confidence_gating) and (not self.is_3d)
         self.last_conf_map = None
+        self._zdiff_active = bool(self.use_zdiff_residual) and bool(self.use_25d_style) and (not self.is_3d)
+        self.last_zdiff_alpha = None
+        self.last_zdiff_delta_abs = None
+        self.last_zdiff_scale_abs = None
+        self.last_zdiff_bias_abs = None
 
         Conv, _, _ = get_layer_by_dim(self.is_3d)
 
@@ -70,6 +80,43 @@ class ProposedSynthesisModule(nn.Module):
                         nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
                     )
             self.z_aggs = nn.ModuleList([_make_z_agg() for _ in range(self.num_style_streams)])
+
+        if self._zdiff_active:
+            if self.ref_stack_size < 3:
+                raise ValueError("use_zdiff_residual requires ref_stack_size >= 3.")
+            if not hasattr(self, 'z_aggs'):
+                raise ValueError("use_zdiff_residual requires use_25d_style=True.")
+
+            zdiff_in_ch = self.ref_stack_size - 1
+            if self.zdiff_use_abs:
+                zdiff_in_ch *= 2
+
+            if self.zdiff_mode == 'affine':
+                zdiff_out_ch = 2
+            elif self.zdiff_mode == 'add':
+                zdiff_out_ch = 1
+            else:
+                raise ValueError(f"Unknown zdiff_mode: {self.zdiff_mode}")
+
+            def _make_zdiff_encoder():
+                return nn.Sequential(
+                    nn.Conv2d(zdiff_in_ch, self.zdiff_hidden, kernel_size=3, padding=1),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Conv2d(self.zdiff_hidden, self.zdiff_hidden, kernel_size=3, padding=1),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Conv2d(self.zdiff_hidden, zdiff_out_ch, kernel_size=3, padding=1),
+                )
+
+            self.zdiff_encoders = nn.ModuleList([
+                _make_zdiff_encoder()
+                for _ in range(self.num_style_streams)
+            ])
+            self.zdiff_alpha_logits = nn.Parameter(
+                torch.full((self.num_style_streams,), float(self.zdiff_alpha_init))
+            )
+        else:
+            self.zdiff_encoders = None
+            self.zdiff_alpha_logits = None
 
         # Confidence head(s). Built only when gating is active.
         # 2.5D: per-stream head consumes K-channel ref stack -> 1ch logit.
@@ -186,12 +233,90 @@ class ProposedSynthesisModule(nn.Module):
         #     self.conv_final = nn.Conv2d(self.feat_ch * ch // 4, self.output_nc, kernel_size=3, padding=1)
         self.conv_final = Conv(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
 
+    def reset_zdiff_parameters(self):
+        """Keep the residual branch closed after the global initializer runs."""
+        if not self._zdiff_active:
+            return
+        for enc in self.zdiff_encoders:
+            nn.init.zeros_(enc[-1].weight)
+            nn.init.zeros_(enc[-1].bias)
+        with torch.no_grad():
+            self.zdiff_alpha_logits.fill_(float(self.zdiff_alpha_init))
+
+    def _clear_zdiff_logs(self):
+        self.last_zdiff_alpha = None
+        self.last_zdiff_delta_abs = None
+        self.last_zdiff_scale_abs = None
+        self.last_zdiff_bias_abs = None
+
+    def _compute_zdiff(self, ref_chunk):
+        """Build neighbor-center through-plane difference maps."""
+        K = ref_chunk.shape[1]
+        center_idx = K // 2
+        center = ref_chunk[:, center_idx:center_idx + 1, :, :]
+        diffs = [
+            ref_chunk[:, i:i + 1, :, :] - center
+            for i in range(K)
+            if i != center_idx
+        ]
+        z_diff = torch.cat(diffs, dim=1)
+        if self.zdiff_use_abs:
+            z_diff = torch.cat([z_diff, z_diff.abs()], dim=1)
+        return z_diff
+
     def _aggregate_ref_stack(self, ref_all):
         """2.5D: [B, num_streams*K, H, W] -> [B, num_streams, H, W]"""
         if not self.use_25d_style:
+            self._clear_zdiff_logs()
             return ref_all
         chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
-        style_maps = [z_agg(chunk) for chunk, z_agg in zip(chunks, self.z_aggs)]
+
+        style_maps = []
+        alpha_logs = []
+        delta_logs = []
+        scale_logs = []
+        bias_logs = []
+
+        for stream_idx, (chunk, z_agg) in enumerate(zip(chunks, self.z_aggs)):
+            base_style = z_agg(chunk)
+
+            if self._zdiff_active:
+                z_diff = self._compute_zdiff(chunk)
+                delta = self.zdiff_encoders[stream_idx](z_diff)
+                alpha = torch.sigmoid(self.zdiff_alpha_logits[stream_idx])
+                alpha_view = alpha.view(1, 1, 1, 1)
+
+                if self.zdiff_mode == 'affine':
+                    delta_scale = delta[:, 0:1, :, :]
+                    delta_bias = delta[:, 1:2, :, :]
+                    style_map = (
+                        base_style * (1.0 + alpha_view * torch.tanh(delta_scale))
+                        + alpha_view * delta_bias
+                    )
+                    scale_logs.append(delta_scale.detach().abs().mean())
+                    bias_logs.append(delta_bias.detach().abs().mean())
+                else:
+                    style_map = base_style + alpha_view * delta
+
+                alpha_logs.append(alpha.detach())
+                delta_logs.append(delta.detach().abs().mean())
+            else:
+                style_map = base_style
+
+            style_maps.append(style_map)
+
+        if self._zdiff_active and len(alpha_logs) > 0:
+            self.last_zdiff_alpha = torch.stack(alpha_logs).mean()
+            self.last_zdiff_delta_abs = torch.stack(delta_logs).mean()
+            if len(scale_logs) > 0:
+                self.last_zdiff_scale_abs = torch.stack(scale_logs).mean()
+                self.last_zdiff_bias_abs = torch.stack(bias_logs).mean()
+            else:
+                self.last_zdiff_scale_abs = None
+                self.last_zdiff_bias_abs = None
+        else:
+            self._clear_zdiff_logs()
+
         return torch.cat(style_maps, dim=1)
 
     def _build_style_and_conf(self, ref_all):

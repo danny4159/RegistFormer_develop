@@ -124,6 +124,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # NCE encode_only calls below overwrite netG_A.last_conf_map. Holding the
         # tensor reference keeps gradients alive for the regularization terms.
         conf_for_reg = getattr(self.netG_A, 'last_conf_map', None)
+        zdiff_alpha = getattr(self.netG_A, 'last_zdiff_alpha', None)
+        zdiff_delta_abs = getattr(self.netG_A, 'last_zdiff_delta_abs', None)
+        zdiff_scale_abs = getattr(self.netG_A, 'last_zdiff_scale_abs', None)
+        zdiff_bias_abs = getattr(self.netG_A, 'last_zdiff_bias_abs', None)
 
         # Effective style refs for contextual and NCE real-side
         # 2.5D: real_b_ref is K-channel stack
@@ -377,6 +381,15 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_conf_mean = F.relu(conf_min_mean - conf_for_reg.mean()).pow(2) * lambda_conf_mean
                 self.log("ConfMean_Loss", loss_conf_mean.detach(), prog_bar=True)
                 loss_G += loss_conf_mean
+
+        if zdiff_alpha is not None:
+            self.log("ZDiff_alpha", zdiff_alpha, prog_bar=False)
+        if zdiff_delta_abs is not None:
+            self.log("ZDiff_delta_abs", zdiff_delta_abs, prog_bar=False)
+        if zdiff_scale_abs is not None:
+            self.log("ZDiff_scale_abs", zdiff_scale_abs, prog_bar=False)
+        if zdiff_bias_abs is not None:
+            self.log("ZDiff_bias_abs", zdiff_bias_abs, prog_bar=False)
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G

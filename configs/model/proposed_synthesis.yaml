@@ -30,6 +30,12 @@ netG_A:
   use_25d_style: ${data.use_25d_style}
   ref_stack_size: ${data.ref_stack_size}
   z_agg_deep: false          # true: 3-layer z_agg (K->hidden->hidden->1), false: 2-layer (K->hidden->1)
+  # v23: Z-difference residual affine modulation.
+  use_zdiff_residual: true
+  zdiff_hidden: 16
+  zdiff_use_abs: true
+  zdiff_alpha_init: -4.0
+  zdiff_mode: "affine"
   # Confidence gating (opt-in). false -> 기존 동작과 완전히 동일.
   use_confidence_gating: false   # true: ref에서 confidence map 추출 + StyleConv residual gating
   conf_init_bias: 2.0            # sigmoid(2.0)≈0.88, 학습 초기 conf high (baseline에 가깝게 출발)
@@ -67,7 +73,7 @@ netF_A: # For PatchNCELoss
   init_type: 'xavier' #'xavier'
   init_gain: 0.02
   nc: 256
-  input_nc: 512 # ${model.netG_A.feat_ch} #TODO: input_nc must be 'feat_ch * output_nc'  for multiple/triple outputs
+  input_nc: ${..netG_A.feat_ch} # TODO: input_nc must be 'feat_ch * output_nc' for multiple/triple outputs
 
 
 

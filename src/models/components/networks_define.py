@@ -315,7 +315,10 @@ def define_G(**kwargs):
         net = DiffusionModelUNet(**kwargs)
     else:
         raise ValueError('This netG_type is not expected')
-    return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
+    net = init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
+    if hasattr(net, 'reset_zdiff_parameters'):
+        net.reset_zdiff_parameters()
+    return net
 
 
 def define_D(
