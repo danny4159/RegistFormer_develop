@@ -12,7 +12,9 @@ class GaussianBlur2d(nn.Module):
         kernel = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
         kernel = kernel / kernel.sum()
         kernel = kernel.view(1, 1, kernel_size, kernel_size).repeat(channels, 1, 1, 1)
-        self.register_buffer('kernel', kernel)
+        # persistent=False: device tracking은 되지만 state_dict에 저장 안 됨.
+        # → Original checkpoint 로딩 시 mismatch 없음.
+        self.register_buffer('kernel', kernel, persistent=False)
         self.groups = channels
         self.pad = kernel_size // 2
 
