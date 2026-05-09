@@ -378,6 +378,16 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 self.log("ConfMean_Loss", loss_conf_mean.detach(), prog_bar=True)
                 loss_G += loss_conf_mean
 
+        # HP refine monitoring — always log when refiner is active.
+        refine_info = getattr(self.netG_A, 'last_refine_info', None)
+        if refine_info is not None:
+            self.log("HPRef_alpha",        refine_info['hp_alpha'],                          prog_bar=True)
+            self.log("HPRef_mask_mean",    refine_info['hp_mask'].mean().detach(),           prog_bar=True)
+            self.log("HPRef_mask_std",     refine_info['hp_mask'].std().detach(),            prog_bar=True)
+            self.log("HPRef_res_abs",      refine_info['hp_residual'].abs().mean().detach(), prog_bar=True)
+            self.log("HPRef_res_clip_abs", refine_info['hp_residual_clipped'].abs().mean().detach(), prog_bar=True)
+            self.log("HPRef_delta_abs",    refine_info['hp_delta'].abs().mean().detach(),    prog_bar=True)
+
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
         # assert not torch.isnan(loss_G).any(), "Total Loss is NaN"

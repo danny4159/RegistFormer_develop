@@ -2,6 +2,72 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+class GaussianBlur2d(nn.Module):
+    """Fixed 2D Gaussian blur (no learnable params). Uses reflect padding."""
+    def __init__(self, channels=1, kernel_size=5, sigma=1.0):
+        super().__init__()
+        ax = torch.arange(kernel_size, dtype=torch.float32) - kernel_size // 2
+        xx, yy = torch.meshgrid(ax, ax, indexing='ij')
+        kernel = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
+        kernel = kernel / kernel.sum()
+        kernel = kernel.view(1, 1, kernel_size, kernel_size).repeat(channels, 1, 1, 1)
+        self.register_buffer('kernel', kernel)
+        self.groups = channels
+        self.pad = kernel_size // 2
+
+    def forward(self, x):
+        xp = F.pad(x, (self.pad, self.pad, self.pad, self.pad), mode='reflect')
+        return F.conv2d(xp, self.kernel, padding=0, groups=self.groups)
+
+
+class FixedReliabilityHPRefiner(nn.Module):
+    """
+    Deterministic (no learnable params) HP residual injection:
+
+        fake_final = fake_base + alpha * mask * clipped_HP(ref_center - fake_base)
+
+    mask  = exp(-|blur(ref) - blur(fake)| / tau_low)   [low-freq reliability]
+    HP(x) = x - blur(x)
+    clip  = hp_clip * tanh(HP / hp_clip)               [soft clipping]
+
+    Both fake_base and ref_center must be in the same intensity range.
+    """
+    def __init__(self, alpha=0.20, kernel_size=5, sigma=1.0,
+                 tau_low=0.20, hp_clip=0.20, clamp_output=True):
+        super().__init__()
+        self.blur = GaussianBlur2d(channels=1, kernel_size=kernel_size, sigma=sigma)
+        self.alpha    = float(alpha)
+        self.tau_low  = float(tau_low)
+        self.hp_clip  = float(hp_clip)
+        self.clamp_output = clamp_output
+
+    def highpass(self, x):
+        return x - self.blur(x)
+
+    def forward(self, fake_base, ref_center):
+        diff        = ref_center - fake_base
+        diff_hp     = self.highpass(diff)
+        diff_clip   = self.hp_clip * torch.tanh(diff_hp / (self.hp_clip + 1e-8))
+
+        low_fake    = self.blur(fake_base)
+        low_ref     = self.blur(ref_center)
+        mask        = torch.exp(-torch.abs(low_ref - low_fake) / (self.tau_low + 1e-8))
+
+        delta       = self.alpha * mask * diff_clip
+        fake_final  = fake_base + delta
+        if self.clamp_output:
+            fake_final = torch.clamp(fake_final, -1.0, 1.0)
+
+        return fake_final, {
+            'hp_alpha':           torch.tensor(self.alpha, device=fake_base.device),
+            'hp_mask':            mask.detach(),
+            'hp_residual':        diff_hp.detach(),
+            'hp_residual_clipped': diff_clip.detach(),
+            'hp_delta':           delta.detach(),
+        }
+
+
 def get_layer_by_dim(is_3d):
     dim = 3 if is_3d else 2
     Conv = getattr(nn, f'Conv{dim}d')
@@ -29,6 +95,11 @@ class ProposedSynthesisModule(nn.Module):
             self.use_confidence_gating = kwargs.get('use_confidence_gating', False)
             self.conf_init_bias = kwargs.get('conf_init_bias', 2.0)
             self.conf_detach = kwargs.get('conf_detach', False)
+            # Fixed reliability HP residual refinement (opt-in, 2D/2.5D single-output only).
+            self.use_hp_refine  = kwargs.get('use_hp_refine',   False)
+            self.hp_ref_alpha   = float(kwargs.get('hp_ref_alpha',   0.20))
+            self.hp_ref_tau_low = float(kwargs.get('hp_ref_tau_low', 0.20))
+            self.hp_ref_clip    = float(kwargs.get('hp_ref_clip',    0.20))
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -186,6 +257,21 @@ class ProposedSynthesisModule(nn.Module):
         #     self.conv_final = nn.Conv2d(self.feat_ch * ch // 4, self.output_nc, kernel_size=3, padding=1)
         self.conv_final = Conv(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
 
+        # Fixed HP refiner: active only for 2D/2.5D single-output.
+        self.last_refine_info = None
+        _hp_eligible = (not self.is_3d) and (not self.use_multiple_outputs) and (not self.use_triple_outputs)
+        if self.use_hp_refine and _hp_eligible:
+            self.hp_refiner = FixedReliabilityHPRefiner(
+                alpha=self.hp_ref_alpha,
+                kernel_size=5,
+                sigma=1.0,
+                tau_low=self.hp_ref_tau_low,
+                hp_clip=self.hp_ref_clip,
+                clamp_output=True,
+            )
+        else:
+            self.hp_refiner = None
+
     def _aggregate_ref_stack(self, ref_all):
         """2.5D: [B, num_streams*K, H, W] -> [B, num_streams, H, W]"""
         if not self.use_25d_style:
@@ -312,8 +398,21 @@ class ProposedSynthesisModule(nn.Module):
             # 마지막에 합쳐서 반환
             out = torch.cat((out_1, out_2), dim=1)  # [B, output_nc, H, W]
         else:
-            out = self.conv_final(feat6)
-            out = torch.tanh(out)
+            fake_base = torch.tanh(self.conv_final(feat6))
+
+            if self.hp_refiner is not None:
+                # ref_all: [B, K, H, W] for 2.5D or [B, 1, H, W] for 2D.
+                # Extract center slice — same intensity range as fake_base.
+                K = ref_all.shape[1]
+                ref_center = ref_all[:, K // 2: K // 2 + 1]
+                if self.training and torch.rand(1).item() < 0.001:
+                    print(f"[HPRefine] fake_base [{fake_base.min():.2f}, {fake_base.max():.2f}]"
+                          f"  ref_center [{ref_center.min():.2f}, {ref_center.max():.2f}]")
+                out, refine_info = self.hp_refiner(fake_base, ref_center)
+                self.last_refine_info = refine_info
+            else:
+                out = fake_base
+                self.last_refine_info = None
 
         if encode_only:
             layers_dict = {0: feat0, 1: feat1, 2: feat2, 3: feat3, 4: feat4, 5: feat5, 6: feat6}
