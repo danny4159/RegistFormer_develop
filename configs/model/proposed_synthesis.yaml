@@ -36,7 +36,7 @@ netG_A:
   conf_detach: false             # true: conf로의 gradient 차단 (gating만 영향, conf 학습은 reg loss로만)
   # Fixed reliability HP residual refinement (opt-in, 2D/2.5D single-output only).
   # fake_final = fake_base + alpha * mask * clipped_HP(ref_center - fake_base)
-  use_hp_refine: false           # true: deterministic HP residual injection 활성화
+  use_hp_refine: true            # true: deterministic HP residual injection 활성화
   hp_ref_alpha: 0.20             # 주입량 고정 스칼라 (oracle 기준 best: 0.20)
   hp_ref_tau_low: 0.20           # 신뢰도 마스크 온도 (낮을수록 선택적, 0.10~0.20 권장)
   hp_ref_clip: 0.20              # soft clipping 한계값 (폭주 방지)
