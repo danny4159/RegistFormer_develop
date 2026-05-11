@@ -435,7 +435,7 @@ class ImageSavingCallback(Callback):
         preds_b = (self.normalize_np(a) * 255).astype(np.uint8)
         return a, b, a2, b2, preds_a, preds_b
 
-    def save_nii(self, a_nii, b_nii, c_nii, d_nii, e_nii, subject_number, folder_path):
+    def save_nii(self, a_nii, b_nii, c_nii, d_nii, e_nii, subject_number, folder_path, f_nii=None):
         nib.save(a_nii, os.path.join(folder_path, f"a_{subject_number}.nii.gz"))
         nib.save(b_nii, os.path.join(folder_path, f"b_{subject_number}.nii.gz"))
         nib.save(c_nii, os.path.join(folder_path, f"preds_a_{subject_number}.nii.gz"))
@@ -446,6 +446,10 @@ class ImageSavingCallback(Callback):
         if e_nii is not None:
             nib.save(
                 e_nii, os.path.join(folder_path, f"preds_c_{subject_number}.nii.gz")
+            )
+        if f_nii is not None:
+            nib.save(
+                f_nii, os.path.join(folder_path, f"b_moved_{subject_number}.nii.gz")
             )
         return
     
@@ -477,15 +481,16 @@ class ImageSavingCallback(Callback):
         preds_b_tif.save(os.path.join(folder_path, f"{subject_number}_preds_b.tif"))
         return
     
-    def saving_to_nii(self, a, b, preds_a, preds_b=None, preds_c=None):
+    def saving_to_nii(self, a, b, preds_a, preds_b=None, preds_c=None, b_moved=None):
         if preds_a is None:
             preds_a = torch.zeros_like(a)
         if preds_b is None:
             preds_b = torch.zeros_like(a)
         if preds_c is None:
             preds_c = torch.zeros_like(a)
-            
+
         a, b, preds_a, preds_b, preds_c, _= self.change_torch_numpy(a, b, preds_a, preds_b, preds_c)
+        b_moved_np = b_moved.cpu().detach().numpy()[0, 0] if b_moved is not None else None
         if a.ndim == 2: # 2D image
             self.img_a.append(a)
             self.img_b.append(b)
@@ -494,6 +499,8 @@ class ImageSavingCallback(Callback):
                 self.img_preds_b.append(preds_b)
             if preds_c is not None:
                 self.img_preds_c.append(preds_c)
+            if b_moved_np is not None:
+                self.img_b_moved.append(b_moved_np)
 
             if len(self.img_a) == self.subject_slice_num[0]:
                 a_nii = np.stack(self.img_a, -1)
@@ -507,12 +514,16 @@ class ImageSavingCallback(Callback):
                     preds_c_nii = np.stack(self.img_preds_c, -1)
                 else:
                     preds_c_nii = a_nii * 0
-
+                b_moved_nii = np.stack(self.img_b_moved, -1) if self.img_b_moved else None
 
                 # convert numpy to nii
                 a_nii, b_nii, preds_a_nii, preds_b_nii, preds_c_nii = self.change_numpy_nii(
                     a_nii, b_nii, preds_a_nii, preds_b_nii, preds_c_nii, flag_normalize=self.flag_normalize
                 )
+                if b_moved_nii is not None:
+                    _, b_moved_nii, _, _, _ = self.change_numpy_nii(
+                        b_moved_nii, b_moved_nii, b_moved_nii, b_moved_nii, b_moved_nii, flag_normalize=self.flag_normalize
+                    )
                 # save nii image to (.nii) file
                 self.save_nii(
                     a_nii,
@@ -522,6 +533,7 @@ class ImageSavingCallback(Callback):
                     preds_c_nii if preds_c is not None else None,
                     subject_number=self.dataset_list[0], # 환자이름으로저장
                     folder_path=self.save_folder_name,
+                    f_nii=b_moved_nii,
                 )
 
                 # empty list
@@ -532,6 +544,7 @@ class ImageSavingCallback(Callback):
                     self.img_preds_b = []
                 if preds_c is not None:
                     self.img_preds_c = []
+                self.img_b_moved = []
                 self.dataset_list.pop(0)
                 self.subject_slice_num.pop(0)
 
@@ -749,6 +762,7 @@ class ImageSavingCallback(Callback):
 
         self.img_a = []
         self.img_b = []
+        self.img_b_moved = []
         self.img_c = []
         self.img_d = []
         self.img_b_ref = []
@@ -814,7 +828,8 @@ class ImageSavingCallback(Callback):
         elif len(res) == 4:
             a, b, preds_a, preds_b = res
             if self.data_type == 'nifti':
-                self.saving_to_nii(a, b, preds_a, preds_b)
+                b_moved = batch[2] if (len(batch) == 3 and getattr(pl_module.params, 'use_misalign_simul', False)) else None
+                self.saving_to_nii(a, b, preds_a, preds_b, b_moved=b_moved)
             # elif self.data_type == 'photo':
             #     self.saving_to_tif(a, b, preds_a, preds_b)
 

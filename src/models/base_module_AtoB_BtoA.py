@@ -16,6 +16,7 @@ gray2rgb = lambda x: torch.cat((x, x, x), dim=1) if x.shape[1] == 1 else x
 # norm_0_to_1 = lambda x: (x + 1) / 2
 flatten_to_1d = lambda x: x.view(-1)
 norm_to_uint8 = lambda x: ((x + 1) / 2 * 255).to(torch.uint8)
+clip_to_valid_range = lambda x: torch.clamp(x, -1.0, 1.0)
 
 class BaseModule_AtoB_BtoA(LightningModule):
     def __init__(self, params, *args: Any, **kwargs: Any):
@@ -171,16 +172,16 @@ class BaseModule_AtoB_BtoA(LightningModule):
             self.val_psnr_A.update(real_A2, fake_A)
             self.psnr_values_A.append(self.val_psnr_A.compute().item())
             self.val_psnr_A.reset()
-            self.val_lpips_A.update(gray2rgb(real_A2), gray2rgb(fake_A))
+            self.val_lpips_A.update(gray2rgb(clip_to_valid_range(real_A2)), gray2rgb(clip_to_valid_range(fake_A)))
             self.lpips_values_A.append(self.val_lpips_A.compute().item())
-            self.val_lpips_A.reset()            
+            self.val_lpips_A.reset()
             self.val_sharpness_A.update(norm_to_uint8(fake_A).float())
 
             self.val_ssim_B.update(real_B2, fake_B)
             self.val_psnr_B.update(real_B2, fake_B)
             self.psnr_values_B.append(self.val_psnr_B.compute().item())
             self.val_psnr_B.reset()
-            self.val_lpips_B.update(gray2rgb(real_B2), gray2rgb(fake_B))
+            self.val_lpips_B.update(gray2rgb(clip_to_valid_range(real_B2)), gray2rgb(clip_to_valid_range(fake_B)))
             self.lpips_values_B.append(self.val_lpips_B.compute().item())
             self.val_lpips_B.reset()
             self.val_sharpness_B.update(norm_to_uint8(fake_B).float())
@@ -277,7 +278,7 @@ class BaseModule_AtoB_BtoA(LightningModule):
             self.psnr_values_A.append(self.test_psnr_A.compute().item())
             self.test_psnr_A.reset()
             # self.test_lpips_A.update(real_A2, fake_A)
-            self.test_lpips_A.update(gray2rgb(real_A2), gray2rgb(fake_A))
+            self.test_lpips_A.update(gray2rgb(clip_to_valid_range(real_A2)), gray2rgb(clip_to_valid_range(fake_A)))
             self.lpips_values_A.append(self.test_lpips_A.compute().item())
             self.test_lpips_A.reset()
             self.test_sharpness_A.update(norm_to_uint8(fake_A).float())
@@ -287,7 +288,7 @@ class BaseModule_AtoB_BtoA(LightningModule):
             self.psnr_values_B.append(self.test_psnr_B.compute().item())
             self.test_psnr_B.reset()
             # self.test_lpips_B.update(real_B2, fake_B)
-            self.test_lpips_B.update(gray2rgb(real_B2), gray2rgb(fake_B))
+            self.test_lpips_B.update(gray2rgb(clip_to_valid_range(real_B2)), gray2rgb(clip_to_valid_range(fake_B)))
             self.lpips_values_B.append(self.test_lpips_B.compute().item())
             self.test_lpips_B.reset()
             self.test_sharpness_B.update(norm_to_uint8(fake_B).float())
