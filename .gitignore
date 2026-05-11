@@ -151,10 +151,12 @@ configs/local/default.yaml
 /data/
 /logs*/
 /dummy/
+/scripts/dummy/
 .env
 !/data/**/*.gitkeep
 !/logs*/**/*.gitkeep
 !/dummy/**/*.gitkeep
+!/scripts/dummy/**/*.gitkeep
 
 # Aim logging
 .aim
