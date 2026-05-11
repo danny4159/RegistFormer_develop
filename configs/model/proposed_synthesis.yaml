@@ -30,10 +30,6 @@ netG_A:
   use_25d_style: ${data.use_25d_style}
   ref_stack_size: ${data.ref_stack_size}
   z_agg_deep: false          # true: 3-layer z_agg (K->hidden->hidden->1), false: 2-layer (K->hidden->1)
-  # Confidence gating (opt-in). false -> 기존 동작과 완전히 동일.
-  use_confidence_gating: false   # true: ref에서 confidence map 추출 + StyleConv residual gating
-  conf_init_bias: 2.0            # sigmoid(2.0)≈0.88, 학습 초기 conf high (baseline에 가깝게 출발)
-  conf_detach: false             # true: conf로의 gradient 차단 (gating만 영향, conf 학습은 reg loss로만)
   # init_type: 'kaiming'
 
 netD_A:
@@ -99,7 +95,3 @@ params: # Other params
   ctx_center_only: false     # true: 2.5D에서도 center slice만으로 ctx loss 계산 (2D equivalent)
   ctx_softmin_tau: 0.3       # soft-min temperature (작을수록 hard-min에 가까움)
   ctx_shift_penalty: 0.05    # center slice preference bias per neighbor step
-  # Confidence regularization (only active when use_confidence_gating=true AND lambda > 0).
-  lambda_conf_smooth: 0.0    # TV smoothness on conf map. 추천 시작값: 1.0e-4
-  lambda_conf_mean: 0.0      # collapse 방지 (conf가 0으로 가는 걸 막음). 추천 시작값: 1.0e-3
-  conf_min_mean: 0.5         # 위 lambda_conf_mean 사용 시 conf 평균 하한선
