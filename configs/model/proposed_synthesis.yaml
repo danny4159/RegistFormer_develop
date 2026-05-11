@@ -68,6 +68,7 @@ netF_A: # For PatchNCELoss
 
 
 params: # Other params
+  lambda_gan: 1
   lambda_style: 5
   # lambda_cycle_a: 1
   # lambda_cycle_b: 1
