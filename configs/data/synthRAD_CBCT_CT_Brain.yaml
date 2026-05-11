@@ -23,18 +23,21 @@ use_split_inference: False # Inference for valid and test is divided into half f
 eval_on_align: False
 use_sliding_inference: False
 use_multiple_outputs: False
+use_triple_outputs: False
 use_misalign_simul: False
 use_25d_style: False
 ref_stack_size: 3
+apply_rigid_registration: true  # True: training 시작 시 3D rigid registration 수행 후 캐싱
+registration_targets: [3, 5, 7]  # group_1 기준 fixed, 여기 명시된 group만 moving으로 등록 (정의 안된 group은 자동 스킵)
 
 ## Dataset File Name
 # prepared_data_0_0_0_0_0_ver3_final.h5
 # Ver3_AllPatientSameSize_final_2.h5
 # Ver3_OnlyOnePatient.h5
 # Registration_MR_CT_synCT.h5
-train_file: 'preprocessed_data_NoPercentClip_final2.h5'
-val_file: 'preprocessed_data_NoPercentClip_final2.h5'
-test_file: 'preprocessed_data_NoPercentClip_final2.h5' 
+train_file: 'preprocessed_data_NoPercentClip_final2_30Patient.h5'
+val_file: 'preprocessed_data_NoPercentClip_final2_onlyOne.h5'
+test_file: 'preprocessed_data_NoPercentClip_final2_10Patient.h5' 
 
 ## Preprocessing
 reverse: False # New
