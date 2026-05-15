@@ -21,6 +21,7 @@ num_workers: 6 # 3
 pin_memory: False
 use_split_inference: False # Inference for valid and test is divided into half from the original image (for memory issue)
 eval_on_align: False
+use_misalign_simul: True
 use_sliding_inference: False
 use_multiple_outputs: False
 

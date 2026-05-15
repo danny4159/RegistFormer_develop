@@ -105,25 +105,25 @@ class BaseModule_Registration(LightningModule):  # single direction
         if self.params.eval_on_align:
             if len(evaluation_img.size()) == 5:
                 for i in range(evaluation_img.size(4)): # 3D image
-                    self.val_ssim_B.update(fixed_img[:, :, :, :, i], warped_img[:, :, :, :, i])
-                    self.val_psnr_B.update(fixed_img[:, :, :, :, i], warped_img[:, :, :, :, i])
+                    self.val_ssim_B.update(evaluation_img[:, :, :, :, i], warped_img[:, :, :, :, i])
+                    self.val_psnr_B.update(evaluation_img[:, :, :, :, i], warped_img[:, :, :, :, i])
                     self.psnr_values_B.append(self.val_psnr_B.compute().item())
                     self.val_psnr_B.reset()
-                    fixed_img = torch.clamp(fixed_img, -1, 1)
+                    evaluation_img = torch.clamp(evaluation_img, -1, 1)
                     warped_img = torch.clamp(warped_img, -1, 1)
-                    self.val_lpips_B.update(gray2rgb(fixed_img[:, :, :, :, i]), gray2rgb(warped_img[:, :, :, :, i]))
+                    self.val_lpips_B.update(gray2rgb(evaluation_img[:, :, :, :, i]), gray2rgb(warped_img[:, :, :, :, i]))
                     self.lpips_values_B.append(self.val_lpips_B.compute().item())
                     self.val_lpips_B.reset()
                     self.val_sharpness_B.update(norm_to_uint8(warped_img[:, :, :, :, i]).float())
-            
+
             elif len(evaluation_img.size()) == 4: # 2D image
-                self.val_ssim_B.update(fixed_img, warped_img)
-                self.val_psnr_B.update(fixed_img, warped_img)
+                self.val_ssim_B.update(evaluation_img, warped_img)
+                self.val_psnr_B.update(evaluation_img, warped_img)
                 self.psnr_values_B.append(self.val_psnr_B.compute().item())
                 self.val_psnr_B.reset()
-                fixed_img = torch.clamp(fixed_img, -1, 1)
+                evaluation_img = torch.clamp(evaluation_img, -1, 1)
                 warped_img = torch.clamp(warped_img, -1, 1)
-                self.val_lpips_B.update(gray2rgb(fixed_img), gray2rgb(warped_img))
+                self.val_lpips_B.update(gray2rgb(evaluation_img), gray2rgb(warped_img))
                 self.lpips_values_B.append(self.val_lpips_B.compute().item())
                 self.val_lpips_B.reset()
                 self.val_sharpness_B.update(norm_to_uint8(warped_img).float())
@@ -197,25 +197,24 @@ class BaseModule_Registration(LightningModule):  # single direction
         if self.params.eval_on_align:
             if len(evaluation_img.size()) == 5:
                 for i in range(evaluation_img.size(4)):
-                    self.test_ssim_B.update(fixed_img[:, :, :, :, i], warped_img[:, :, :, :, i])
-                    self.test_psnr_B.update(fixed_img[:, :, :, :, i], warped_img[:, :, :, :, i])
+                    self.test_ssim_B.update(evaluation_img[:, :, :, :, i], warped_img[:, :, :, :, i])
+                    self.test_psnr_B.update(evaluation_img[:, :, :, :, i], warped_img[:, :, :, :, i])
                     self.psnr_values_B.append(self.test_psnr_B.compute().item())
                     self.test_psnr_B.reset()
-                    fixed_img = torch.clamp(fixed_img, -1, 1)
+                    evaluation_img = torch.clamp(evaluation_img, -1, 1)
                     warped_img = torch.clamp(warped_img, -1, 1)
-                    self.test_lpips_B.update(gray2rgb(fixed_img[:, :, :, :, i]), gray2rgb(warped_img[:, :, :, :, i]))
+                    self.test_lpips_B.update(gray2rgb(evaluation_img[:, :, :, :, i]), gray2rgb(warped_img[:, :, :, :, i]))
                     self.lpips_values_B.append(self.test_lpips_B.compute().item())
                     self.test_lpips_B.reset()
                     self.test_sharpness_B.update(norm_to_uint8(warped_img[:, :, :, :, i]).float())
 
-            elif len(evaluation_img.size()) == 4: 
-                self.test_ssim_B.update(fixed_img, warped_img)
-                self.test_psnr_B.update(fixed_img, warped_img)
+            elif len(evaluation_img.size()) == 4:
+                self.test_ssim_B.update(evaluation_img, warped_img)
+                self.test_psnr_B.update(evaluation_img, warped_img)
                 self.psnr_values_B.append(self.test_psnr_B.compute().item())
                 self.test_psnr_B.reset()
-                # self.test_lpips_B.update(real_B2, fake_B)
-                self.test_lpips_B.update(gray2rgb(fixed_img), gray2rgb(warped_img))
-                fixed_img = torch.clamp(fixed_img, -1, 1)
+                self.test_lpips_B.update(gray2rgb(evaluation_img), gray2rgb(warped_img))
+                evaluation_img = torch.clamp(evaluation_img, -1, 1)
                 warped_img = torch.clamp(warped_img, -1, 1)
                 self.lpips_values_B.append(self.test_lpips_B.compute().item())
                 self.test_lpips_B.reset()

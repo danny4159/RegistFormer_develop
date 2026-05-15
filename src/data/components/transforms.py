@@ -312,12 +312,14 @@ class dataset_SynthRAD(Dataset):
             )
 
         # 3D rigid registration cache: registration_targets에 명시된 group → group_1 기준으로 정합
+        # group_2('B')도 registration_targets에 포함되면 캐싱 지원
         _group_map = {
             2: ('B', self.data_group_2), 3: ('C', self.data_group_3),
             4: ('D', self.data_group_4), 5: ('E', self.data_group_5),
             6: ('F', self.data_group_6), 7: ('G', self.data_group_7),
         }
         self.reg_cache = {}
+        self._rigid_cached_groups = set()  # which group numbers are in reg_cache
         if self.apply_rigid_registration and self.registration_targets:
             # target 번호 중 해당 group이 실제로 정의된 것만 사용
             moving_group_map = {
@@ -337,6 +339,7 @@ class dataset_SynthRAD(Dataset):
                         for cache_key, group in moving_group_map.items():
                             moving_vol = file[group][patient_key][...]
                             self.reg_cache[patient_key][cache_key] = _register_3d_rigid(fixed_vol, moving_vol)
+                self._rigid_cached_groups = set(moving_group_map.keys())  # e.g. {'B', 'C'}
                 log.info("[RigidReg] Done.")
 
     def _extract_slice(self, volume, slice_idx):
@@ -373,17 +376,17 @@ class dataset_SynthRAD(Dataset):
             patient_key = self.patient_keys[idx]
             with h5py.File(self.data_dir, "r") as file:
                 A = file[self.data_group_1][patient_key][...]
-                B = file[self.data_group_2][patient_key][...]
+                B = self.reg_cache[patient_key]['B'] if 'B' in self._rigid_cached_groups else file[self.data_group_2][patient_key][...]
                 if self.data_group_3:
-                    C = self.reg_cache[patient_key]['C'] if self.apply_rigid_registration else file[self.data_group_3][patient_key][...]
+                    C = self.reg_cache[patient_key]['C'] if 'C' in self._rigid_cached_groups else file[self.data_group_3][patient_key][...]
                 if self.data_group_4:
                     D = file[self.data_group_4][patient_key][...]
                 if self.data_group_5:
-                    E = self.reg_cache[patient_key]['E'] if self.apply_rigid_registration else file[self.data_group_5][patient_key][...]
+                    E = self.reg_cache[patient_key]['E'] if 'E' in self._rigid_cached_groups else file[self.data_group_5][patient_key][...]
                 if self.data_group_6:
                     F = file[self.data_group_6][patient_key][...]
                 if self.data_group_7:
-                    G = self.reg_cache[patient_key]['G'] if self.apply_rigid_registration else file[self.data_group_7][patient_key][...]
+                    G = self.reg_cache[patient_key]['G'] if 'G' in self._rigid_cached_groups else file[self.data_group_7][patient_key][...]
 
         else:
             patient_idx = np.searchsorted(self.cumulative_slice_counts, idx + 1) - 1
@@ -391,11 +394,11 @@ class dataset_SynthRAD(Dataset):
             patient_key = self.patient_keys[patient_idx]
             with h5py.File(self.data_dir, "r") as file:
                 vol_A = file[self.data_group_1][patient_key][...]
-                vol_B = file[self.data_group_2][patient_key][...]
+                vol_B = self.reg_cache[patient_key]['B'] if 'B' in self._rigid_cached_groups else file[self.data_group_2][patient_key][...]
                 A = self._extract_slice(vol_A, slice_idx)
                 B = self._extract_slice(vol_B, slice_idx)
                 if self.data_group_3:
-                    if self.apply_rigid_registration:
+                    if 'C' in self._rigid_cached_groups:
                         vol_C = self.reg_cache[patient_key]['C']
                         C = self._load_slice_stack_from_vol(vol_C, slice_idx) if self.use_25d_style else self._extract_slice(vol_C, slice_idx)
                     elif self.use_25d_style:
@@ -407,7 +410,7 @@ class dataset_SynthRAD(Dataset):
                     D = self._extract_slice(file[self.data_group_4][patient_key][...], slice_idx)
                 if self.data_group_5:
                     # group_5 is moved ref (odd) → K-stack when use_25d_style
-                    if self.apply_rigid_registration:
+                    if 'E' in self._rigid_cached_groups:
                         vol_E = self.reg_cache[patient_key]['E']
                         E = self._load_slice_stack_from_vol(vol_E, slice_idx) if self.use_25d_style else self._extract_slice(vol_E, slice_idx)
                     elif self.use_25d_style:
@@ -419,7 +422,7 @@ class dataset_SynthRAD(Dataset):
                     F = self._extract_slice(file[self.data_group_6][patient_key][...], slice_idx)
                 if self.data_group_7:
                     # group_7 is moved ref (odd) → K-stack when use_25d_style
-                    if self.apply_rigid_registration:
+                    if 'G' in self._rigid_cached_groups:
                         vol_G = self.reg_cache[patient_key]['G']
                         G = self._load_slice_stack_from_vol(vol_G, slice_idx) if self.use_25d_style else self._extract_slice(vol_G, slice_idx)
                     elif self.use_25d_style:

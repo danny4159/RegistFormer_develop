@@ -1,0 +1,45 @@
+##### IXI Cross-Modal Registration Config #####
+# Task: Register T1_moved_5mm (moving) → T2 (fixed)
+# Metric GT: T1 (aligned reference, same modality as moving)
+#
+# data_group_1: T1             → evaluation_img (GT for SSIM/PSNR/LPIPS)
+# data_group_2: T1_moved_5mm  → moving_img (artificially misaligned input)
+# data_group_3: T2             → fixed_img  (registration target/reference space)
+#
+# Loss: LCC(fixed=T2, warped=warped_T1_moved_5mm)
+# Eval: SSIM/PSNR/LPIPS(GT=T1, pred=warped_T1_moved_5mm)  [eval_on_align=True]
+
+## Core setting
+_target_: src.data.SynthRAD_MR_CT_Pelvis_datamodule.SynthRAD_MR_CT_Pelvis_DataModule
+name: IXI_Regist
+type: nifti
+data_dir: ${paths.root_dir}/data/IXI
+data_group_1: "T1"           # GT reference (aligned T1, for metric evaluation)
+data_group_2: "T1_moved_5mm" # Moving image (artificially misaligned T1)
+data_group_3: "T2"           # Fixed image  (registration target)
+data_group_4: null
+data_group_5: null
+is_3d: True
+batch_size: 1
+num_workers: 6
+pin_memory: False
+use_split_inference: False
+eval_on_align: True          # Use SSIM/PSNR/LPIPS with group_1 as GT
+use_misalign_simul: False
+use_sliding_inference: False
+use_multiple_outputs: False
+norm_ZeroToOne: False        # Data is already normalized to [-1, 1]
+apply_rigid_registration: False  # True: rigid pre-align group_2(T1_moved) → group_1(T1) before network registration
+registration_targets: [2]        # group_2(T1_moved) is rigidly registered to group_1(T1)
+
+## Dataset File Name (Ver4, 80-slice, 3D)
+train_file: 'IXI_Trainset_Ver4_T1_T2_PD_MRA_Registered_30Patient_MisalignSimul_Rotate5Translate5_NonLinearSig13_Mag650_CubicInterpolate_BackGroundOutFeather_SliceThicknessSimul_80Slice.h5'
+val_file:   'IXI_Valset_Ver4_T1_T2_PD_MRA_Registered_3Patient_MisalignSimul_Rotate5Translate5_NonLinearSig13_Mag650_CubicInterpolate_BackGroundOutFeather_SliceThicknessSimul_80Slice.h5'
+test_file:  'IXI_Testset_Ver4_T1_T2_PD_MRA_Registered_30Patient_MisalignSimul_Rotate5Translate5_NonLinearSig13_Mag650_CubicInterpolate_BackGroundOutFeather_SliceThicknessSimul_80Slice.h5'
+
+## Preprocessing
+reverse: False
+flip_prob: 0
+rot_prob: 0
+padding_size: null
+crop_size: null

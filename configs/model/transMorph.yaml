@@ -38,14 +38,14 @@ netR_A:
   out_indices: [0, 1, 2, 3]
   pat_merg_rf: 4
   reg_head_chan: 16
-  img_size: [192,192,256]  # MR-CT: [384, 320, 128] # [268, 224, 96] -> down interpolation 사이즈 # CBCT-CT: [192,192,256] -> 원래 사이즈가 196,196,2??이어서 192로 crop해줘야해. Val,Test도 crop 되게 해줘야.
-  # Transmorph에서 이미지 사이즈 조절 (16의 배수여야해.) 
-  # TODO: 
-  # 1. 여기 img_size조절.
-  # 2. TransMorph_Module에 new_size 조절
+  img_size: [256,256,80]  # 실제 데이터 크기. 네트워크 내부에서 32 배수로 자동 패딩됨.
 
 params: # Other params
-  lambda_grad: 0.02
+  lambda_l2: 0
+  lambda_grad: 0 # 0.02
+  lambda_smooth: 1
+  lambda_lcc: 1
+  lcc_win: 9
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   is_3d: ${data.is_3d}

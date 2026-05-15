@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 from src.losses.grad_loss import GradLoss, SmoothLoss
 from src.losses.mask_mse_loss import MaskMSELoss
+from src.losses.lcc_loss import LCCLoss
 
 from src import utils
 from src.models.base_module_registration import BaseModule_Registration
@@ -38,12 +39,18 @@ class VoxelmorphOriginalModule(BaseModule_Registration):
         self.criterionGrad = GradLoss(penalty='l2', loss_mult=2) # Regularize warped image
         self.criterionMaskL2 = MaskMSELoss()
         self.criterionSmooth = SmoothLoss() # Regularize deform field
+        self.criterionLCC = LCCLoss(win=getattr(params, 'lcc_win', 9))
+        # target depth for slice padding: use network's inshape if available, else 128
+        inshape = getattr(netR_A, 'inshape', None)
+        self._target_depth = inshape[-1] if inshape is not None else 128
 
     def pad_slice_to_128(self, tensor, padding_value=-1):
         # tensor shape: [batch, channel, height, width, slice]
+        # pad to the depth the network was built for (self._target_depth)
         slices = tensor.shape[-1]
-        if slices < 128:
-            padding = (0, 128 - slices)  # padding only on one side
+        target = self._target_depth
+        if slices < target:
+            padding = (0, target - slices)
             tensor = F.pad(tensor, padding, mode='constant', value=padding_value)
         return tensor
     
@@ -73,6 +80,11 @@ class VoxelmorphOriginalModule(BaseModule_Registration):
             loss_smooth = self.criterionSmooth(deform_field) * self.params.lambda_smooth
             self.log("Smooth_Loss", loss_smooth.detach(), prog_bar=True)
             loss_R += loss_smooth
+
+        if self.params.lambda_lcc > 0:
+            loss_lcc = self.criterionLCC(fixed_img, warped_img) * self.params.lambda_lcc
+            self.log("LCC_Loss", loss_lcc.detach(), prog_bar=True)
+            loss_R += loss_lcc
 
         self.log("R_loss", loss_R.detach(), prog_bar=True)
         

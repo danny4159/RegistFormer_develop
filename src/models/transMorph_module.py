@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 from src.losses.grad_loss import GradLoss, SmoothLoss
 from src.losses.mask_mse_loss import MaskMSELoss
+from src.losses.lcc_loss import LCCLoss
 
 from src import utils
 from src.models.base_module_registration import BaseModule_Registration
@@ -37,6 +38,12 @@ class TransMorph_Module(BaseModule_Registration):
 
         self.criterionMSE = nn.MSELoss()
         self.criterionGrad3d = Grad3d(penalty='l2')
+        self.criterionSmooth = SmoothLoss()
+        self.criterionLCC = LCCLoss(win=getattr(params, 'lcc_win', 9))
+        # net_img_size: 32-multiple padded size actually fed to the network
+        net_img_size = getattr(netR_A, 'net_img_size', None) or getattr(netR_A, 'img_size', None)
+        self._target_hw    = (net_img_size[0], net_img_size[1]) if net_img_size else (192, 192)
+        self._target_depth = net_img_size[2] if net_img_size else 256
 
     def pad_slice_to_96(self, tensor, padding_value=-1):
         # tensor shape: [batch, channel, height, width, slice]
@@ -58,12 +65,30 @@ class TransMorph_Module(BaseModule_Registration):
         # tensor shape: [batch, channel, height, width, slice]
         return tensor[..., :original_slices]
     
-    def backward_R(self, fixed_img, warped_img, deform_field): # grid_4 
-        loss_MSE = self.criterionMSE(fixed_img, warped_img)
+    def backward_R(self, fixed_img, warped_img, deform_field):
+        loss_R = 0.0
 
-        loss_Grad3d = self.criterionGrad3d(deform_field, fixed_img) * self.params.lambda_grad
+        if self.params.lambda_l2 > 0:
+            loss_l2 = self.criterionMSE(fixed_img, warped_img) * self.params.lambda_l2
+            self.log("L2_Loss", loss_l2.detach(), prog_bar=True)
+            loss_R += loss_l2
 
-        loss_R = loss_MSE + loss_Grad3d
+        if self.params.lambda_grad > 0:
+            loss_grad = self.criterionGrad3d(deform_field, fixed_img) * self.params.lambda_grad
+            self.log("Grad_Loss", loss_grad.detach(), prog_bar=True)
+            loss_R += loss_grad
+
+        if self.params.lambda_smooth > 0:
+            loss_smooth = self.criterionSmooth(deform_field) * self.params.lambda_smooth
+            self.log("Smooth_Loss", loss_smooth.detach(), prog_bar=True)
+            loss_R += loss_smooth
+
+        if self.params.lambda_lcc > 0:
+            loss_lcc = self.criterionLCC(fixed_img, warped_img) * self.params.lambda_lcc
+            self.log("LCC_Loss", loss_lcc.detach(), prog_bar=True)
+            loss_R += loss_lcc
+
+        self.log("R_loss", loss_R.detach(), prog_bar=True)
         return loss_R
 
     def resize_tensor(self, tensor, size):
@@ -97,34 +122,32 @@ class TransMorph_Module(BaseModule_Registration):
             evaluation_img, moving_img, fixed_img = batch
 
         if is_3d:
-
             _, _, H, W, D = evaluation_img.shape
-            # scale_factor = 0.7
-            # new_size = [int(H * scale_factor), int(W * scale_factor), int(D)]
-            new_size = [int(192), int(192), int(D)] #TODO: 이미지의 사이즈대로 세팅해줘야함
+            tH, tW, tD = self._target_hw[0], self._target_hw[1], self._target_depth
 
-            evaluation_img = F.interpolate(evaluation_img, size=new_size, mode='trilinear', align_corners=False)
-            moving_img = F.interpolate(moving_img, size=new_size, mode='trilinear', align_corners=False)
-            fixed_img = F.interpolate(fixed_img, size=new_size, mode='trilinear', align_corners=False)
+            # resize H,W if needed
+            if H != tH or W != tW:
+                new_size = [tH, tW, D]
+                evaluation_img = F.interpolate(evaluation_img, size=new_size, mode='trilinear', align_corners=False)
+                moving_img     = F.interpolate(moving_img,     size=new_size, mode='trilinear', align_corners=False)
+                fixed_img      = F.interpolate(fixed_img,      size=new_size, mode='trilinear', align_corners=False)
 
             original_slices = evaluation_img.shape[-1]
-            
-            evaluation_img = self.pad_slice_to_128(evaluation_img)
-            moving_img = self.pad_slice_to_128(moving_img)
-            fixed_img = self.pad_slice_to_128(fixed_img)
 
-            # interpolation
-            _, _, H, W, D = evaluation_img.shape
-            scale_factor = 0.8
-            new_size = [int(H * scale_factor), int(W * scale_factor), int(D * scale_factor)]
+            # pad depth if needed
+            if original_slices < tD:
+                pad = (0, tD - original_slices)
+                evaluation_img = F.pad(evaluation_img, pad, value=-1)
+                moving_img     = F.pad(moving_img,     pad, value=-1)
+                fixed_img      = F.pad(fixed_img,      pad, value=-1)
 
             moving_fixed_cat = torch.cat((moving_img, fixed_img), dim=1)
             warped_img, deform_field = self.netR_A(moving_fixed_cat)
-            
+
             evaluation_img = self.crop_slice_to_original(evaluation_img, original_slices)
-            moving_img = self.crop_slice_to_original(moving_img, original_slices)
-            fixed_img = self.crop_slice_to_original(fixed_img, original_slices)
-            warped_img = self.crop_slice_to_original(warped_img, original_slices)
+            moving_img     = self.crop_slice_to_original(moving_img,     original_slices)
+            fixed_img      = self.crop_slice_to_original(fixed_img,      original_slices)
+            warped_img     = self.crop_slice_to_original(warped_img,     original_slices)
 
         if self.params.use_misalign_simul:
             fixed_img = fixed_eval # fixed eval is aligned GT

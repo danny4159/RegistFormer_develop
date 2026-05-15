@@ -430,14 +430,22 @@ def define_R(**kwargs):
         net = GradICON(**kwargs)
     elif kwargs.get('netR_type') == 'voxelmorph_original':
         net = VxmDense(**kwargs)
+        net.inshape = kwargs.get('inshape')  # store for depth-padding in module
+    elif kwargs.get('netR_type') == 'transMorph':
+        orig_img_size = kwargs.get('img_size')
+        # TransMorph PatchMerging requires each dim divisible by 32 (4 patch * 8 = 32)
+        net_img_size = [((d + 31) // 32) * 32 for d in orig_img_size]
+        kwargs_net = dict(kwargs)
+        kwargs_net['img_size'] = net_img_size  # SpatialTransformer built for padded size
+        net = TransMorph(**kwargs_net)
+        net.img_size = orig_img_size    # original size (user-facing)
+        net.net_img_size = net_img_size  # padded size (used internally in model_step)
     elif kwargs.get('netR_type') == 'lapIRN_lv1':
         net = Miccai2020_LDR_laplacian_unit_disp_add_lvl1(**kwargs)
     elif kwargs.get('netR_type') == 'lapIRN_lv2':
         net = Miccai2020_LDR_laplacian_unit_disp_add_lvl2(**kwargs)
     elif kwargs.get('netR_type') == 'lapIRN_lv3':
         net = Miccai2020_LDR_laplacian_unit_disp_add_lvl3(**kwargs)
-    elif kwargs.get('netR_type') == 'transMorph':
-        net = TransMorph(**kwargs)
     else:
         raise ValueError('This netR_type is not expected')
     return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
