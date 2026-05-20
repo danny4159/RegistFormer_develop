@@ -120,13 +120,13 @@ params: # Other params
   src_bridge_alpha_extra_max: 1.15    # was 1.20 → slightly reduced
 
   # V11-independent: bridge-source main synthesis loss
-  use_src_bridge_main_loss: true
+  use_src_bridge_main_loss: false
   lambda_src_bridge_main_cx: 0.1
-  lambda_src_bridge_main_gan: 0.0     # off initially; enable after stable
+  lambda_src_bridge_main_gan: 0.0
 
   # V11-consistency: bridge-source output + feature consistency
-  use_src_artifact_consistency: false  # set true to enable consistency path
-  lambda_src_cons_out: 5.0            # ~5% of G_base (measured ~1% at 1.0)
+  use_src_artifact_consistency: true
+  lambda_src_cons_out: 5.0            # ~5% of G_base
   lambda_src_cons_feat: 0.2           # feature cons proportionally scaled
   src_cons_layers: [0, 2, 4, 6]
   use_src_cons_rampup: true
