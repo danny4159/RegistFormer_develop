@@ -99,19 +99,19 @@ params: # Other params
 
   # ── V10: Source artifact consistency (IOP robustness) ──────────────────────
   use_src_artifact_consistency: true
-  lambda_src_cons_out: 1.0          # output-level Charbonnier consistency
-  lambda_src_cons_feat: 0.05        # feature-level cosine-L1 consistency
+  lambda_src_cons_out: 6.0          # output-level Charbonnier consistency
+  lambda_src_cons_feat: 0.3         # feature-level cosine-L1 consistency
   src_cons_layers: [0, 2, 4, 6]
   use_src_cons_rampup: true
   src_cons_rampup_start: 10000      # 0 before this step
   src_cons_rampup_end: 50000        # full weight from this step
   src_artifact_prob: 1.0
-  src_blur_sigma_min: 0.3
-  src_blur_sigma_max: 1.2
-  src_bias_amp_min: 0.05
-  src_bias_amp_max: 0.20
+  src_blur_sigma_min: 0.1
+  src_blur_sigma_max: 0.5
+  src_bias_amp_min: 0.03
+  src_bias_amp_max: 0.08
   src_bias_grid_size: 8
-  src_intensity_scale_min: 0.95
-  src_intensity_scale_max: 1.05
-  src_intensity_shift_min: -0.03
-  src_intensity_shift_max: 0.03
+  src_intensity_scale_min: 0.97
+  src_intensity_scale_max: 1.03
+  src_intensity_shift_min: -0.02
+  src_intensity_shift_max: 0.02
