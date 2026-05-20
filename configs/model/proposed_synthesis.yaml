@@ -96,3 +96,39 @@ params: # Other params
   ctx_center_only: false     # true: 2.5D에서도 center slice만으로 ctx loss 계산 (2D equivalent)
   ctx_softmin_tau: 0.3       # soft-min temperature (작을수록 hard-min에 가까움)
   ctx_shift_penalty: 0.05    # center slice preference bias per neighbor step
+
+  # ── V11: Source Style Bridge ────────────────────────────────────────────────
+  # x_bridge = x + alpha * (x_art - x)  (alpha>1: mild extrapolation)
+  use_src_style_bridge: true
+
+  # bridge artifact transform params
+  src_bridge_prob: 1.0
+  src_bridge_blur_sigma_min: 0.3
+  src_bridge_blur_sigma_max: 0.8      # was 1.0 → reduced (input_L1 was 2x target)
+  src_bridge_bias_amp_min: 0.03
+  src_bridge_bias_amp_max: 0.10       # was 0.15 → reduced
+  src_bridge_bias_grid_size: 8
+  src_bridge_intensity_scale_min: 0.95
+  src_bridge_intensity_scale_max: 1.05  # was 0.92/1.08 → reduced
+  src_bridge_intensity_shift_min: -0.02
+  src_bridge_intensity_shift_max: 0.02  # was -0.04/0.04 → reduced
+
+  # alpha sampling
+  src_bridge_alpha_min: 0.2
+  src_bridge_alpha_max: 1.0
+  src_bridge_extrapolate_prob: 0.10   # 10% chance of alpha > 1
+  src_bridge_alpha_extra_max: 1.15    # was 1.20 → slightly reduced
+
+  # V11-independent: bridge-source main synthesis loss
+  use_src_bridge_main_loss: true
+  lambda_src_bridge_main_cx: 0.1
+  lambda_src_bridge_main_gan: 0.0     # off initially; enable after stable
+
+  # V11-consistency: bridge-source output + feature consistency
+  use_src_artifact_consistency: false  # set true to enable consistency path
+  lambda_src_cons_out: 5.0            # ~5% of G_base (measured ~1% at 1.0)
+  lambda_src_cons_feat: 0.2           # feature cons proportionally scaled
+  src_cons_layers: [0, 2, 4, 6]
+  use_src_cons_rampup: true
+  src_cons_rampup_start: 10000
+  src_cons_rampup_end: 50000

@@ -1,3 +1,4 @@
+import math
 import numpy as np
 
 from typing import Any
@@ -108,6 +109,117 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             cx_losses.append(self.criterionContextual(ref_stack[:, i:i+1], fake_img).squeeze())
             shift_penalties.append(abs(i - center_idx) * shift_penalty_base)
         return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
+
+    # ── V11: Source Style Bridge helpers ─────────────────────────────────────
+
+    def _rand_uniform(self, low, high, device):
+        return torch.empty(1, device=device).uniform_(float(low), float(high)).item()
+
+    def _gaussian_kernel2d(self, sigma, device, dtype, truncate=3.0):
+        radius = max(1, int(truncate * sigma + 0.5))
+        x = torch.arange(-radius, radius + 1, device=device, dtype=dtype)
+        kernel1d = torch.exp(-(x**2) / (2 * sigma**2))
+        kernel1d = kernel1d / kernel1d.sum()
+        kernel2d = kernel1d[:, None] * kernel1d[None, :]
+        return kernel2d[None, None, :, :]
+
+    def _gaussian_blur(self, x, sigma):
+        if sigma <= 0:
+            return x
+        B, C, H, W = x.shape
+        kernel = self._gaussian_kernel2d(sigma, x.device, x.dtype)
+        pad_h = kernel.shape[-2] // 2
+        pad_w = kernel.shape[-1] // 2
+        kernel = kernel.repeat(C, 1, 1, 1)
+        x_pad = F.pad(x, (pad_w, pad_w, pad_h, pad_h), mode='reflect')
+        return F.conv2d(x_pad, kernel, groups=C)
+
+    def _smooth_bias_field_with_amp(self, x, amp, grid_size=8):
+        B, C, H, W = x.shape
+        device, dtype = x.device, x.dtype
+        low = torch.randn(B, 1, grid_size, grid_size, device=device, dtype=dtype)
+        field = F.interpolate(low, size=(H, W), mode='bicubic', align_corners=False)
+        field = field - field.mean(dim=(2, 3), keepdim=True)
+        field = field / (field.std(dim=(2, 3), keepdim=True) + 1e-6)
+        return x * (1.0 + amp * field)
+
+    def _apply_source_bridge_artifact(self, x):
+        """Create strong artifact version x_art (no interpolation yet)."""
+        x_art = x
+        sigma = self._rand_uniform(
+            getattr(self.params, 'src_bridge_blur_sigma_min', 0.3),
+            getattr(self.params, 'src_bridge_blur_sigma_max', 1.0), x.device)
+        x_art = self._gaussian_blur(x_art, sigma)
+
+        amp = self._rand_uniform(
+            getattr(self.params, 'src_bridge_bias_amp_min', 0.05),
+            getattr(self.params, 'src_bridge_bias_amp_max', 0.15), x.device)
+        grid_size = int(getattr(self.params, 'src_bridge_bias_grid_size', 8))
+        x_art = self._smooth_bias_field_with_amp(x_art, amp, grid_size)
+
+        scale = self._rand_uniform(
+            getattr(self.params, 'src_bridge_intensity_scale_min', 0.92),
+            getattr(self.params, 'src_bridge_intensity_scale_max', 1.08), x.device)
+        shift = self._rand_uniform(
+            getattr(self.params, 'src_bridge_intensity_shift_min', -0.04),
+            getattr(self.params, 'src_bridge_intensity_shift_max', 0.04), x.device)
+        x_art = x_art * scale + shift
+        return torch.clamp(x_art, -1.0, 1.0)
+
+    def _sample_bridge_alpha(self, device):
+        extrapolate_prob = float(getattr(self.params, 'src_bridge_extrapolate_prob', 0.10))
+        if torch.rand(1, device=device).item() < extrapolate_prob:
+            alpha = self._rand_uniform(
+                1.0, getattr(self.params, 'src_bridge_alpha_extra_max', 1.20), device)
+        else:
+            alpha = self._rand_uniform(
+                getattr(self.params, 'src_bridge_alpha_min', 0.2),
+                getattr(self.params, 'src_bridge_alpha_max', 1.0), device)
+        return alpha
+
+    def augment_source_style_bridge(self, x):
+        """V11 Source Style Bridge: x_bridge = x + alpha * (x_art - x).
+        alpha in (0,1): interpolation; alpha > 1: mild extrapolation."""
+        if torch.rand(1, device=x.device).item() > getattr(self.params, 'src_bridge_prob', 1.0):
+            return x
+        x_art = self._apply_source_bridge_artifact(x)
+        alpha = self._sample_bridge_alpha(x.device)
+        x_bridge = x + alpha * (x_art - x)
+        x_bridge = torch.clamp(x_bridge, -1.0, 1.0)
+        self._last_src_bridge_alpha = alpha
+        return x_bridge
+
+    def _src_cons_weight(self, base_weight):
+        if not getattr(self.params, 'use_src_cons_rampup', False):
+            return base_weight
+        step = int(self.global_step)
+        start = int(getattr(self.params, 'src_cons_rampup_start', 10000))
+        end   = int(getattr(self.params, 'src_cons_rampup_end',   50000))
+        if step < start:
+            return 0.0
+        if step >= end:
+            return base_weight
+        return base_weight * float(step - start) / float(max(1, end - start))
+
+    def _charbonnier_loss(self, x, y, eps=1e-3):
+        return torch.mean(torch.sqrt((x - y)**2 + eps**2))
+
+    def source_output_consistency_loss(self, fake_clean, fake_aug):
+        return self._charbonnier_loss(fake_aug, fake_clean.detach())
+
+    def source_feature_consistency_loss(self, real_a, real_a_aug, real_b_ref):
+        layers = list(getattr(self.params, 'src_cons_layers', [0, 2, 4, 6]))
+        merged_clean = torch.cat((real_a, real_b_ref), dim=1)
+        merged_aug   = torch.cat((real_a_aug, real_b_ref), dim=1)
+        with torch.no_grad():
+            feat_clean = self.netG_A(merged_clean, layers, encode_only=True)
+        feat_aug = self.netG_A(merged_aug, layers, encode_only=True)
+        loss = 0.0
+        for f_aug, f_clean in zip(feat_aug, feat_clean):
+            f_aug_n   = F.normalize(f_aug,   dim=1)
+            f_clean_n = F.normalize(f_clean, dim=1)
+            loss = loss + torch.mean(torch.abs(f_aug_n - f_clean_n))
+        return loss / max(1, len(layers))
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
@@ -348,6 +460,77 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_l1_d = self.criterionL1(_center_slice(real_d_ref), fake_d) * self.params.lambda_l1
                 self.log("L1_d_Loss", loss_l1_d.detach(), prog_bar=True)
                 loss_G += loss_l1_d
+
+        # ── V11 guard (shared) ───────────────────────────────────────────────
+        _v11_eligible = (
+            getattr(self.params, 'use_src_style_bridge', False)
+            and not self.params.use_multiple_outputs
+            and not self.params.use_triple_outputs
+            and getattr(self.params, 'use_25d_style', False)
+            and real_b_ref is not None
+            and fake_b is not None
+        )
+
+        # ── V11-independent: bridge-source main synthesis loss ───────────────
+        use_v11_main = _v11_eligible and getattr(self.params, 'use_src_bridge_main_loss', False)
+        if use_v11_main:
+            real_a_bridge_main = self.augment_source_style_bridge(real_a)
+            fake_b_bridge_main = self.netG_A(torch.cat((real_a_bridge_main, real_b_ref), dim=1))
+
+            lambda_bridge_cx  = float(getattr(self.params, 'lambda_src_bridge_main_cx',  0.0))
+            lambda_bridge_gan = float(getattr(self.params, 'lambda_src_bridge_main_gan', 0.0))
+
+            loss_bridge_cx  = fake_b.new_tensor(0.0)
+            loss_bridge_gan = fake_b.new_tensor(0.0)
+
+            if lambda_bridge_cx > 0 and self.criterionContextual is not None:
+                loss_bridge_cx = self._contextual_stack_loss(
+                    fake_b_bridge_main, real_b_ref, self.params.lambda_style
+                ) * lambda_bridge_cx
+                loss_G = loss_G + loss_bridge_cx
+
+            if lambda_bridge_gan > 0 and self.criterionGAN is not None:
+                pred_bridge = self.netD_A(fake_b_bridge_main)
+                loss_bridge_gan = self.criterionGAN(pred_bridge, True) * lambda_bridge_gan
+                loss_G = loss_G + loss_bridge_gan
+
+            self.log("SrcBridge_main_CX_Loss",  loss_bridge_cx.detach(),  prog_bar=True)
+            self.log("SrcBridge_main_GAN_Loss", loss_bridge_gan.detach(), prog_bar=True)
+            with torch.no_grad():
+                self.log("SrcBridge_main_input_L1",
+                         (real_a_bridge_main - real_a).abs().mean(), prog_bar=True)
+
+        # ── V11-consistency: bridge-source output + feature consistency ──────
+        use_v11_cons = _v11_eligible and getattr(self.params, 'use_src_artifact_consistency', False)
+        if use_v11_cons:
+            real_a_aug = self.augment_source_style_bridge(real_a)
+            fake_b_aug = self.netG_A(torch.cat((real_a_aug, real_b_ref), dim=1))
+
+            lambda_out  = self._src_cons_weight(float(getattr(self.params, 'lambda_src_cons_out',  0.0)))
+            lambda_feat = self._src_cons_weight(float(getattr(self.params, 'lambda_src_cons_feat', 0.0)))
+
+            loss_src_out  = fake_b.new_tensor(0.0)
+            loss_src_feat = fake_b.new_tensor(0.0)
+
+            if lambda_out > 0:
+                loss_src_out = self.source_output_consistency_loss(fake_b, fake_b_aug) * lambda_out
+                loss_G = loss_G + loss_src_out
+
+            if lambda_feat > 0:
+                loss_src_feat = self.source_feature_consistency_loss(real_a, real_a_aug, real_b_ref) * lambda_feat
+                loss_G = loss_G + loss_src_feat
+
+            self.log("SrcCons_out_Loss",    loss_src_out.detach(),  prog_bar=True)
+            self.log("SrcCons_feat_Loss",   loss_src_feat.detach(), prog_bar=True)
+            self.log("SrcCons_lambda_out",  torch.tensor(lambda_out,  device=fake_b.device), prog_bar=False)
+            self.log("SrcCons_lambda_feat", torch.tensor(lambda_feat, device=fake_b.device), prog_bar=False)
+            with torch.no_grad():
+                self.log("SrcAug_input_L1",  (real_a_aug - real_a).abs().mean(), prog_bar=True)
+                self.log("SrcAug_output_L1", (fake_b_aug.detach() - fake_b.detach()).abs().mean(), prog_bar=True)
+                if hasattr(self, '_last_src_bridge_alpha'):
+                    self.log("SrcBridge_alpha",
+                             torch.tensor(self._last_src_bridge_alpha, device=fake_b.device),
+                             prog_bar=True)
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
