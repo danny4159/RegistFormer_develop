@@ -1,3 +1,4 @@
+import math
 import numpy as np
 
 from typing import Any
@@ -108,6 +109,90 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             cx_losses.append(self.criterionContextual(ref_stack[:, i:i+1], fake_img).squeeze())
             shift_penalties.append(abs(i - center_idx) * shift_penalty_base)
         return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
+
+    # ── V10: Source artifact consistency helpers ──────────────────────────────
+
+    def _rand_uniform(self, low, high, device):
+        return torch.empty(1, device=device).uniform_(float(low), float(high)).item()
+
+    def _gaussian_kernel2d(self, sigma, device, dtype, truncate=3.0):
+        radius = max(1, int(truncate * sigma + 0.5))
+        x = torch.arange(-radius, radius + 1, device=device, dtype=dtype)
+        kernel1d = torch.exp(-(x**2) / (2 * sigma**2))
+        kernel1d = kernel1d / kernel1d.sum()
+        kernel2d = kernel1d[:, None] * kernel1d[None, :]
+        return kernel2d[None, None, :, :]
+
+    def _gaussian_blur(self, x, sigma):
+        if sigma <= 0:
+            return x
+        B, C, H, W = x.shape
+        kernel = self._gaussian_kernel2d(sigma, x.device, x.dtype)
+        pad_h = kernel.shape[-2] // 2
+        pad_w = kernel.shape[-1] // 2
+        kernel = kernel.repeat(C, 1, 1, 1)
+        x_pad = F.pad(x, (pad_w, pad_w, pad_h, pad_h), mode='reflect')
+        return F.conv2d(x_pad, kernel, groups=C)
+
+    def _smooth_bias_field(self, x):
+        B, C, H, W = x.shape
+        device, dtype = x.device, x.dtype
+        grid_size = int(getattr(self.params, 'src_bias_grid_size', 8))
+        amp = self._rand_uniform(getattr(self.params, 'src_bias_amp_min', 0.05),
+                                 getattr(self.params, 'src_bias_amp_max', 0.20), device)
+        low = torch.randn(B, 1, grid_size, grid_size, device=device, dtype=dtype)
+        field = F.interpolate(low, size=(H, W), mode='bicubic', align_corners=False)
+        field = field - field.mean(dim=(2, 3), keepdim=True)
+        field = field / (field.std(dim=(2, 3), keepdim=True) + 1e-6)
+        return x * (1.0 + amp * field)
+
+    def augment_source_artifact(self, x):
+        """IOP-like scanner artifact augmentation for source T1. x: [B,1,H,W] in [-1,1]."""
+        if torch.rand(1, device=x.device).item() > getattr(self.params, 'src_artifact_prob', 1.0):
+            return x
+        x_aug = x
+        sigma = self._rand_uniform(getattr(self.params, 'src_blur_sigma_min', 0.3),
+                                   getattr(self.params, 'src_blur_sigma_max', 1.2), x.device)
+        x_aug = self._gaussian_blur(x_aug, sigma)
+        x_aug = self._smooth_bias_field(x_aug)
+        scale = self._rand_uniform(getattr(self.params, 'src_intensity_scale_min', 0.95),
+                                   getattr(self.params, 'src_intensity_scale_max', 1.05), x.device)
+        shift = self._rand_uniform(getattr(self.params, 'src_intensity_shift_min', -0.03),
+                                   getattr(self.params, 'src_intensity_shift_max', 0.03), x.device)
+        x_aug = x_aug * scale + shift
+        return torch.clamp(x_aug, -1.0, 1.0)
+
+    def _src_cons_weight(self, base_weight):
+        if not getattr(self.params, 'use_src_cons_rampup', False):
+            return base_weight
+        step = int(self.global_step)
+        start = int(getattr(self.params, 'src_cons_rampup_start', 10000))
+        end   = int(getattr(self.params, 'src_cons_rampup_end',   50000))
+        if step < start:
+            return 0.0
+        if step >= end:
+            return base_weight
+        return base_weight * float(step - start) / float(max(1, end - start))
+
+    def _charbonnier_loss(self, x, y, eps=1e-3):
+        return torch.mean(torch.sqrt((x - y)**2 + eps**2))
+
+    def source_output_consistency_loss(self, fake_clean, fake_aug):
+        return self._charbonnier_loss(fake_aug, fake_clean.detach())
+
+    def source_feature_consistency_loss(self, real_a, real_a_aug, real_b_ref):
+        layers = list(getattr(self.params, 'src_cons_layers', [0, 2, 4, 6]))
+        merged_clean = torch.cat((real_a, real_b_ref), dim=1)
+        merged_aug   = torch.cat((real_a_aug, real_b_ref), dim=1)
+        with torch.no_grad():
+            feat_clean = self.netG_A(merged_clean, layers, encode_only=True)
+        feat_aug = self.netG_A(merged_aug, layers, encode_only=True)
+        loss = 0.0
+        for f_aug, f_clean in zip(feat_aug, feat_clean):
+            f_aug_n   = F.normalize(f_aug,   dim=1)
+            f_clean_n = F.normalize(f_clean, dim=1)
+            loss = loss + torch.mean(torch.abs(f_aug_n - f_clean_n))
+        return loss / max(1, len(layers))
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
@@ -348,6 +433,42 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_l1_d = self.criterionL1(_center_slice(real_d_ref), fake_d) * self.params.lambda_l1
                 self.log("L1_d_Loss", loss_l1_d.detach(), prog_bar=True)
                 loss_G += loss_l1_d
+
+        # ── V10: Source artifact consistency regularization ───────────────────
+        use_v10 = (
+            getattr(self.params, 'use_src_artifact_consistency', False)
+            and not self.params.use_multiple_outputs
+            and not self.params.use_triple_outputs
+            and getattr(self.params, 'use_25d_style', False)
+            and real_b_ref is not None
+            and fake_b is not None
+        )
+        if use_v10:
+            real_a_aug = self.augment_source_artifact(real_a)
+            merged_aug = torch.cat((real_a_aug, real_b_ref), dim=1)
+            fake_b_aug = self.netG_A(merged_aug)
+
+            lambda_out  = self._src_cons_weight(float(getattr(self.params, 'lambda_src_cons_out',  0.0)))
+            lambda_feat = self._src_cons_weight(float(getattr(self.params, 'lambda_src_cons_feat', 0.0)))
+
+            loss_src_out  = fake_b.new_tensor(0.0)
+            loss_src_feat = fake_b.new_tensor(0.0)
+
+            if lambda_out > 0:
+                loss_src_out = self.source_output_consistency_loss(fake_b, fake_b_aug) * lambda_out
+                loss_G = loss_G + loss_src_out
+
+            if lambda_feat > 0:
+                loss_src_feat = self.source_feature_consistency_loss(real_a, real_a_aug, real_b_ref) * lambda_feat
+                loss_G = loss_G + loss_src_feat
+
+            self.log("SrcCons_out_Loss",    loss_src_out.detach(),  prog_bar=True)
+            self.log("SrcCons_feat_Loss",   loss_src_feat.detach(), prog_bar=True)
+            self.log("SrcCons_lambda_out",  torch.tensor(lambda_out,  device=fake_b.device), prog_bar=False)
+            self.log("SrcCons_lambda_feat", torch.tensor(lambda_feat, device=fake_b.device), prog_bar=False)
+            with torch.no_grad():
+                self.log("SrcAug_input_L1",  (real_a_aug - real_a).abs().mean(), prog_bar=True)
+                self.log("SrcAug_output_L1", (fake_b_aug.detach() - fake_b.detach()).abs().mean(), prog_bar=True)
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
