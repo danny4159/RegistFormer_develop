@@ -97,3 +97,26 @@ params: # Other params
   ctx_agg_mode: 'softmin'    # 'softmin': center-biased soft-min (default) | 'mean': simple mean over all slices
   ctx_softmin_tau: 0.3       # soft-min temperature (작을수록 hard-min에 가까움) — softmin 전용
   ctx_shift_penalty: 0.05    # center slice preference bias per neighbor step — softmin 전용
+
+  # ── V18: Target-Supervised Slice Posterior Aggregation (TSPA) ───────────
+  use_tsp_ref_selector: true
+
+  # selector
+  tsp_grid_size: 8
+  tsp_hidden_ch: 32
+  tsp_use_edges: true
+
+  # oracle posterior p*
+  tsp_oracle_downsample: 4
+  tsp_oracle_tau: 0.05
+  tsp_oracle_edge_weight: 0.20
+  tsp_center_penalty: 0.02
+
+  # selector loss
+  lambda_tsp_sel: 0.10
+  tsp_warmup_iters: 5000
+  tsp_ramp_iters: 30000
+
+  # ref stack reweighting
+  tsp_blend_ratio: 0.30
+  tsp_min_weight: 0.00

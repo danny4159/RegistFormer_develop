@@ -4,6 +4,7 @@ from typing import Any
 import itertools
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from src.losses.gan_loss import GANLoss
 from src.losses.contextual_loss import Contextual_Loss, VGG_Model
@@ -20,6 +21,31 @@ log = utils.get_pylogger(__name__)
 
 gray2rgb = lambda x : torch.cat((x, x, x), dim=1)
 
+
+# ── V18: Tile-wise Target-Supervised Slice Posterior Aggregation ──────────────
+class TileWiseRefSelector(nn.Module):
+    """
+    Predict tile-wise posterior over K reference slices.
+    Input: [source, ref_stack, (source_edge, ref_edges)] → [B, 1+K(+1+K), H, W]
+    Output: logits [B, K, G, G]
+    """
+    def __init__(self, in_ch: int, K: int, hidden_ch: int = 32, grid_size: int = 8):
+        super().__init__()
+        self.K = K
+        self.grid_size = grid_size
+        self.net = nn.Sequential(
+            nn.Conv2d(in_ch, hidden_ch, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(hidden_ch, affine=True),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden_ch, hidden_ch, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(hidden_ch, affine=True),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden_ch, K, kernel_size=1),
+        )
+
+    def forward(self, x):
+        logits_full = self.net(x)  # [B,K,H,W]
+        return F.adaptive_avg_pool2d(logits_full, output_size=(self.grid_size, self.grid_size))
 
 
 class ProposedSynthesisModule(BaseModule_AtoB):
@@ -78,6 +104,20 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         self.criterionMIND = MINDLoss() if params.lambda_mind != 0 else None
         self.criterionL1 = torch.nn.L1Loss() if params.lambda_l1 != 0 else None
 
+        # ── V18: Target-Supervised Slice Posterior Aggregation ─────────────
+        self.tsp_selector = None
+        if getattr(self.params, "use_tsp_ref_selector", False):
+            K = int(getattr(self.params, "ref_stack_size", 3))
+            use_edges = bool(getattr(self.params, "tsp_use_edges", True))
+            in_ch = 1 + K
+            if use_edges:
+                in_ch += 1 + K
+            self.tsp_selector = TileWiseRefSelector(
+                in_ch=in_ch,
+                K=K,
+                hidden_ch=int(getattr(self.params, "tsp_hidden_ch", 32)),
+                grid_size=int(getattr(self.params, "tsp_grid_size", 8)),
+            )
 
         # PatchNCE specific initializations
         # self.nce_layers = [0,2,4,6] # range: 0~6
@@ -111,6 +151,122 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         shift_penalty_base = getattr(self.params, 'ctx_shift_penalty', 0.05)
         shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
         return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
+
+    # ── V18 helpers ──────────────────────────────────────────────────────────
+
+    def _tsp_sobel_mag(self, x):
+        B, C, H, W = x.shape
+        device, dtype = x.device, x.dtype
+        kx = torch.tensor([[-1,0,1],[-2,0,2],[-1,0,1]], device=device, dtype=dtype).view(1,1,3,3).repeat(C,1,1,1)
+        ky = torch.tensor([[-1,-2,-1],[0,0,0],[1,2,1]], device=device, dtype=dtype).view(1,1,3,3).repeat(C,1,1,1)
+        xp = F.pad(x, (1,1,1,1), mode="reflect")
+        return torch.sqrt(F.conv2d(xp, kx, groups=C)**2 + F.conv2d(xp, ky, groups=C)**2 + 1e-6)
+
+    def _tsp_lowpass(self, x, factor: int = 4):
+        if factor <= 1:
+            return x
+        h, w = x.shape[-2:]
+        xs = F.interpolate(x, size=(max(1, h//factor), max(1, w//factor)), mode="bilinear", align_corners=False)
+        return F.interpolate(xs, size=(h, w), mode="bilinear", align_corners=False)
+
+    def _tsp_make_selector_input(self, real_a, real_b_ref):
+        inputs = [real_a, real_b_ref]
+        if bool(getattr(self.params, "tsp_use_edges", True)):
+            inputs += [self._tsp_sobel_mag(real_a), self._tsp_sobel_mag(real_b_ref)]
+        return torch.cat(inputs, dim=1)
+
+    def _tsp_oracle_posterior(self, real_b_ref, real_b):
+        B, K, H, W = real_b_ref.shape
+        G        = int(getattr(self.params, "tsp_grid_size", 8))
+        factor   = int(getattr(self.params, "tsp_oracle_downsample", 4))
+        tau      = float(getattr(self.params, "tsp_oracle_tau", 0.05))
+        edge_w   = float(getattr(self.params, "tsp_oracle_edge_weight", 0.20))
+        c_pen    = float(getattr(self.params, "tsp_center_penalty", 0.02))
+        center   = K // 2
+        with torch.no_grad():
+            gt_lp   = self._tsp_lowpass(real_b, factor=factor)
+            gt_edge = self._tsp_sobel_mag(gt_lp)
+            dist_list = []
+            for i in range(K):
+                ref_lp   = self._tsp_lowpass(real_b_ref[:, i:i+1], factor=factor)
+                ref_edge = self._tsp_sobel_mag(ref_lp)
+                d = (ref_lp - gt_lp).abs() + edge_w * (ref_edge - gt_edge).abs()
+                d_tile = F.adaptive_avg_pool2d(d, output_size=(G, G))
+                if c_pen > 0:
+                    d_tile = d_tile + c_pen * abs(i - center)
+                dist_list.append(d_tile)
+            dist   = torch.cat(dist_list, dim=1)           # [B,K,G,G]
+            p_star = F.softmax(-dist / max(tau, 1e-6), dim=1)
+        return p_star.detach(), dist.detach()
+
+    def _tsp_reweight_ref_stack(self, real_b_ref, p_hat):
+        B, K, H, W = real_b_ref.shape
+        rho   = float(getattr(self.params, "tsp_blend_ratio", 0.30))
+        min_w = float(getattr(self.params, "tsp_min_weight", 0.00))
+        p_up  = F.interpolate(p_hat, size=(H, W), mode="bilinear", align_corners=False)
+        if min_w > 0:
+            p_up = torch.clamp(p_up, min=min_w)
+            p_up = p_up / (p_up.sum(dim=1, keepdim=True) + 1e-6)
+        scale   = (1.0 - rho) + rho * float(K) * p_up
+        ref_eff = real_b_ref * scale
+        return ref_eff, p_up
+
+    def apply_tsp_ref_selection(self, real_a, real_b_ref, real_b=None):
+        if self.tsp_selector is None or real_b_ref is None:
+            return real_b_ref, None
+        sel_input = self._tsp_make_selector_input(real_a, real_b_ref)
+        logits    = self.tsp_selector(sel_input)          # [B,K,G,G]
+        p_hat     = F.softmax(logits, dim=1)
+        real_b_ref_eff, p_up = self._tsp_reweight_ref_stack(real_b_ref, p_hat)
+        p_star = dist = None
+        if self.training and real_b is not None:
+            p_star, dist = self._tsp_oracle_posterior(real_b_ref, real_b)
+        return real_b_ref_eff, {"p_hat": p_hat, "p_star": p_star, "dist": dist, "p_up": p_up}
+
+    def _tsp_schedule_weight(self):
+        warmup = int(getattr(self.params, "tsp_warmup_iters", 0))
+        ramp   = int(getattr(self.params, "tsp_ramp_iters", 1))
+        step   = int(self.global_step)
+        if step < warmup:
+            return 0.0
+        if ramp <= 0:
+            return 1.0
+        return min(1.0, float(step - warmup) / float(max(1, ramp)))
+
+    def tsp_selector_loss(self):
+        if not hasattr(self, "_last_tsp_info") or self._last_tsp_info is None:
+            return None, {}
+        info   = self._last_tsp_info
+        p_hat  = info.get("p_hat")
+        p_star = info.get("p_star")
+        if p_hat is None or p_star is None:
+            return None, {}
+        sched_w = self._tsp_schedule_weight()
+        if sched_w <= 0:
+            loss = p_hat.new_tensor(0.0)
+        else:
+            eps = 1e-8
+            kl   = p_star * (torch.log(p_star + eps) - torch.log(p_hat + eps))
+            kl   = kl.sum(dim=1).mean()
+            loss = kl * float(getattr(self.params, "lambda_tsp_sel", 0.10)) * sched_w
+        with torch.no_grad():
+            entropy      = -(p_hat * torch.log(p_hat + 1e-8)).sum(dim=1).mean()
+            center_prob  = p_hat[:, p_hat.shape[1]//2].mean()
+            logs = {
+                "TSP_Loss":        loss.detach(),
+                "TSP_w_sched":     torch.tensor(sched_w, device=p_hat.device),
+                "TSP_entropy":     entropy.detach(),
+                "TSP_center_prob": center_prob.detach(),
+            }
+            if p_star is not None:
+                pred   = torch.argmax(p_hat,  dim=1)
+                target = torch.argmax(p_star, dim=1)
+                logs["TSP_top1_acc"]          = (pred == target).float().mean().detach()
+                logs["TSP_star_entropy"]      = -(p_star * torch.log(p_star + 1e-8)).sum(dim=1).mean().detach()
+                center = p_star.shape[1] // 2
+                logs["TSP_star_center_rate"]  = (torch.argmax(p_star, dim=1) == center).float().mean().detach()
+                logs["TSP_pred_center_rate"]  = (torch.argmax(p_hat,  dim=1) == center).float().mean().detach()
+        return loss, logs
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
@@ -352,6 +508,18 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 self.log("L1_d_Loss", loss_l1_d.detach(), prog_bar=True)
                 loss_G += loss_l1_d
 
+        ## V18: TSP selector loss
+        if getattr(self.params, "use_tsp_ref_selector", False):
+            loss_tsp, tsp_logs = self.tsp_selector_loss()
+            if loss_tsp is not None:
+                loss_G = loss_G + loss_tsp
+                for k, v in tsp_logs.items():
+                    self.log(
+                        k,
+                        v.detach() if torch.is_tensor(v) else torch.tensor(v, device=real_a.device),
+                        prog_bar=(k in ["TSP_Loss", "TSP_top1_acc", "TSP_center_prob"]),
+                    )
+
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
         # assert not torch.isnan(loss_G).any(), "Total Loss is NaN"
@@ -439,6 +607,32 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         self.log("G_loss", loss_G.detach(), prog_bar=True)
 
         return loss_G
+
+    # ── V18: override model_step to intercept real_b_ref before generator ──
+    def model_step(self, batch: Any, is_3d=False):
+        use_25d = getattr(self.params, "use_25d_style", False)
+        use_tsp = (
+            getattr(self.params, "use_tsp_ref_selector", False)
+            and use_25d
+            and not self.params.use_multiple_outputs
+            and not self.params.use_triple_outputs
+        )
+        if not use_tsp:
+            self._last_tsp_info = None
+            return super().model_step(batch, is_3d=is_3d)
+
+        # 2.5D single-output path with TSP
+        if len(batch) != 3:
+            raise ValueError(f"V18 TSP expects batch of 3 (real_a, real_b, real_b_ref), got {len(batch)}")
+        real_a, real_b, real_b_ref = batch
+        real_b_ref_eff, tsp_info = self.apply_tsp_ref_selection(
+            real_a=real_a,
+            real_b_ref=real_b_ref,
+            real_b=real_b if self.training else None,
+        )
+        self._last_tsp_info = tsp_info
+        fake_b = self.forward(real_a, real_b_ref_eff)
+        return real_a, real_b, fake_b, real_b_ref  # original real_b_ref for loss targets
 
     def training_step(self, batch: Any, batch_idx: int):
 
@@ -562,7 +756,11 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
         use_gan = float(getattr(self.params, 'lambda_gan', 1)) > 0
 
-        optimizer_G_A = self.hparams.optimizer(params=self.netG_A.parameters())
+        if getattr(self.params, "use_tsp_ref_selector", False) and self.tsp_selector is not None:
+            g_params = itertools.chain(self.netG_A.parameters(), self.tsp_selector.parameters())
+            optimizer_G_A = self.hparams.optimizer(params=g_params)
+        else:
+            optimizer_G_A = self.hparams.optimizer(params=self.netG_A.parameters())
         optimizers.append(optimizer_G_A)
         if use_gan:
             optimizer_D_A = self.hparams.optimizer(params=self.netD_A.parameters())
