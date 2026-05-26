@@ -94,19 +94,22 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
     def _contextual_stack_loss(self, fake_img, ref_stack, lambda_style):
         """Contextual loss for 2.5D ref stack.
-        ctx_center_only=True: use center slice only (2D equivalent).
-        ctx_center_only=False: center-biased soft-min over K slices.
+        ctx_center_only=True : center slice only (2D equivalent).
+        ctx_agg_mode='softmin': center-biased soft-min over K slices (default).
+        ctx_agg_mode='mean'   : simple mean over all K slices.
         """
         K = ref_stack.shape[1]
         center_idx = K // 2
         if getattr(self.params, 'ctx_center_only', False):
             return self.criterionContextual(ref_stack[:, center_idx:center_idx+1], fake_img) * lambda_style
+        agg_mode = getattr(self.params, 'ctx_agg_mode', 'softmin')
+        cx_losses = [self.criterionContextual(ref_stack[:, i:i+1], fake_img).squeeze() for i in range(K)]
+        if agg_mode == 'mean':
+            return torch.stack(cx_losses).mean() * lambda_style
+        # softmin (default)
         tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
         shift_penalty_base = getattr(self.params, 'ctx_shift_penalty', 0.05)
-        cx_losses, shift_penalties = [], []
-        for i in range(K):
-            cx_losses.append(self.criterionContextual(ref_stack[:, i:i+1], fake_img).squeeze())
-            shift_penalties.append(abs(i - center_idx) * shift_penalty_base)
+        shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
         return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
