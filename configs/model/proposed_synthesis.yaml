@@ -98,7 +98,7 @@ params: # Other params
   ctx_softmin_tau: 0.3       # soft-min temperature (작을수록 hard-min에 가까움) — softmin 전용
   ctx_shift_penalty: 0.05    # center slice preference bias per neighbor step — softmin 전용
 
-  # ── V18: Target-Supervised Slice Posterior Aggregation (TSPA) ───────────
+  # ── V32: Target-Supervised Slice Posterior Aggregation (TSPA) ───────────
   use_tsp_ref_selector: true
 
   # selector
@@ -112,11 +112,14 @@ params: # Other params
   tsp_oracle_edge_weight: 0.20
   tsp_center_penalty: 0.02
 
-  # selector loss
+  # selector loss: warm up early so selector learns p* before blend kicks in
   lambda_tsp_sel: 0.10
-  tsp_warmup_iters: 5000
-  tsp_ramp_iters: 30000
+  tsp_warmup_iters: 0
+  tsp_ramp_iters: 1000
 
-  # ref stack reweighting
-  tsp_blend_ratio: 0.30
+  # ref stack reweighting: delayed ramp-up + detach to isolate selector from synthesis loss
+  tsp_blend_ratio: 0.15
+  tsp_blend_start: 10000
+  tsp_blend_ramp: 30000
+  tsp_detach_reweight: true
   tsp_min_weight: 0.00

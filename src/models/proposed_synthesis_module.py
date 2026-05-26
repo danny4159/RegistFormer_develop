@@ -199,9 +199,21 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             p_star = F.softmax(-dist / max(tau, 1e-6), dim=1)
         return p_star.detach(), dist.detach()
 
+    def _tsp_blend_weight(self):
+        """Step-wise ramp-up for blend ratio: 0 until tsp_blend_start, then ramp to tsp_blend_ratio."""
+        base_rho = float(getattr(self.params, "tsp_blend_ratio", 0.15))
+        start    = int(getattr(self.params, "tsp_blend_start", 10000))
+        ramp     = int(getattr(self.params, "tsp_blend_ramp",  30000))
+        step     = int(self.global_step)
+        if step < start:
+            return 0.0
+        if ramp <= 0:
+            return base_rho
+        return base_rho * min(1.0, float(step - start) / float(max(1, ramp)))
+
     def _tsp_reweight_ref_stack(self, real_b_ref, p_hat):
         B, K, H, W = real_b_ref.shape
-        rho   = float(getattr(self.params, "tsp_blend_ratio", 0.30))
+        rho   = self._tsp_blend_weight()
         min_w = float(getattr(self.params, "tsp_min_weight", 0.00))
         p_up  = F.interpolate(p_hat, size=(H, W), mode="bilinear", align_corners=False)
         if min_w > 0:
@@ -217,7 +229,9 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         sel_input = self._tsp_make_selector_input(real_a, real_b_ref)
         logits    = self.tsp_selector(sel_input)          # [B,K,G,G]
         p_hat     = F.softmax(logits, dim=1)
-        real_b_ref_eff, p_up = self._tsp_reweight_ref_stack(real_b_ref, p_hat)
+        # detach: prevent synthesis loss gradient from directly driving selector
+        p_for_reweight = p_hat.detach() if getattr(self.params, "tsp_detach_reweight", True) else p_hat
+        real_b_ref_eff, p_up = self._tsp_reweight_ref_stack(real_b_ref, p_for_reweight)
         p_star = dist = None
         if self.training and real_b is not None:
             p_star, dist = self._tsp_oracle_posterior(real_b_ref, real_b)
