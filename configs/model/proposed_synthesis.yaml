@@ -96,4 +96,13 @@ params: # Other params
   ctx_center_only: false     # true: 2.5D에서도 center slice만으로 ctx loss 계산 (2D equivalent)
   ctx_agg_mode: 'softmin'    # 'softmin': center-biased soft-min (default) | 'mean': simple mean over all slices
   ctx_softmin_tau: 0.3       # soft-min temperature (작을수록 hard-min에 가까움) — softmin 전용
-  ctx_shift_penalty: 0.05    # center slice preference bias per neighbor step — softmin 전용
+  ctx_shift_penalty: 0.05    # center slice preference bias per neighbor step — adaptive OFF일 때 고정값
+
+  # ── V33: Mismatch-adaptive center-biased 2.5D contextual soft-min ────────
+  use_ctx_adaptive_center_bias: true
+  ctx_adapt_downsample: 4
+  ctx_adapt_mismatch_tau: 0.08
+  ctx_shift_penalty_min: 0.01
+  ctx_shift_penalty_max: 0.05
+  ctx_adapt_gamma: 1.0
+  ctx_adapt_log: true

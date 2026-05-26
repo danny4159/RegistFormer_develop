@@ -92,25 +92,90 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             losses = losses + penalties
         return -tau * torch.logsumexp(-losses / tau, dim=0)
 
-    def _contextual_stack_loss(self, fake_img, ref_stack, lambda_style):
+    # ── V33 helpers: adaptive center-bias ────────────────────────────────────
+
+    def _ctx_lowpass(self, x, factor: int = 4):
+        if factor <= 1:
+            return x
+        h, w = x.shape[-2:]
+        xs = F.interpolate(x, size=(max(1, h//factor), max(1, w//factor)), mode="bilinear", align_corners=False)
+        return F.interpolate(xs, size=(h, w), mode="bilinear", align_corners=False)
+
+    def _ctx_adaptive_shift_penalty(self, ref_stack, aligned_gt):
+        """
+        ref_stack:  [B,K,H,W]
+        aligned_gt: [B,1,H,W]
+        return: penalty_base, mismatch, reliability  (all scalar tensors)
+        """
+        factor  = int(getattr(self.params, "ctx_adapt_downsample", 4))
+        tau     = float(getattr(self.params, "ctx_adapt_mismatch_tau", 0.08))
+        p_min   = float(getattr(self.params, "ctx_shift_penalty_min", 0.01))
+        p_max   = float(getattr(self.params, "ctx_shift_penalty_max", 0.05))
+        gamma   = float(getattr(self.params, "ctx_adapt_gamma", 1.0))
+        center  = ref_stack.shape[1] // 2
+
+        with torch.no_grad():
+            ref_lp  = self._ctx_lowpass(ref_stack[:, center:center+1], factor=factor)
+            gt_lp   = self._ctx_lowpass(aligned_gt, factor=factor)
+            mismatch    = (ref_lp - gt_lp).abs().flatten(1).mean(dim=1).mean()
+            reliability = torch.clamp(1.0 - mismatch / max(tau, 1e-6), 0.0, 1.0)
+            if gamma != 1.0:
+                reliability = torch.pow(reliability, gamma)
+            penalty_base = p_min + (p_max - p_min) * reliability
+
+        return penalty_base.detach(), mismatch.detach(), reliability.detach()
+
+    def _contextual_stack_loss(self, fake_img, ref_stack, lambda_style, aligned_gt=None, log_prefix="B"):
         """Contextual loss for 2.5D ref stack.
         ctx_center_only=True : center slice only (2D equivalent).
-        ctx_agg_mode='softmin': center-biased soft-min over K slices (default).
-        ctx_agg_mode='mean'   : simple mean over all K slices.
+        ctx_agg_mode='mean'  : simple mean over K slices.
+        ctx_agg_mode='softmin' (default): center-biased soft-min.
+          If use_ctx_adaptive_center_bias=True and aligned_gt provided,
+          center penalty adapts to ref_center ↔ aligned_gt mismatch.
         """
         K = ref_stack.shape[1]
         center_idx = K // 2
+
         if getattr(self.params, 'ctx_center_only', False):
             return self.criterionContextual(ref_stack[:, center_idx:center_idx+1], fake_img) * lambda_style
+
         agg_mode = getattr(self.params, 'ctx_agg_mode', 'softmin')
         cx_losses = [self.criterionContextual(ref_stack[:, i:i+1], fake_img).squeeze() for i in range(K)]
+
         if agg_mode == 'mean':
             return torch.stack(cx_losses).mean() * lambda_style
-        # softmin (default)
-        tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
-        shift_penalty_base = getattr(self.params, 'ctx_shift_penalty', 0.05)
-        shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
-        return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
+
+        # softmin
+        tau = float(getattr(self.params, 'ctx_softmin_tau', 0.3))
+
+        # adaptive or fixed center penalty
+        ctx_mismatch = ctx_reliability = None
+        if (
+            getattr(self.params, "use_ctx_adaptive_center_bias", False)
+            and aligned_gt is not None
+            and K > 1
+        ):
+            shift_penalty_base, ctx_mismatch, ctx_reliability = self._ctx_adaptive_shift_penalty(ref_stack, aligned_gt)
+            shift_penalty_base = shift_penalty_base.to(device=fake_img.device, dtype=fake_img.dtype)
+        else:
+            shift_penalty_base = torch.tensor(
+                float(getattr(self.params, 'ctx_shift_penalty', 0.05)),
+                device=fake_img.device, dtype=fake_img.dtype,
+            )
+
+        losses = torch.stack([cx + abs(i - center_idx) * shift_penalty_base for i, cx in enumerate(cx_losses)])
+        softmin_loss = -tau * torch.logsumexp(-losses / tau, dim=0)
+
+        if getattr(self.params, "ctx_adapt_log", False) and self.training:
+            with torch.no_grad():
+                prob        = F.softmax(-losses.detach() / tau, dim=0)
+                center_prob = prob[center_idx].mean()
+                self.log(f"CtxAdapt_{log_prefix}_penalty",     shift_penalty_base.detach(), prog_bar=True)
+                self.log(f"CtxAdapt_{log_prefix}_center_prob", center_prob.detach(),         prog_bar=True)
+                if ctx_mismatch    is not None: self.log(f"CtxAdapt_{log_prefix}_mismatch",    ctx_mismatch.detach(),    prog_bar=True)
+                if ctx_reliability is not None: self.log(f"CtxAdapt_{log_prefix}_reliability", ctx_reliability.detach(), prog_bar=True)
+
+        return softmin_loss * lambda_style
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
@@ -148,7 +213,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         ## 2. Contextual loss
         if self.criterionContextual:
             if use_25d and eff_b is not None:
-                loss_style_b = self._contextual_stack_loss(fake_b, eff_b, self.params.lambda_style)
+                loss_style_b = self._contextual_stack_loss(
+                    fake_b, eff_b, self.params.lambda_style,
+                    aligned_gt=real_b, log_prefix="B",
+                )
             else:
                 loss_style_b = self.criterionContextual(eff_b, fake_b) * self.params.lambda_style
             self.log("Context_b_Loss", loss_style_b.detach(), prog_bar=True)
@@ -156,14 +224,20 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
             if self.params.use_multiple_outputs or self.params.use_triple_outputs:
                 if use_25d and eff_c is not None:
-                    loss_style_c = self._contextual_stack_loss(fake_c, eff_c, self.params.lambda_style)
+                    loss_style_c = self._contextual_stack_loss(
+                        fake_c, eff_c, self.params.lambda_style,
+                        aligned_gt=real_c, log_prefix="C",
+                    )
                 else:
                     loss_style_c = self.criterionContextual(eff_c, fake_c) * self.params.lambda_style
                 self.log("Context_c_Loss", loss_style_c.detach(), prog_bar=True)
                 loss_G += loss_style_c.squeeze()
                 if self.params.use_triple_outputs and fake_d is not None:
                     if use_25d and eff_d is not None:
-                        loss_style_d = self._contextual_stack_loss(fake_d, eff_d, self.params.lambda_style)
+                        loss_style_d = self._contextual_stack_loss(
+                            fake_d, eff_d, self.params.lambda_style,
+                            aligned_gt=real_d, log_prefix="D",
+                        )
                     else:
                         loss_style_d = self.criterionContextual(eff_d, fake_d) * self.params.lambda_style
                     self.log("Context_d_Loss", loss_style_d.detach(), prog_bar=True)
