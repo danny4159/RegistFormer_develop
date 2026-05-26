@@ -105,7 +105,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         """
         ref_stack:  [B,K,H,W]
         aligned_gt: [B,1,H,W]
-        return: penalty_base, mismatch, reliability  (all scalar tensors)
+        return: penalty_base [B,1,1,1], mismatch [B], reliability [B]
+          sample-wise so each image gets its own center penalty.
         """
         factor  = int(getattr(self.params, "ctx_adapt_downsample", 4))
         tau     = float(getattr(self.params, "ctx_adapt_mismatch_tau", 0.08))
@@ -117,11 +118,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         with torch.no_grad():
             ref_lp  = self._ctx_lowpass(ref_stack[:, center:center+1], factor=factor)
             gt_lp   = self._ctx_lowpass(aligned_gt, factor=factor)
-            mismatch    = (ref_lp - gt_lp).abs().flatten(1).mean(dim=1).mean()
-            reliability = torch.clamp(1.0 - mismatch / max(tau, 1e-6), 0.0, 1.0)
+            mismatch    = (ref_lp - gt_lp).abs().flatten(1).mean(dim=1)          # [B]
+            reliability = torch.clamp(1.0 - mismatch / max(tau, 1e-6), 0.0, 1.0) # [B]
             if gamma != 1.0:
                 reliability = torch.pow(reliability, gamma)
-            penalty_base = p_min + (p_max - p_min) * reliability
+            penalty_base = p_min + (p_max - p_min) * reliability                 # [B]
+            penalty_base = penalty_base.view(-1, 1, 1, 1)                        # [B,1,1,1]
 
         return penalty_base.detach(), mismatch.detach(), reliability.detach()
 
@@ -170,10 +172,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             with torch.no_grad():
                 prob        = F.softmax(-losses.detach() / tau, dim=0)
                 center_prob = prob[center_idx].mean()
-                self.log(f"CtxAdapt_{log_prefix}_penalty",     shift_penalty_base.detach(), prog_bar=True)
-                self.log(f"CtxAdapt_{log_prefix}_center_prob", center_prob.detach(),         prog_bar=True)
-                if ctx_mismatch    is not None: self.log(f"CtxAdapt_{log_prefix}_mismatch",    ctx_mismatch.detach(),    prog_bar=True)
-                if ctx_reliability is not None: self.log(f"CtxAdapt_{log_prefix}_reliability", ctx_reliability.detach(), prog_bar=True)
+                self.log(f"CtxAdapt_{log_prefix}_penalty",     shift_penalty_base.detach().mean(), prog_bar=True)
+                self.log(f"CtxAdapt_{log_prefix}_center_prob", center_prob.detach(),               prog_bar=True)
+                if ctx_mismatch    is not None: self.log(f"CtxAdapt_{log_prefix}_mismatch",    ctx_mismatch.detach().mean(),    prog_bar=True)
+                if ctx_reliability is not None: self.log(f"CtxAdapt_{log_prefix}_reliability", ctx_reliability.detach().mean(), prog_bar=True)
 
         return softmin_loss * lambda_style
 
