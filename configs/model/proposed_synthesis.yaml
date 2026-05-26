@@ -101,7 +101,7 @@ params: # Other params
   # ── V33: Mismatch-adaptive center-biased 2.5D contextual soft-min ────────
   use_ctx_adaptive_center_bias: true
   ctx_adapt_downsample: 4
-  ctx_adapt_mismatch_tau: 0.08
+  ctx_adapt_mismatch_tau: 0.80   # tuned: mismatch mean~0.52 p50~0.47, tau=0.8 gives rel_mean=0.38
   ctx_shift_penalty_min: 0.01
   ctx_shift_penalty_max: 0.05
   ctx_adapt_gamma: 1.0
