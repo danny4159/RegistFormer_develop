@@ -105,12 +105,113 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         agg_mode = getattr(self.params, 'ctx_agg_mode', 'softmin')
         cx_losses = [self.criterionContextual(ref_stack[:, i:i+1], fake_img).squeeze() for i in range(K)]
         if agg_mode == 'mean':
-            return torch.stack(cx_losses).mean() * lambda_style
+            loss_stack = torch.stack(cx_losses)
+            if getattr(self.params, 'ablation_log_ctx_weights', False) or getattr(self.params, 'ablation_debug_probe', False):
+                with torch.no_grad():
+                    w = torch.ones(K, device=loss_stack.device) / K
+                    for i in range(K):
+                        self.log(f"ctx/slice_{i}_loss", cx_losses[i].mean().detach(), prog_bar=False)
+                        self.log(f"ctx/slice_{i}_weight", w[i].item(), prog_bar=False)
+                    self.log("ctx/center_weight", w[center_idx].item(), prog_bar=False)
+            return loss_stack.mean() * lambda_style
         # softmin (default)
         tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
         shift_penalty_base = getattr(self.params, 'ctx_shift_penalty', 0.05)
         shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
+        if getattr(self.params, 'ablation_log_ctx_weights', False) or getattr(self.params, 'ablation_debug_probe', False):
+            with torch.no_grad():
+                losses_t = torch.stack(cx_losses)
+                pen_t = torch.tensor(shift_penalties, device=losses_t.device, dtype=losses_t.dtype)
+                biased = losses_t + pen_t
+                w = torch.softmax(-biased / tau, dim=0)
+                for i in range(K):
+                    self.log(f"ctx/slice_{i}_loss", cx_losses[i].mean().detach(), prog_bar=False)
+                    self.log(f"ctx/slice_{i}_weight", w[i].mean().item(), prog_bar=False)
+                self.log("ctx/center_weight", w[center_idx].mean().item(), prog_bar=False)
         return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
+
+    def _setup_ablation_flags(self):
+        """Push ablation flags from params onto the generator network before each forward."""
+        if not hasattr(self, 'netG_A'):
+            return
+        net = self.netG_A
+        net._abl_ref_mode    = getattr(self.params, 'ablation_ref_mode', 'default')
+        net._abl_style_scale = getattr(self.params, 'ablation_style_scale', 16)
+        net._abl_log_zagg    = getattr(self.params, 'ablation_log_zagg', False) or getattr(self.params, 'ablation_debug_probe', False)
+        log_delta = getattr(self.params, 'ablation_log_style_delta', False) or getattr(self.params, 'ablation_debug_probe', False)
+        for mod in net.modules():
+            if type(mod).__name__ == 'StyleConv':
+                mod._abl_log_style_delta = log_delta
+                mod._abl_allow_debug     = True   # reset; encode_only forwards will set False
+
+    def _set_styleconv_allow_debug(self, allow: bool):
+        for mod in self.netG_A.modules():
+            if type(mod).__name__ == 'StyleConv':
+                mod._abl_allow_debug = allow
+
+    def _forward_with_ref_mode(self, real_a, ref, mode, layers=None, encode_only=False):
+        """Run netG_A with a temporarily overridden _abl_ref_mode, then restore."""
+        net = self.netG_A
+        old_mode = getattr(net, '_abl_ref_mode', 'default')
+        net._abl_ref_mode = mode
+        self._set_styleconv_allow_debug(not encode_only)
+        try:
+            merged = torch.cat([real_a, ref], dim=1)
+            if encode_only and layers is not None:
+                return net(merged, layers, encode_only=True)
+            return net(merged)
+        finally:
+            net._abl_ref_mode = old_mode
+            self._set_styleconv_allow_debug(True)
+
+    def _log_ablation_probe(self, real_a, real_b_ref):
+        """Read diagnostic stats from the main forward and run optional sensitivity probes."""
+        net = self.netG_A
+        probe_interval = int(getattr(self.params, 'ablation_probe_interval', 200))
+
+        # z_agg cosine similarities (already collected during main forward)
+        if getattr(self.params, 'ablation_log_zagg', False) or getattr(self.params, 'ablation_debug_probe', False):
+            for stream_idx, sims in enumerate(getattr(net, '_last_zagg_sims', [])):
+                for i, s in enumerate(sims):
+                    self.log(f"zagg/stream{stream_idx}_slice{i}_cos", s, prog_bar=False)
+
+        # StyleConv gamma/beta/delta stats (already collected during main forward)
+        if getattr(self.params, 'ablation_log_style_delta', False) or getattr(self.params, 'ablation_debug_probe', False):
+            for name, mod in net.named_modules():
+                if type(mod).__name__ == 'StyleConv':
+                    dbg = getattr(mod, 'last_style_debug', None)
+                    if dbg is not None:
+                        self.log(f"style/{name}_gamma_abs",   dbg['gamma_abs'],   prog_bar=False)
+                        self.log(f"style/{name}_beta_abs",    dbg['beta_abs'],     prog_bar=False)
+                        self.log(f"style/{name}_delta_ratio", dbg['delta_ratio'],  prog_bar=False)
+                        self.log(f"style/{name}_spatial_std", dbg['spatial_std'],  prog_bar=False)
+
+        use_25d = getattr(self.params, 'use_25d_style', False)
+        do_sens = (self.global_step % probe_interval == 0) and use_25d and real_b_ref is not None
+
+        # Feature sensitivity: default vs center_only vs zero
+        if do_sens and (getattr(self.params, 'ablation_log_ref_sensitivity', False) or getattr(self.params, 'ablation_debug_probe', False)):
+            nce_layers = getattr(self.params, 'nce_layers', [0, 2, 4, 6])
+            with torch.no_grad():
+                feats_default = self._forward_with_ref_mode(real_a, real_b_ref, 'default',      nce_layers, encode_only=True)
+                feats_center  = self._forward_with_ref_mode(real_a, real_b_ref, 'center_only',  nce_layers, encode_only=True)
+                feats_zero    = self._forward_with_ref_mode(real_a, real_b_ref, 'zero',          nce_layers, encode_only=True)
+                for li, (fd, fc, fz) in enumerate(zip(feats_default, feats_center, feats_zero)):
+                    layer = nce_layers[li]
+                    self.log(f"ref_sens/layer{layer}_center_delta", ((fd - fc).norm() / (fd.norm() + 1e-8)).item(), prog_bar=False)
+                    self.log(f"ref_sens/layer{layer}_zero_delta",   ((fd - fz).norm() / (fd.norm() + 1e-8)).item(), prog_bar=False)
+
+        # Output sensitivity: default vs center_only vs zero vs permute
+        if do_sens and (getattr(self.params, 'ablation_log_output_sensitivity', False) or getattr(self.params, 'ablation_debug_probe', False)):
+            with torch.no_grad():
+                fake_default = self._forward_with_ref_mode(real_a, real_b_ref, 'default')
+                fake_center  = self._forward_with_ref_mode(real_a, real_b_ref, 'center_only')
+                fake_zero    = self._forward_with_ref_mode(real_a, real_b_ref, 'zero')
+                fake_perm    = self._forward_with_ref_mode(real_a, real_b_ref, 'permute')
+                denom = fake_default.abs().mean() + 1e-8
+                self.log("out_sens/center_l1", ((fake_default - fake_center).abs().mean() / denom).item(), prog_bar=False)
+                self.log("out_sens/zero_l1",   ((fake_default - fake_zero).abs().mean()   / denom).item(), prog_bar=False)
+                self.log("out_sens/perm_l1",   ((fake_default - fake_perm).abs().mean()   / denom).item(), prog_bar=False)
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
@@ -442,6 +543,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
     def training_step(self, batch: Any, batch_idx: int):
 
+        self._setup_ablation_flags()
+
         real_c = real_d = fake_c = fake_d = None
         real_b_ref = real_c_ref = real_d_ref = None
         use_25d = getattr(self.params, 'use_25d_style', False)
@@ -503,6 +606,18 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             optimizer_F_A.step()
             optimizer_G_A.zero_grad()
             optimizer_F_A.zero_grad()
+
+        # Ablation diagnostic probe (no-op when all flags are false)
+        if getattr(self.params, 'ablation_debug_probe', False) or any(
+            getattr(self.params, f, False) for f in [
+                'ablation_log_zagg', 'ablation_log_ctx_weights',
+                'ablation_log_style_delta', 'ablation_log_ref_sensitivity',
+                'ablation_log_output_sensitivity',
+            ]
+        ):
+            # Restore allow_debug=True so probe reads main-forward stats
+            self._set_styleconv_allow_debug(True)
+            self._log_ablation_probe(real_a, real_b_ref)
 
         # Discriminator real target: for 2.5D use center slice of stack
         def _disc_real(ref, gt):

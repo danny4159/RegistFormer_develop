@@ -63,11 +63,22 @@ netF_A: # For PatchNCELoss
   init_type: 'xavier' #'xavier'
   init_gain: 0.02
   nc: 256
-  input_nc: 512 # ${model.netG_A.feat_ch} #TODO: input_nc must be 'feat_ch * output_nc'  for multiple/triple outputs
+  input_nc: 128 # feat_ch * ch (ch=1 for single-output); must match generator feature channel
 
 
 
 params: # Other params
+  # ── Ablation diagnostic flags ────────────────────────────────────────────
+  ablation_debug_probe: false          # master switch: log all ablation diagnostics
+  ablation_ref_mode: 'default'         # 'default' | 'center_only' | 'zero' | 'permute' | 'noise'
+  ablation_style_scale: 16             # downsampling factor for style_guidance: 4|8|16|32|0(global)
+  ablation_log_zagg: false             # log cosine sim between z_agg output and each input slice
+  ablation_log_ctx_weights: false      # log per-slice softmin weights in contextual loss
+  ablation_log_style_delta: false      # log gamma/beta delta_ratio per StyleConv layer
+  ablation_log_ref_sensitivity: false  # log feature delta (default vs center_only/zero) at encoder layers
+  ablation_log_output_sensitivity: false  # log output L1 delta (default vs center_only/zero/permute)
+  ablation_probe_interval: 200         # steps between expensive sensitivity probes
+  # ─────────────────────────────────────────────────────────────────────────
   lambda_gan: 1
   lambda_style: 5
   # lambda_cycle_a: 1

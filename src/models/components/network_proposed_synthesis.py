@@ -156,21 +156,74 @@ class ProposedSynthesisModule(nn.Module):
         if not self.use_25d_style:
             return ref_all
         chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
-        style_maps = [z_agg(chunk) for chunk, z_agg in zip(chunks, self.z_aggs)]
+        style_maps = []
+        self._last_zagg_sims = []
+        # only log on main synthesis forward (encode_only=False)
+        do_log = getattr(self, '_abl_log_zagg', False) and not getattr(self, '_abl_current_encode_only', False)
+        for chunk, z_agg in zip(chunks, self.z_aggs):
+            agg = z_agg(chunk)  # [B, 1, H, W]
+            if do_log:
+                with torch.no_grad():
+                    K = chunk.shape[1]
+                    agg_flat = agg.view(agg.shape[0], -1)
+                    sims = []
+                    for i in range(K):
+                        s_flat = chunk[:, i:i+1].reshape(chunk.shape[0], -1)
+                        cos = F.cosine_similarity(agg_flat, s_flat, dim=1).mean()
+                        sims.append(cos.item())
+                    self._last_zagg_sims.append(sims)
+            style_maps.append(agg)
         return torch.cat(style_maps, dim=1)
 
     def forward(self, merged_input, layers=[], encode_only=False):
 
+        # track encode_only so zagg/style debug can skip auxiliary NCE forwards
+        self._abl_current_encode_only = encode_only
+
         x = merged_input[:, :1, ...]
         ref_all = merged_input[:, 1:, ...]
+
+        # Ablation: reference perturbation mode
+        abl_ref_mode = getattr(self, '_abl_ref_mode', 'default')
+        if abl_ref_mode == 'zero':
+            ref_all = torch.zeros_like(ref_all)
+        elif abl_ref_mode == 'noise':
+            ref_all = torch.randn_like(ref_all)
+        elif abl_ref_mode == 'center_only':
+            K = self.ref_stack_size if self.use_25d_style else ref_all.shape[1]
+            center = K // 2
+            if self.use_25d_style:
+                parts = list(torch.split(ref_all, K, dim=1))
+                parts = [p[:, center:center+1].expand_as(p) for p in parts]
+                ref_all = torch.cat(parts, dim=1)
+            else:
+                ref_all = ref_all[:, center:center+1].expand_as(ref_all)
+        elif abl_ref_mode == 'permute':
+            # deterministic reverse: [0,1,2] → [2,1,0]; reproducible, never identity for K≥2
+            K = self.ref_stack_size if self.use_25d_style else ref_all.shape[1]
+            idx = torch.arange(K - 1, -1, -1, device=ref_all.device)
+            if self.use_25d_style:
+                parts = list(torch.split(ref_all, K, dim=1))
+                parts = [p[:, idx] for p in parts]
+                ref_all = torch.cat(parts, dim=1)
+            else:
+                ref_all = ref_all[:, idx]
+
         ref = self._aggregate_ref_stack(ref_all)
 
+        # Ablation: style downsampling scale
+        abl_scale = getattr(self, '_abl_style_scale', 16)
         if self.is_3d:
             ref = ref.permute(0, 1, 4, 2, 3)
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
+            if abl_scale == 0:
+                style_guidance_1 = F.adaptive_avg_pool3d(ref, output_size=(1, 1, 1))
+            else:
+                style_guidance_1 = F.interpolate(ref, scale_factor=1/abl_scale, mode='trilinear', align_corners=False)
             style_guidance_1 = style_guidance_1.permute(0, 1, 3, 4, 2)
+        elif abl_scale == 0:
+            style_guidance_1 = F.adaptive_avg_pool2d(ref, output_size=(1, 1))
         else:
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯
+            style_guidance_1 = F.interpolate(ref, scale_factor=1/abl_scale, mode='nearest')
         
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
         # style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Ablation
@@ -483,8 +536,20 @@ class StyleConv(nn.Module):
                 beta = torch.cat((beta, beta_2, beta_3), dim=1)
 
             # 3. 거기서 감마 베타 나눠서 denorm
+            x_pre = x
             x = x * gamma + beta
-        
+            # only record on main synthesis forward (not NCE encode_only passes)
+            if getattr(self, '_abl_log_style_delta', False) and getattr(self, '_abl_allow_debug', True):
+                with torch.no_grad():
+                    eps = 1e-8
+                    delta_ratio = (x - x_pre).abs().mean() / (x_pre.abs().mean() + eps)
+                    self.last_style_debug = {
+                        'gamma_abs': gamma.abs().mean().item(),
+                        'beta_abs': beta.abs().mean().item(),
+                        'delta_ratio': delta_ratio.item(),
+                        'spatial_std': x.std(dim=[2, 3]).mean().item() if x.dim() == 4 else x.std().item(),
+                    }
+
         # activation (LeakyReLU)
         if self.activate:
             x = self.activation(x)
