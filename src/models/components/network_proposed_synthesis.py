@@ -69,6 +69,12 @@ class ProposedSynthesisModule(nn.Module):
             self.z_select_norm_input  = bool(kwargs.get('z_select_norm_input', True))
             self.z_select_alpha_init  = float(kwargs.get('z_select_alpha_init', 0.1))
 
+            self.global_local_mode           = kwargs.get('global_local_mode', 'off')
+            self.global_style_source         = kwargs.get('global_style_source', 'center')
+            self.global_local_alpha_init     = float(kwargs.get('global_local_alpha_init', 0.1))
+            self.global_local_alpha_learnable = bool(kwargs.get('global_local_alpha_learnable', True))
+            self.global_local_layer_scope    = kwargs.get('global_local_layer_scope', 'decoder')
+
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
 
@@ -133,6 +139,27 @@ class ProposedSynthesisModule(nn.Module):
 
         self.store_zselect_debug = True
         self._last_zselect_stats = {}
+
+        # ── global/local style branch validation & alpha ──────────────
+        valid_gl = ['off', 'fuse', 'layerwise', 'global_only']
+        if self.global_local_mode not in valid_gl:
+            raise ValueError(f"Unknown global_local_mode: {self.global_local_mode}. Choose from {valid_gl}")
+        valid_gs = ['center', 'mean']
+        if self.global_style_source not in valid_gs:
+            raise ValueError(f"Unknown global_style_source: {self.global_style_source}. Choose from {valid_gs}")
+        valid_ls = ['decoder', 'late', 'bottleneck_decoder', 'all']
+        if self.global_local_layer_scope not in valid_ls:
+            raise ValueError(f"Unknown global_local_layer_scope: {self.global_local_layer_scope}. Choose from {valid_ls}")
+
+        alpha = min(max(self.global_local_alpha_init, 1e-4), 1.0 - 1e-4)
+        alpha_logit = math.log(alpha / (1.0 - alpha))
+        if self.global_local_alpha_learnable:
+            self.global_local_alpha_logit = nn.Parameter(torch.tensor(alpha_logit, dtype=torch.float32))
+        else:
+            self.register_buffer('global_local_alpha_logit', torch.tensor(alpha_logit, dtype=torch.float32))
+        self._last_global_local_stats = {}
+        self._last_layerwise_style_stats = {}
+        # ──────────────────────────────────────────────────────────────
 
         self.guide_net = nn.Sequential(
             nn.Conv2d(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
@@ -303,8 +330,8 @@ class ProposedSynthesisModule(nn.Module):
 
         return selected
 
-    def _make_style_guidance(self, source, ref_all, encode_only=False):
-        """Build style_guidance_1 from source + ref_all."""
+    def _make_local_style_guidance(self, source, ref_all, encode_only=False):
+        """Build local style guidance (z_select path)."""
         if not self.use_25d_style:
             h, w = self._style_size(source)
             return F.interpolate(ref_all, size=(h, w), mode='nearest')
@@ -318,7 +345,6 @@ class ProposedSynthesisModule(nn.Module):
             h, w = self._style_size(source)
             return F.interpolate(ref, size=(h, w), mode='nearest')
 
-        # sobel / learned / learned_residual
         chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
         store = (not encode_only) and getattr(self, 'store_zselect_debug', True)
         if store:
@@ -329,34 +355,127 @@ class ProposedSynthesisModule(nn.Module):
         ]
         return torch.cat(selected_maps, dim=1)
 
+    def _make_global_style_guidance(self, ref_all, target_size):
+        """Build global style guidance via adaptive avg pool → upsample."""
+        if not self.use_25d_style:
+            base = ref_all
+        else:
+            chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
+            maps = []
+            for chunk in chunks:
+                K = chunk.shape[1]
+                if self.global_style_source == 'center':
+                    m = chunk[:, K // 2:K // 2 + 1]
+                else:  # mean
+                    m = chunk.mean(dim=1, keepdim=True)
+                maps.append(m)
+            base = torch.cat(maps, dim=1)
+        global_style = F.adaptive_avg_pool2d(base, output_size=(1, 1))
+        return F.interpolate(global_style, size=target_size, mode='nearest')
+
+    def _get_global_local_alpha(self):
+        return torch.sigmoid(self.global_local_alpha_logit)
+
+    def _store_global_local_stats(self, global_style, local_style, fused_style):
+        with torch.no_grad():
+            eps = 1e-8
+            alpha = self._get_global_local_alpha()
+            self._last_global_local_stats = {
+                'alpha':               alpha.detach(),
+                'global_std':          global_style.std().detach(),
+                'local_std':           local_style.std().detach(),
+                'fused_std':           fused_style.std().detach(),
+                'local_global_delta':  ((local_style - global_style).abs().mean() / (global_style.abs().mean() + eps)).detach(),
+                'fused_global_delta':  ((fused_style - global_style).abs().mean() / (global_style.abs().mean() + eps)).detach(),
+                'fused_local_delta':   ((fused_style - local_style).abs().mean()  / (local_style.abs().mean()  + eps)).detach(),
+            }
+
+    def _make_style_guidance_pack(self, source, ref_all, encode_only=False):
+        """Return dict of style maps based on global_local_mode."""
+        local_style = self._make_local_style_guidance(source, ref_all, encode_only=encode_only)
+
+        if self.global_local_mode == 'off':
+            return {'default': local_style}
+
+        target_size = local_style.shape[-2:]
+        global_style = self._make_global_style_guidance(ref_all, target_size)
+        alpha = self._get_global_local_alpha()
+        fused_style = global_style + alpha * (local_style - global_style)
+
+        if (not encode_only) and getattr(self, 'store_zselect_debug', True):
+            self._store_global_local_stats(global_style, local_style, fused_style)
+            self._store_layerwise_style_stats(
+                {'global': global_style, 'local': local_style, 'fused': fused_style}
+            )
+
+        return {'global': global_style, 'local': local_style, 'fused': fused_style}
+
+    def _store_layerwise_style_stats(self, style_pack):
+        if self.global_local_mode != 'layerwise':
+            return
+        with torch.no_grad():
+            stats = {}
+            local_names = self._local_layer_names()
+            for layer in ['conv0','conv11','conv12','conv21','conv22','conv31','conv32','conv41','conv42','conv51','conv52','conv6']:
+                s = self._style_for_layer(style_pack, layer)
+                stats[f'{layer}/is_fused'] = torch.tensor(1.0 if layer in local_names else 0.0, device=s.device)
+                stats[f'{layer}/style_std'] = s.std().detach()
+            self._last_layerwise_style_stats = stats
+
+    def _local_layer_names(self):
+        if self.global_local_layer_scope == 'all':
+            return {'conv0','conv11','conv12','conv21','conv22','conv31','conv32','conv41','conv42','conv51','conv52','conv6'}
+        if self.global_local_layer_scope == 'bottleneck_decoder':
+            return {'conv31','conv32','conv41','conv42','conv51','conv52','conv6'}
+        if self.global_local_layer_scope == 'decoder':
+            return {'conv41','conv42','conv51','conv52','conv6'}
+        if self.global_local_layer_scope == 'late':
+            return {'conv51','conv52','conv6'}
+        raise RuntimeError(f"Invalid global_local_layer_scope: {self.global_local_layer_scope}")
+
+    def _style_for_layer(self, style_pack, layer_name):
+        if self.global_local_mode == 'off':
+            return style_pack['default']
+        if self.global_local_mode == 'global_only':
+            return style_pack['global']
+        if self.global_local_mode == 'fuse':
+            return style_pack['fused']
+        # layerwise
+        if layer_name in self._local_layer_names():
+            return style_pack['fused']
+        return style_pack['global']
+
     def forward(self, merged_input, layers=[], encode_only=False):
 
         x = merged_input[:, :1, ...]
         ref_all = merged_input[:, 1:, ...]
-        style_guidance_1 = self._make_style_guidance(x, ref_all, encode_only=encode_only)
+        style_pack = self._make_style_guidance_pack(x, ref_all, encode_only=encode_only)
 
         feats = []
-        feat0 = self.conv0(x, style_guidance_1) # [1, feat_ch, H, W]
-        feat1 = self.conv11(feat0, style_guidance_1) # [1, feat_ch, H/2, W/2]
-        feat1 = self.conv12(feat1, style_guidance_1) # [1, feat_ch, H/2, W/2]
-        feat2 = self.conv21(feat1, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat2 = self.conv22(feat2, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat3 = self.conv31(feat2, style_guidance_1) # [1, feat_ch, H/4, W/4] #TODO: 메모리 많아서 뺌.
-        feat3 = self.conv32(feat3, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat4 = self.conv41(feat3 + feat2, style_guidance_1)# [1, feat_ch, H/2, W/2] #TODO: 원래 intput feat3 + feat2
-        feat4 = self.conv42(feat4, style_guidance_1)        # [1, feat_ch, H/2, W/2]
-        feat5 = self.conv51(feat4 + feat1, style_guidance_1)# [1, feat_ch, H, W]
-        feat5 = self.conv52(feat5, style_guidance_1)        # [1, feat_ch, H, W]
-        feat6 = self.conv6(feat5 + feat0, style_guidance_1) # [1, feat_ch, H, W]
+        feat0 = self.conv0 (x,          self._style_for_layer(style_pack, 'conv0'))
+        feat1 = self.conv11(feat0,       self._style_for_layer(style_pack, 'conv11'))
+        feat1 = self.conv12(feat1,       self._style_for_layer(style_pack, 'conv12'))
+        feat2 = self.conv21(feat1,       self._style_for_layer(style_pack, 'conv21'))
+        feat2 = self.conv22(feat2,       self._style_for_layer(style_pack, 'conv22'))
+        feat3 = self.conv31(feat2,       self._style_for_layer(style_pack, 'conv31'))
+        feat3 = self.conv32(feat3,       self._style_for_layer(style_pack, 'conv32'))
+        feat4 = self.conv41(feat3+feat2, self._style_for_layer(style_pack, 'conv41'))
+        feat4 = self.conv42(feat4,       self._style_for_layer(style_pack, 'conv42'))
+        feat5 = self.conv51(feat4+feat1, self._style_for_layer(style_pack, 'conv51'))
+        feat5 = self.conv52(feat5,       self._style_for_layer(style_pack, 'conv52'))
+        feat6 = self.conv6 (feat5+feat0, self._style_for_layer(style_pack, 'conv6'))
+
+        # use conv6's style for separate_style_layers heads
+        style_for_head = self._style_for_layer(style_pack, 'conv6')
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 처리
         if self.use_separate_style_layers and self.use_triple_outputs:
             # feat6를 3등분으로 분리
             feat6_1, feat6_2, feat6_3 = torch.chunk(feat6, chunks=3, dim=1)  # 각 [B, feat_ch, H, W]
             # style도 분리
-            style_1 = style_guidance_1[:, :1, ...]  # [B, 1, ...]
-            style_2 = style_guidance_1[:, 1:2, ...]  # [B, 1, ...]
-            style_3 = style_guidance_1[:, 2:3, ...]  # [B, 1, ...]
+            style_1 = style_for_head[:, :1, ...]  # [B, 1, ...]
+            style_2 = style_for_head[:, 1:2, ...]  # [B, 1, ...]
+            style_3 = style_for_head[:, 2:3, ...]  # [B, 1, ...]
 
             # conv7: 각각 독립적으로 처리
             feat7_1 = self.conv7_1(feat6_1, style_1)  # [B, feat_ch, H, W]
@@ -379,8 +498,8 @@ class ProposedSynthesisModule(nn.Module):
             # feat6를 반으로 분리
             feat6_1, feat6_2 = torch.chunk(feat6, chunks=2, dim=1)  # 각 [B, feat_ch, H, W]
             # style도 분리
-            style_1 = style_guidance_1[:, :1, ...]  # [B, 1, ...]
-            style_2 = style_guidance_1[:, 1:, ...]  # [B, 1, ...]
+            style_1 = style_for_head[:, :1, ...]  # [B, 1, ...]
+            style_2 = style_for_head[:, 1:, ...]  # [B, 1, ...]
 
             # conv7: 각각 독립적으로 처리
             feat7_1 = self.conv7_1(feat6_1, style_1)  # [B, feat_ch, H, W]
@@ -648,12 +767,14 @@ class StyleConv(nn.Module):
                 with torch.no_grad():
                     eps = 1e-8
                     self.last_style_debug = {
-                        'gamma_abs':         gamma.abs().mean().detach(),
-                        'beta_abs':          beta.abs().mean().detach(),
-                        'gamma_spatial_std': gamma.std(dim=(-2,-1)).mean().detach(),
-                        'beta_spatial_std':  beta.std(dim=(-2,-1)).mean().detach(),
-                        'delta_ratio':       ((x - x_pre).abs().mean() / (x_pre.abs().mean() + eps)).detach(),
-                        'x_out_over_x_pre':  (x.abs().mean() / (x_pre.abs().mean() + eps)).detach(),
+                        'gamma_abs':            gamma.abs().mean().detach(),
+                        'beta_abs':             beta.abs().mean().detach(),
+                        'gamma_spatial_std':    gamma.std(dim=(-2,-1)).mean().detach(),
+                        'beta_spatial_std':     beta.std(dim=(-2,-1)).mean().detach(),
+                        'delta_ratio':          ((x - x_pre).abs().mean() / (x_pre.abs().mean() + eps)).detach(),
+                        'x_out_over_x_pre':     (x.abs().mean() / (x_pre.abs().mean() + eps)).detach(),
+                        'style_in_std':         style.std().detach(),
+                        'style_in_spatial_std': style.std(dim=(-2,-1)).mean().detach(),
                     }
         
         # activation (LeakyReLU)

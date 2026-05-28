@@ -43,6 +43,13 @@ netG_A:
   z_select_use_edges: true      # concat Sobel edge maps into selector input
   z_select_norm_input: true     # spatial z-score normalize before selector
   z_select_alpha_init: 0.1      # initial residual blend for learned_residual
+
+  # ── Global/local style branch ─────────────────────────────────────
+  global_local_mode: 'off'              # off | fuse | layerwise
+  global_style_source: 'center'         # center | mean
+  global_local_alpha_init: 0.1
+  global_local_alpha_learnable: true
+  global_local_layer_scope: 'decoder'   # decoder | late | bottleneck_decoder | all
   # ─────────────────────────────────────────────────────────────────────────
   # init_type: 'kaiming'
 
@@ -116,3 +123,5 @@ params: # Other params
   log_z_select_interval: 200
   log_z_select_sensitivity: false
   log_style_modulation: false
+  log_global_local_style: false
+  log_global_local_sensitivity: false

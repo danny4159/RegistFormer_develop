@@ -190,6 +190,78 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         finally:
             self._restore_randomize_noise(old_noise)
 
+    def _log_global_local_stats(self):
+        if not getattr(self.params, 'log_global_local_style', False):
+            return
+        stats = getattr(self.netG_A, '_last_global_local_stats', None)
+        if not stats:
+            return
+        for k, v in stats.items():
+            self.log(f"global_local/{k}", v, prog_bar=False)
+
+    def _set_global_local_mode(self, mode):
+        old_mode = getattr(self.netG_A, 'global_local_mode', 'off')
+        self.netG_A.global_local_mode = mode
+        return old_mode
+
+    def _restore_global_local_mode(self, old_mode):
+        self.netG_A.global_local_mode = old_mode
+
+    def _log_global_local_sensitivity(self, real_a, real_b_ref):
+        if not getattr(self.params, 'log_global_local_sensitivity', False):
+            return
+        interval = int(getattr(self.params, 'log_z_select_interval', 200))
+        if self.global_step % interval != 0:
+            return
+        if real_b_ref is None:
+            return
+
+        old_noise = self._set_randomize_noise(False)
+        old_store = getattr(self.netG_A, 'store_zselect_debug', True)
+        self.netG_A.store_zselect_debug = False
+        old_mode = self._set_global_local_mode(getattr(self.netG_A, 'global_local_mode', 'off'))
+
+        try:
+            with torch.no_grad():
+                merged = torch.cat([real_a, real_b_ref], dim=1)
+
+                self.netG_A.global_local_mode = old_mode
+                fake_current = self.netG_A(merged)
+
+                self.netG_A.global_local_mode = 'global_only'
+                fake_global = self.netG_A(merged)
+
+                self.netG_A.global_local_mode = 'off'
+                fake_local = self.netG_A(merged)
+
+                eps = 1e-8
+                denom = fake_current.abs().mean() + eps
+                self.log("global_local_sens/current_vs_global_l1",
+                         (fake_current - fake_global).abs().mean() / denom, prog_bar=False)
+                self.log("global_local_sens/current_vs_local_l1",
+                         (fake_current - fake_local).abs().mean() / denom, prog_bar=False)
+                self.log("global_local_sens/global_vs_local_l1",
+                         (fake_global - fake_local).abs().mean() / denom, prog_bar=False)
+        finally:
+            self._restore_global_local_mode(old_mode)
+            self.netG_A.store_zselect_debug = old_store
+            self._restore_randomize_noise(old_noise)
+
+    def _log_layerwise_style_stats(self):
+        stats = getattr(self.netG_A, '_last_layerwise_style_stats', None)
+        if not stats:
+            return
+        for k, v in stats.items():
+            self.log(f"layerwise_style/{k}", v, prog_bar=False)
+
+    def _log_global_local_alpha_grad(self):
+        if not getattr(self.params, 'log_global_local_style', False):
+            return
+        p = getattr(self.netG_A, 'global_local_alpha_logit', None)
+        if p is None or p.grad is None:
+            return
+        self.log("global_local/alpha_grad_abs", p.grad.detach().abs().mean(), prog_bar=False)
+
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
         use_25d = getattr(self.params, 'use_25d_style', False)
@@ -561,17 +633,22 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             else:
                 real_a, real_b, fake_b = self.model_step(batch)
 
-        # z-selection / style modulation logging
-        do_log_z     = getattr(self.params, 'log_z_select', False)
-        do_log_style = getattr(self.params, 'log_style_modulation', False)
-        if do_log_z or do_log_style:
+        # z-selection / style modulation / global-local logging
+        do_log_z  = getattr(self.params, 'log_z_select', False)
+        do_log_st = getattr(self.params, 'log_style_modulation', False)
+        do_log_gl = getattr(self.params, 'log_global_local_style', False)
+        if do_log_z or do_log_st or do_log_gl:
             interval = int(getattr(self.params, 'log_z_select_interval', 200))
             if self.global_step % interval == 0:
                 if do_log_z:
                     self._log_zselect_stats()
                     self._log_zselect_sensitivity(real_a, real_b_ref)
-                if do_log_style:
+                if do_log_st:
                     self._log_style_modulation_stats()
+                if do_log_gl:
+                    self._log_global_local_stats()
+                    self._log_layerwise_style_stats()
+                    self._log_global_local_sensitivity(real_a, real_b_ref)
 
         with optimizer_G_A.toggle_model():
             if self.params.use_triple_outputs:
@@ -585,6 +662,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
 
             self.manual_backward(loss_G)
+            self._log_global_local_alpha_grad()
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
             )
