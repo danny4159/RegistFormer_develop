@@ -561,13 +561,17 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             else:
                 real_a, real_b, fake_b = self.model_step(batch)
 
-        # z-selection logging
-        if getattr(self.params, 'log_z_select', False):
+        # z-selection / style modulation logging
+        do_log_z     = getattr(self.params, 'log_z_select', False)
+        do_log_style = getattr(self.params, 'log_style_modulation', False)
+        if do_log_z or do_log_style:
             interval = int(getattr(self.params, 'log_z_select_interval', 200))
             if self.global_step % interval == 0:
-                self._log_zselect_stats()
-                self._log_style_modulation_stats()
-                self._log_zselect_sensitivity(real_a, real_b_ref)
+                if do_log_z:
+                    self._log_zselect_stats()
+                    self._log_zselect_sensitivity(real_a, real_b_ref)
+                if do_log_style:
+                    self._log_style_modulation_stats()
 
         with optimizer_G_A.toggle_model():
             if self.params.use_triple_outputs:

@@ -90,6 +90,11 @@ class ProposedSynthesisModule(nn.Module):
             valid_modes = ['conv', 'sobel', 'learned', 'learned_residual']
             if self.z_select_mode not in valid_modes:
                 raise ValueError(f"Unknown z_select_mode: {self.z_select_mode}. Choose from {valid_modes}")
+            if self.is_3d and self.z_select_mode != 'conv':
+                raise NotImplementedError(
+                    f"z_select_mode='{self.z_select_mode}' is only supported for 2D/2.5D. "
+                    "Use z_select_mode='conv' for is_3d=True."
+                )
 
             if self.z_select_mode == 'conv':
                 hidden = max(8, self.feat_ch // 8)
