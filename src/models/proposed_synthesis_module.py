@@ -112,6 +112,84 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
         return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
 
+    def _setup_zselect_debug_flags(self):
+        if not hasattr(self, 'netG_A'):
+            return
+        log_style = getattr(self.params, 'log_style_modulation', False)
+        for mod in self.netG_A.modules():
+            if type(mod).__name__ == 'StyleConv':
+                mod._log_style_modulation = log_style
+
+    def _log_zselect_stats(self):
+        stats = getattr(self.netG_A, '_last_zselect_stats', None)
+        if not stats:
+            return
+        for k, v in stats.items():
+            self.log(f"zselect/{k}", v, prog_bar=False)
+
+    def _log_style_modulation_stats(self):
+        if not getattr(self.params, 'log_style_modulation', False):
+            return
+        for name, mod in self.netG_A.named_modules():
+            if type(mod).__name__ != 'StyleConv':
+                continue
+            dbg = getattr(mod, 'last_style_debug', None)
+            if dbg is None:
+                continue
+            for k, v in dbg.items():
+                self.log(f"style/{name}/{k}", v, prog_bar=False)
+
+    def _set_randomize_noise(self, value):
+        old_states = []
+        for mod in self.netG_A.modules():
+            if hasattr(mod, 'randomize_noise'):
+                old_states.append((mod, mod.randomize_noise))
+                mod.randomize_noise = value
+        return old_states
+
+    def _restore_randomize_noise(self, old_states):
+        for mod, old_value in old_states:
+            mod.randomize_noise = old_value
+
+    def _forward_no_zdebug(self, real_a, ref_stack):
+        old_store = getattr(self.netG_A, 'store_zselect_debug', True)
+        self.netG_A.store_zselect_debug = False
+        try:
+            merged = torch.cat([real_a, ref_stack], dim=1)
+            return self.netG_A(merged)
+        finally:
+            self.netG_A.store_zselect_debug = old_store
+
+    def _log_zselect_sensitivity(self, real_a, real_b_ref):
+        if not getattr(self.params, 'log_z_select_sensitivity', False):
+            return
+        interval = int(getattr(self.params, 'log_z_select_interval', 200))
+        if self.global_step % interval != 0:
+            return
+        use_25d = getattr(self.params, 'use_25d_style', False)
+        if not use_25d or real_b_ref is None or real_b_ref.shape[1] < 3:
+            return
+        K = real_b_ref.shape[1]
+        center_idx = K // 2
+        center_ref = real_b_ref[:, center_idx:center_idx+1].expand_as(real_b_ref)
+        zero_ref   = torch.zeros_like(real_b_ref)
+        idx        = torch.arange(K - 1, -1, -1, device=real_b_ref.device)
+        perm_ref   = real_b_ref[:, idx]
+        old_noise  = self._set_randomize_noise(False)
+        try:
+            with torch.no_grad():
+                fake_default = self._forward_no_zdebug(real_a, real_b_ref)
+                fake_center  = self._forward_no_zdebug(real_a, center_ref)
+                fake_zero    = self._forward_no_zdebug(real_a, zero_ref)
+                fake_perm    = self._forward_no_zdebug(real_a, perm_ref)
+                eps   = 1e-8
+                denom = fake_default.abs().mean() + eps
+                self.log("zselect_sens/out_center_l1", ((fake_default - fake_center).abs().mean() / denom).item(), prog_bar=False)
+                self.log("zselect_sens/out_zero_l1",   ((fake_default - fake_zero).abs().mean()   / denom).item(), prog_bar=False)
+                self.log("zselect_sens/out_perm_l1",   ((fake_default - fake_perm).abs().mean()   / denom).item(), prog_bar=False)
+        finally:
+            self._restore_randomize_noise(old_noise)
+
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
         use_25d = getattr(self.params, 'use_25d_style', False)
@@ -442,6 +520,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
     def training_step(self, batch: Any, batch_idx: int):
 
+        self._setup_zselect_debug_flags()
+
         real_c = real_d = fake_c = fake_d = None
         real_b_ref = real_c_ref = real_d_ref = None
         use_25d = getattr(self.params, 'use_25d_style', False)
@@ -480,6 +560,14 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 real_a, real_b, fake_b, real_b_ref = self.model_step(batch)
             else:
                 real_a, real_b, fake_b = self.model_step(batch)
+
+        # z-selection logging
+        if getattr(self.params, 'log_z_select', False):
+            interval = int(getattr(self.params, 'log_z_select_interval', 200))
+            if self.global_step % interval == 0:
+                self._log_zselect_stats()
+                self._log_style_modulation_stats()
+                self._log_zselect_sensitivity(real_a, real_b_ref)
 
         with optimizer_G_A.toggle_model():
             if self.params.use_triple_outputs:

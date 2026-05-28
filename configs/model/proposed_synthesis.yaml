@@ -30,6 +30,20 @@ netG_A:
   use_25d_style: ${data.use_25d_style}
   ref_stack_size: ${data.ref_stack_size}
   z_agg_deep: false          # true: 3-layer z_agg (K->hidden->hidden->1), false: 2-layer (K->hidden->1)
+  # ── Source-conditioned 2.5D z-selection ──────────────────────────────────
+  # conv             : original z_agg K→1 conv (default, backward compatible)
+  # sobel            : non-learnable Sobel edge-based soft selector
+  # learned          : learnable low-res source-conditioned selector
+  # learned_residual : center-preserving residual selector
+  z_select_mode: 'conv'         # conv | sobel | learned | learned_residual
+  z_select_scale: 16            # style map resolution = H/z_select_scale
+  z_select_hidden: 32           # hidden channels in LowResSliceSelector
+  z_select_tau: 0.5             # softmax temperature; smaller = sharper selection
+  z_select_center_bias: 1.0     # additive logit bias for center slice
+  z_select_use_edges: true      # concat Sobel edge maps into selector input
+  z_select_norm_input: true     # spatial z-score normalize before selector
+  z_select_alpha_init: 0.1      # initial residual blend for learned_residual
+  # ─────────────────────────────────────────────────────────────────────────
   # init_type: 'kaiming'
 
 netD_A:
@@ -97,3 +111,8 @@ params: # Other params
   ctx_agg_mode: 'softmin'    # 'softmin': center-biased soft-min (default) | 'mean': simple mean over all slices
   ctx_softmin_tau: 0.3       # soft-min temperature (작을수록 hard-min에 가까움) — softmin 전용
   ctx_shift_penalty: 0.05    # center slice preference bias per neighbor step — softmin 전용
+  # ── z-selection logging ───────────────────────────────────────────────────
+  log_z_select: false
+  log_z_select_interval: 200
+  log_z_select_sensitivity: false
+  log_style_modulation: false

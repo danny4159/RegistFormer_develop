@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,6 +8,40 @@ def get_layer_by_dim(is_3d):
     Conv = getattr(nn, f'Conv{dim}d')
     Norm = getattr(nn, f'InstanceNorm{dim}d')
     return Conv, Norm, dim
+
+
+def spatial_zscore(x, eps=1e-6):
+    mean = x.mean(dim=(-2, -1), keepdim=True)
+    std = x.std(dim=(-2, -1), keepdim=True)
+    return (x - mean) / (std + eps)
+
+
+def sobel_mag(x, eps=1e-6):
+    B, C, H, W = x.shape
+    device, dtype = x.device, x.dtype
+    kx = torch.tensor([[-1,0,1],[-2,0,2],[-1,0,1]], device=device, dtype=dtype).view(1,1,3,3).repeat(C,1,1,1)
+    ky = torch.tensor([[-1,-2,-1],[0,0,0],[1,2,1]], device=device, dtype=dtype).view(1,1,3,3).repeat(C,1,1,1)
+    gx = F.conv2d(x, kx, padding=1, groups=C)
+    gy = F.conv2d(x, ky, padding=1, groups=C)
+    return torch.sqrt(gx * gx + gy * gy + eps)
+
+
+class LowResSliceSelector(nn.Module):
+    def __init__(self, in_ch, ref_stack_size, hidden=32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_ch, hidden, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden, ref_stack_size, kernel_size=1),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, x):
+        return self.net(x)
+
 
 class ProposedSynthesisModule(nn.Module):
     def __init__(self, **kwargs):
@@ -25,6 +60,15 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_stack_size = kwargs.get('ref_stack_size', 3)
             self.z_agg_deep = kwargs.get('z_agg_deep', False)
 
+            self.z_select_mode        = kwargs.get('z_select_mode', 'conv')
+            self.z_select_scale       = int(kwargs.get('z_select_scale', 16))
+            self.z_select_hidden      = int(kwargs.get('z_select_hidden', 32))
+            self.z_select_tau         = float(kwargs.get('z_select_tau', 0.5))
+            self.z_select_center_bias = float(kwargs.get('z_select_center_bias', 1.0))
+            self.z_select_use_edges   = bool(kwargs.get('z_select_use_edges', True))
+            self.z_select_norm_input  = bool(kwargs.get('z_select_norm_input', True))
+            self.z_select_alpha_init  = float(kwargs.get('z_select_alpha_init', 0.1))
+
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
 
@@ -41,26 +85,49 @@ class ProposedSynthesisModule(nn.Module):
             ch = 1
             self.num_style_streams = 1
 
-        # 2.5D: compress ref stack [B, K, H, W] -> [B, 1, H, W] per style stream
+        # 2.5D: compress/select ref stack [B, K, H, W] -> [B, 1, H, W] per style stream
         if self.use_25d_style:
-            hidden = max(8, self.feat_ch // 8)
-            if self.z_agg_deep:
-                def _make_z_agg():
-                    return nn.Sequential(
-                        nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
-                        nn.LeakyReLU(0.2, inplace=True),
-                        nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
-                        nn.LeakyReLU(0.2, inplace=True),
-                        nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
-                    )
-            else:
-                def _make_z_agg():
-                    return nn.Sequential(
-                        nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
-                        nn.LeakyReLU(0.2, inplace=True),
-                        nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
-                    )
-            self.z_aggs = nn.ModuleList([_make_z_agg() for _ in range(self.num_style_streams)])
+            valid_modes = ['conv', 'sobel', 'learned', 'learned_residual']
+            if self.z_select_mode not in valid_modes:
+                raise ValueError(f"Unknown z_select_mode: {self.z_select_mode}. Choose from {valid_modes}")
+
+            if self.z_select_mode == 'conv':
+                hidden = max(8, self.feat_ch // 8)
+                if self.z_agg_deep:
+                    def _make_z_agg():
+                        return nn.Sequential(
+                            nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
+                            nn.LeakyReLU(0.2, inplace=True),
+                            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+                            nn.LeakyReLU(0.2, inplace=True),
+                            nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
+                        )
+                else:
+                    def _make_z_agg():
+                        return nn.Sequential(
+                            nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
+                            nn.LeakyReLU(0.2, inplace=True),
+                            nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
+                        )
+                self.z_aggs = nn.ModuleList([_make_z_agg() for _ in range(self.num_style_streams)])
+
+            elif self.z_select_mode in ['learned', 'learned_residual']:
+                K = self.ref_stack_size
+                in_ch = 1 + K  # source_down + ref_stack_down
+                if self.z_select_use_edges:
+                    in_ch += 1 + K  # edge_source + edge_ref_stack
+                self.z_selectors = nn.ModuleList([
+                    LowResSliceSelector(in_ch=in_ch, ref_stack_size=K, hidden=self.z_select_hidden)
+                    for _ in range(self.num_style_streams)
+                ])
+                if self.z_select_mode == 'learned_residual':
+                    alpha = min(max(self.z_select_alpha_init, 1e-4), 1.0 - 1e-4)
+                    alpha_logit = math.log(alpha / (1.0 - alpha))
+                    self.z_select_alpha_logit = nn.Parameter(torch.tensor(alpha_logit, dtype=torch.float32))
+            # sobel: no learnable params
+
+        self.store_zselect_debug = True
+        self._last_zselect_stats = {}
 
         self.guide_net = nn.Sequential(
             nn.Conv2d(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
@@ -152,30 +219,117 @@ class ProposedSynthesisModule(nn.Module):
         self.conv_final = Conv(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
 
     def _aggregate_ref_stack(self, ref_all):
-        """2.5D: [B, num_streams*K, H, W] -> [B, num_streams, H, W]"""
+        """2.5D conv mode: [B, num_streams*K, H, W] -> [B, num_streams, H, W]"""
         if not self.use_25d_style:
             return ref_all
         chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
         style_maps = [z_agg(chunk) for chunk, z_agg in zip(chunks, self.z_aggs)]
         return torch.cat(style_maps, dim=1)
 
+    def _style_size(self, source):
+        H, W = source.shape[-2:]
+        s = max(1, self.z_select_scale)
+        return max(1, H // s), max(1, W // s)
+
+    def _center_bias(self, logits):
+        K = logits.shape[1]
+        bias = torch.zeros_like(logits)
+        bias[:, K // 2] = self.z_select_center_bias
+        return bias
+
+    def _store_zselect_stats(self, stream_idx, weights, selected, center, weighted, logits=None):
+        if not getattr(self, 'store_zselect_debug', True):
+            return
+        with torch.no_grad():
+            eps = 1e-8
+            K = weights.shape[1]
+            p = f"stream{stream_idx}"
+            entropy = -(weights * (weights + eps).log()).sum(dim=1).mean()
+            self._last_zselect_stats.update({
+                f"{p}/entropy":              (entropy / math.log(K)).detach(),
+                f"{p}/center_weight":         weights[:, K//2:K//2+1].mean().detach(),
+                f"{p}/neighbor_mass":         (1.0 - weights[:, K//2:K//2+1].mean()).detach(),
+                f"{p}/selected_center_delta": ((selected - center).abs().mean() / (center.abs().mean() + eps)).detach(),
+                f"{p}/weighted_center_delta": ((weighted - center).abs().mean() / (center.abs().mean() + eps)).detach(),
+                f"{p}/selected_std":          selected.std().detach(),
+            })
+            for i in range(K):
+                self._last_zselect_stats[f"{p}/slice{i}_weight"] = weights[:, i].mean().detach()
+            if self.z_select_mode == 'learned_residual':
+                self._last_zselect_stats[f"{p}/alpha"] = torch.sigmoid(self.z_select_alpha_logit).detach()
+            if logits is not None:
+                self._last_zselect_stats[f"{p}/logits_std"] = logits.std().detach()
+
+    def _select_one_ref_stream(self, source, ref_chunk, stream_idx=0, store_debug=True):
+        K = ref_chunk.shape[1]
+        center_idx = K // 2
+        h, w = self._style_size(source)
+        src_d = F.interpolate(source, size=(h, w), mode='bilinear', align_corners=False)
+        ref_d = F.interpolate(ref_chunk, size=(h, w), mode='bilinear', align_corners=False)
+        center = ref_d[:, center_idx:center_idx+1]
+
+        src_in = spatial_zscore(src_d) if self.z_select_norm_input else src_d
+        ref_in = spatial_zscore(ref_d) if self.z_select_norm_input else ref_d
+
+        if self.z_select_mode == 'sobel':
+            src_e = spatial_zscore(sobel_mag(src_d))
+            ref_e = spatial_zscore(sobel_mag(ref_d))
+            logits = -(ref_e - src_e).abs()
+        elif self.z_select_mode in ['learned', 'learned_residual']:
+            inputs = [src_in, ref_in]
+            if self.z_select_use_edges:
+                inputs += [spatial_zscore(sobel_mag(src_d)), spatial_zscore(sobel_mag(ref_d))]
+            logits = self.z_selectors[stream_idx](torch.cat(inputs, dim=1))
+        else:
+            raise RuntimeError(f"Invalid mode for _select_one_ref_stream: {self.z_select_mode}")
+
+        logits_biased = logits + self._center_bias(logits)
+        weights = torch.softmax(logits_biased / max(self.z_select_tau, 1e-6), dim=1)
+        weighted = (weights * ref_d).sum(dim=1, keepdim=True)
+
+        if self.z_select_mode == 'learned_residual':
+            alpha = torch.sigmoid(self.z_select_alpha_logit)
+            selected = center + alpha * (weighted - center)
+        else:
+            selected = weighted
+
+        if store_debug:
+            self._store_zselect_stats(stream_idx, weights, selected, center, weighted, logits)
+
+        return selected
+
+    def _make_style_guidance(self, source, ref_all, encode_only=False):
+        """Build style_guidance_1 from source + ref_all."""
+        if not self.use_25d_style:
+            h, w = self._style_size(source)
+            return F.interpolate(ref_all, size=(h, w), mode='nearest')
+
+        if self.z_select_mode == 'conv':
+            ref = self._aggregate_ref_stack(ref_all)
+            if self.is_3d:
+                ref = ref.permute(0, 1, 4, 2, 3)
+                sg = F.interpolate(ref, scale_factor=1/self.z_select_scale, mode='trilinear', align_corners=False)
+                return sg.permute(0, 1, 3, 4, 2)
+            h, w = self._style_size(source)
+            return F.interpolate(ref, size=(h, w), mode='nearest')
+
+        # sobel / learned / learned_residual
+        chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
+        store = (not encode_only) and getattr(self, 'store_zselect_debug', True)
+        if store:
+            self._last_zselect_stats = {}
+        selected_maps = [
+            self._select_one_ref_stream(source, chunk, stream_idx=i, store_debug=store)
+            for i, chunk in enumerate(chunks)
+        ]
+        return torch.cat(selected_maps, dim=1)
+
     def forward(self, merged_input, layers=[], encode_only=False):
 
         x = merged_input[:, :1, ...]
         ref_all = merged_input[:, 1:, ...]
-        ref = self._aggregate_ref_stack(ref_all)
+        style_guidance_1 = self._make_style_guidance(x, ref_all, encode_only=encode_only)
 
-        if self.is_3d:
-            ref = ref.permute(0, 1, 4, 2, 3)
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
-            style_guidance_1 = style_guidance_1.permute(0, 1, 3, 4, 2)
-        else:
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯
-        
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/64, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, size=(1, 1), mode='nearest') # Ablation
         feats = []
         feat0 = self.conv0(x, style_guidance_1) # [1, feat_ch, H, W]
         feat1 = self.conv11(feat0, style_guidance_1) # [1, feat_ch, H/2, W/2]
@@ -483,7 +637,19 @@ class StyleConv(nn.Module):
                 beta = torch.cat((beta, beta_2, beta_3), dim=1)
 
             # 3. 거기서 감마 베타 나눠서 denorm
+            x_pre = x
             x = x * gamma + beta
+            if getattr(self, '_log_style_modulation', False):
+                with torch.no_grad():
+                    eps = 1e-8
+                    self.last_style_debug = {
+                        'gamma_abs':         gamma.abs().mean().detach(),
+                        'beta_abs':          beta.abs().mean().detach(),
+                        'gamma_spatial_std': gamma.std(dim=(-2,-1)).mean().detach(),
+                        'beta_spatial_std':  beta.std(dim=(-2,-1)).mean().detach(),
+                        'delta_ratio':       ((x - x_pre).abs().mean() / (x_pre.abs().mean() + eps)).detach(),
+                        'x_out_over_x_pre':  (x.abs().mean() / (x_pre.abs().mean() + eps)).detach(),
+                    }
         
         # activation (LeakyReLU)
         if self.activate:
