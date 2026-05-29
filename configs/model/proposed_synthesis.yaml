@@ -43,6 +43,8 @@ netG_A:
   z_select_use_edges: true      # concat Sobel edge maps into selector input
   z_select_norm_input: true     # spatial z-score normalize before selector
   z_select_alpha_init: 0.1      # initial residual blend for learned_residual
+  z_select_alpha_mode: 'learnable'  # learnable | capped | fixed
+  z_select_alpha_max: 1.0           # effective cap when capped mode
 
   # ── Global/local style branch ─────────────────────────────────────
   global_local_mode: 'off'              # off | fuse | layerwise

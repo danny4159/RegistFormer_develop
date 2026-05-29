@@ -68,6 +68,8 @@ class ProposedSynthesisModule(nn.Module):
             self.z_select_use_edges   = bool(kwargs.get('z_select_use_edges', True))
             self.z_select_norm_input  = bool(kwargs.get('z_select_norm_input', True))
             self.z_select_alpha_init  = float(kwargs.get('z_select_alpha_init', 0.1))
+            self.z_select_alpha_mode  = kwargs.get('z_select_alpha_mode', 'learnable')
+            self.z_select_alpha_max   = float(kwargs.get('z_select_alpha_max', 1.0))
 
             self.global_local_mode           = kwargs.get('global_local_mode', 'off')
             self.global_style_source         = kwargs.get('global_style_source', 'center')
@@ -132,9 +134,27 @@ class ProposedSynthesisModule(nn.Module):
                     for _ in range(self.num_style_streams)
                 ])
                 if self.z_select_mode == 'learned_residual':
-                    alpha = min(max(self.z_select_alpha_init, 1e-4), 1.0 - 1e-4)
-                    alpha_logit = math.log(alpha / (1.0 - alpha))
-                    self.z_select_alpha_logit = nn.Parameter(torch.tensor(alpha_logit, dtype=torch.float32))
+                    valid_alpha_modes = ['learnable', 'capped', 'fixed']
+                    if self.z_select_alpha_mode not in valid_alpha_modes:
+                        raise ValueError(
+                            f"Unknown z_select_alpha_mode: {self.z_select_alpha_mode}. "
+                            f"Choose from {valid_alpha_modes}"
+                        )
+                    alpha_init = float(self.z_select_alpha_init)
+                    if self.z_select_alpha_mode == 'fixed':
+                        self.register_buffer(
+                            'z_select_alpha_fixed',
+                            torch.tensor(min(max(alpha_init, 0.0), 1.0), dtype=torch.float32)
+                        )
+                    elif self.z_select_alpha_mode == 'capped':
+                        alpha_max = max(float(self.z_select_alpha_max), 1e-4)
+                        alpha_norm = min(max(alpha_init / alpha_max, 1e-4), 1.0 - 1e-4)
+                        alpha_logit = math.log(alpha_norm / (1.0 - alpha_norm))
+                        self.z_select_alpha_logit = nn.Parameter(torch.tensor(alpha_logit, dtype=torch.float32))
+                    else:  # learnable
+                        alpha_init = min(max(alpha_init, 1e-4), 1.0 - 1e-4)
+                        alpha_logit = math.log(alpha_init / (1.0 - alpha_init))
+                        self.z_select_alpha_logit = nn.Parameter(torch.tensor(alpha_logit, dtype=torch.float32))
             # sobel: no learnable params
 
         self.store_zselect_debug = True
@@ -269,6 +289,15 @@ class ProposedSynthesisModule(nn.Module):
         bias[:, K // 2] = self.z_select_center_bias
         return bias
 
+    def _get_z_select_alpha(self):
+        if self.z_select_mode != 'learned_residual':
+            return None
+        if self.z_select_alpha_mode == 'fixed':
+            return self.z_select_alpha_fixed
+        if self.z_select_alpha_mode == 'capped':
+            return self.z_select_alpha_max * torch.sigmoid(self.z_select_alpha_logit)
+        return torch.sigmoid(self.z_select_alpha_logit)
+
     def _store_zselect_stats(self, stream_idx, weights, selected, center, weighted, logits=None):
         if not getattr(self, 'store_zselect_debug', True):
             return
@@ -288,7 +317,10 @@ class ProposedSynthesisModule(nn.Module):
             for i in range(K):
                 self._last_zselect_stats[f"{p}/slice{i}_weight"] = weights[:, i].mean().detach()
             if self.z_select_mode == 'learned_residual':
-                self._last_zselect_stats[f"{p}/alpha"] = torch.sigmoid(self.z_select_alpha_logit).detach()
+                self._last_zselect_stats[f"{p}/alpha"] = self._get_z_select_alpha().detach()
+                if self.z_select_alpha_mode == 'capped':
+                    self._last_zselect_stats[f"{p}/alpha_max"] = torch.tensor(
+                        self.z_select_alpha_max, device=weights.device)
             if logits is not None:
                 self._last_zselect_stats[f"{p}/logits_std"] = logits.std().detach()
 
@@ -320,7 +352,7 @@ class ProposedSynthesisModule(nn.Module):
         weighted = (weights * ref_d).sum(dim=1, keepdim=True)
 
         if self.z_select_mode == 'learned_residual':
-            alpha = torch.sigmoid(self.z_select_alpha_logit)
+            alpha = self._get_z_select_alpha()
             selected = center + alpha * (weighted - center)
         else:
             selected = weighted

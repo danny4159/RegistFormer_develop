@@ -257,10 +257,24 @@ class ProposedSynthesisModule(BaseModule_AtoB):
     def _log_global_local_alpha_grad(self):
         if not getattr(self.params, 'log_global_local_style', False):
             return
+        interval = int(getattr(self.params, 'log_z_select_interval', 200))
+        if self.global_step % interval != 0:
+            return
         p = getattr(self.netG_A, 'global_local_alpha_logit', None)
         if p is None or p.grad is None:
             return
         self.log("global_local/alpha_grad_abs", p.grad.detach().abs().mean(), prog_bar=False)
+
+    def _log_zselect_alpha_grad(self):
+        if not getattr(self.params, 'log_z_select', False):
+            return
+        interval = int(getattr(self.params, 'log_z_select_interval', 200))
+        if self.global_step % interval != 0:
+            return
+        p = getattr(self.netG_A, 'z_select_alpha_logit', None)
+        if p is None or p.grad is None:
+            return
+        self.log("zselect/alpha_grad_abs", p.grad.detach().abs().mean(), prog_bar=False)
 
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
@@ -634,10 +648,11 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 real_a, real_b, fake_b = self.model_step(batch)
 
         # z-selection / style modulation / global-local logging
-        do_log_z  = getattr(self.params, 'log_z_select', False)
-        do_log_st = getattr(self.params, 'log_style_modulation', False)
-        do_log_gl = getattr(self.params, 'log_global_local_style', False)
-        if do_log_z or do_log_st or do_log_gl:
+        do_log_z      = getattr(self.params, 'log_z_select', False)
+        do_log_st     = getattr(self.params, 'log_style_modulation', False)
+        do_log_gl     = getattr(self.params, 'log_global_local_style', False)
+        do_log_glsens = getattr(self.params, 'log_global_local_sensitivity', False)
+        if do_log_z or do_log_st or do_log_gl or do_log_glsens:
             interval = int(getattr(self.params, 'log_z_select_interval', 200))
             if self.global_step % interval == 0:
                 if do_log_z:
@@ -648,6 +663,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 if do_log_gl:
                     self._log_global_local_stats()
                     self._log_layerwise_style_stats()
+                if do_log_glsens:
                     self._log_global_local_sensitivity(real_a, real_b_ref)
 
         with optimizer_G_A.toggle_model():
@@ -663,6 +679,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
             self.manual_backward(loss_G)
             self._log_global_local_alpha_grad()
+            self._log_zselect_alpha_grad()
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
             )
