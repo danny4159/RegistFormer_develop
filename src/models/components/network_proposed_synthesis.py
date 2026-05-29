@@ -71,6 +71,14 @@ class ProposedSynthesisModule(nn.Module):
             self.z_select_alpha_mode  = kwargs.get('z_select_alpha_mode', 'learnable')
             self.z_select_alpha_max   = float(kwargs.get('z_select_alpha_max', 1.0))
 
+            self.ref_inject_mode            = kwargs.get('ref_inject_mode', 'affine')
+            self.ref_inject_scope           = kwargs.get('ref_inject_scope', 'all')
+            self.ref_inject_alpha_init      = float(kwargs.get('ref_inject_alpha_init', 0.1))
+            self.ref_inject_alpha_learnable = bool(kwargs.get('ref_inject_alpha_learnable', False))
+            self.ref_inject_alpha_max       = float(kwargs.get('ref_inject_alpha_max', 0.3))
+            self.ref_residual_hidden_mult   = float(kwargs.get('ref_residual_hidden_mult', 1.0))
+            self.ref_residual_zero_init     = bool(kwargs.get('ref_residual_zero_init', True))
+
             self.global_local_mode           = kwargs.get('global_local_mode', 'off')
             self.global_style_source         = kwargs.get('global_style_source', 'center')
             self.global_local_alpha_init     = float(kwargs.get('global_local_alpha_init', 0.1))
@@ -181,6 +189,15 @@ class ProposedSynthesisModule(nn.Module):
         self._last_layerwise_style_stats = {}
         # ──────────────────────────────────────────────────────────────
 
+        # ── ref injection mode validation ─────────────────────────────
+        valid_ri_modes = ['affine', 'beta_residual', 'feature_residual']
+        if self.ref_inject_mode not in valid_ri_modes:
+            raise ValueError(f"Unknown ref_inject_mode: {self.ref_inject_mode}. Choose from {valid_ri_modes}")
+        valid_ri_scopes = ['all', 'decoder', 'late', 'bottleneck_decoder']
+        if self.ref_inject_scope not in valid_ri_scopes:
+            raise ValueError(f"Unknown ref_inject_scope: {self.ref_inject_scope}. Choose from {valid_ri_scopes}")
+        # ──────────────────────────────────────────────────────────────
+
         self.guide_net = nn.Sequential(
             nn.Conv2d(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
@@ -192,30 +209,41 @@ class ProposedSynthesisModule(nn.Module):
         
         # 일부분에만 style_denorm -> 21, 22, 31, 32에만 적용 #TODO: feat_ch에 ref ch만큼 배수로
         self.conv0 = StyleConv(self.input_nc, self.feat_ch * ch, kernel_size=3,
-                                                 activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                               activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent,
+                               **self._styleconv_kwargs('conv0'))
         self.conv11 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent,
+                                **self._styleconv_kwargs('conv11'))
         self.conv12 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent,
+                                **self._styleconv_kwargs('conv12'))
         self.conv21 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent,
+                                **self._styleconv_kwargs('conv21'))
         self.conv22 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent,
+                                **self._styleconv_kwargs('conv22'))
         self.conv31 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent,
+                                **self._styleconv_kwargs('conv31'))
         self.conv32 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv41 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, #feat_ch *4는 변치않게
-                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent,
+                                **self._styleconv_kwargs('conv32'))
+        self.conv41 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent,
+                                **self._styleconv_kwargs('conv41'))
         self.conv42 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent,
+                                **self._styleconv_kwargs('conv42'))
         self.conv51 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent,
+                                **self._styleconv_kwargs('conv51'))
         self.conv52 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent,
+                                **self._styleconv_kwargs('conv52'))
         self.conv6 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, ) # 이걸 빠트렸었어.
-                                # activate=False, demodulate=self.demodulate)
+                               activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent,
+                               **self._styleconv_kwargs('conv6'))
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 style 적용
         if self.use_separate_style_layers and self.use_triple_outputs:
@@ -454,6 +482,34 @@ class ProposedSynthesisModule(nn.Module):
                 stats[f'{layer}/style_std'] = s.std().detach()
             self._last_layerwise_style_stats = stats
 
+    def _ref_inject_layer_names(self):
+        if self.ref_inject_scope == 'all':
+            return {'conv0','conv11','conv12','conv21','conv22','conv31','conv32','conv41','conv42','conv51','conv52','conv6'}
+        if self.ref_inject_scope == 'bottleneck_decoder':
+            return {'conv31','conv32','conv41','conv42','conv51','conv52','conv6'}
+        if self.ref_inject_scope == 'decoder':
+            return {'conv41','conv42','conv51','conv52','conv6'}
+        if self.ref_inject_scope == 'late':
+            return {'conv51','conv52','conv6'}
+        raise RuntimeError(f"Invalid ref_inject_scope: {self.ref_inject_scope}")
+
+    def _ref_inject_mode_for_layer(self, layer_name):
+        if self.ref_inject_mode == 'affine':
+            return 'affine'
+        if layer_name in self._ref_inject_layer_names():
+            return self.ref_inject_mode
+        return 'affine'
+
+    def _styleconv_kwargs(self, layer_name):
+        return dict(
+            style_injection_mode=self._ref_inject_mode_for_layer(layer_name),
+            ref_inject_alpha_init=self.ref_inject_alpha_init,
+            ref_inject_alpha_learnable=self.ref_inject_alpha_learnable,
+            ref_inject_alpha_max=self.ref_inject_alpha_max,
+            ref_residual_hidden_mult=self.ref_residual_hidden_mult,
+            ref_residual_zero_init=self.ref_residual_zero_init,
+        )
+
     def _local_layer_names(self):
         if self.global_local_layer_scope == 'all':
             return {'conv0','conv11','conv12','conv21','conv22','conv31','conv32','conv41','conv42','conv51','conv52','conv6'}
@@ -578,7 +634,13 @@ class StyleConv(nn.Module):
                  eps=1e-8,
                  ch=1,
                  is_3d=False,
-                 noise_independent=False):
+                 noise_independent=False,
+                 style_injection_mode='affine',
+                 ref_inject_alpha_init=0.1,
+                 ref_inject_alpha_learnable=False,
+                 ref_inject_alpha_max=0.3,
+                 ref_residual_hidden_mult=1.0,
+                 ref_residual_zero_init=True):
 
         super(StyleConv, self).__init__()
         self.eps = eps
@@ -593,8 +655,26 @@ class StyleConv(nn.Module):
         self.style_denorm = style_denorm
         self.is_3d = is_3d
         self.noise_independent = noise_independent
+        self.style_injection_mode = style_injection_mode
+        self.ref_inject_alpha_init = float(ref_inject_alpha_init)
+        self.ref_inject_alpha_learnable = bool(ref_inject_alpha_learnable)
+        self.ref_inject_alpha_max = float(ref_inject_alpha_max)
+        self.ref_residual_hidden_mult = float(ref_residual_hidden_mult)
+        self.ref_residual_zero_init = bool(ref_residual_zero_init)
 
         Conv, Norm, dim = get_layer_by_dim(is_3d)
+
+        # ── alpha for residual injection modes ────────────────────────
+        if self.style_injection_mode in ['beta_residual', 'feature_residual']:
+            if self.ref_inject_alpha_learnable:
+                alpha_max = max(self.ref_inject_alpha_max, 1e-4)
+                alpha_norm = min(max(self.ref_inject_alpha_init / alpha_max, 1e-4), 1.0 - 1e-4)
+                alpha_logit = math.log(alpha_norm / (1.0 - alpha_norm))
+                self.ref_alpha_logit = nn.Parameter(torch.tensor(alpha_logit, dtype=torch.float32))
+            else:
+                self.register_buffer('ref_alpha_fixed',
+                                     torch.tensor(self.ref_inject_alpha_init, dtype=torch.float32))
+        # ─────────────────────────────────────────────────────────────
 
         mode = 'trilinear' if is_3d else 'nearest'
 
@@ -681,6 +761,26 @@ class StyleConv(nn.Module):
                 self.noise_strength_1 = nn.Parameter(torch.zeros(1), requires_grad=True)
                 self.noise_strength_2 = nn.Parameter(torch.zeros(1), requires_grad=True)
                 self.noise_strength_3 = nn.Parameter(torch.zeros(1), requires_grad=True)
+
+        # ── feature_residual head ─────────────────────────────────────
+        if self.style_injection_mode == 'feature_residual':
+            hidden = int(feat_ch * self.ref_residual_hidden_mult)
+            self.ref_residual_head = nn.Sequential(
+                Conv(feat_ch * 2, hidden, kernel_size=3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                Conv(hidden, feat_ch, kernel_size=3, padding=1),
+            )
+            if self.ref_residual_zero_init:
+                nn.init.zeros_(self.ref_residual_head[-1].weight)
+                nn.init.zeros_(self.ref_residual_head[-1].bias)
+        # ─────────────────────────────────────────────────────────────
+
+    def _get_ref_alpha(self):
+        if self.style_injection_mode not in ['beta_residual', 'feature_residual']:
+            return None
+        if self.ref_inject_alpha_learnable:
+            return self.ref_inject_alpha_max * torch.sigmoid(self.ref_alpha_logit)
+        return self.ref_alpha_fixed
 
     def forward(self, x, style):
 
@@ -792,22 +892,46 @@ class StyleConv(nn.Module):
                 gamma = torch.cat((gamma, gamma_2, gamma_3), dim=1)  # B, feat_ch, f_H, f_W
                 beta = torch.cat((beta, beta_2, beta_3), dim=1)
 
-            # 3. 거기서 감마 베타 나눠서 denorm
+            # 3. reference injection
             x_pre = x
-            x = x * gamma + beta
+            if self.style_injection_mode == 'affine':
+                x = x_pre * gamma + beta
+                residual_ref_correction = x - x_pre
+                applied_residual = residual_ref_correction
+            elif self.style_injection_mode == 'beta_residual':
+                alpha = self._get_ref_alpha()
+                residual_ref_correction = beta
+                applied_residual = alpha * residual_ref_correction
+                x = x_pre + applied_residual
+            elif self.style_injection_mode == 'feature_residual':
+                alpha = self._get_ref_alpha()
+                residual_ref_correction = self.ref_residual_head(torch.cat([x_pre, beta], dim=1))
+                applied_residual = alpha * residual_ref_correction
+                x = x_pre + applied_residual
+            else:
+                raise RuntimeError(f"Invalid style_injection_mode: {self.style_injection_mode}")
+
             if getattr(self, '_log_style_modulation', False):
                 with torch.no_grad():
                     eps = 1e-8
-                    self.last_style_debug = {
-                        'gamma_abs':            gamma.abs().mean().detach(),
-                        'beta_abs':             beta.abs().mean().detach(),
-                        'gamma_spatial_std':    gamma.std(dim=(-2,-1)).mean().detach(),
-                        'beta_spatial_std':     beta.std(dim=(-2,-1)).mean().detach(),
-                        'delta_ratio':          ((x - x_pre).abs().mean() / (x_pre.abs().mean() + eps)).detach(),
-                        'x_out_over_x_pre':     (x.abs().mean() / (x_pre.abs().mean() + eps)).detach(),
-                        'style_in_std':         style.std().detach(),
-                        'style_in_spatial_std': style.std(dim=(-2,-1)).mean().detach(),
+                    dbg = {
+                        'gamma_abs':                       gamma.abs().mean().detach(),
+                        'beta_abs':                        beta.abs().mean().detach(),
+                        'gamma_spatial_std':               gamma.std(dim=(-2,-1)).mean().detach(),
+                        'beta_spatial_std':                beta.std(dim=(-2,-1)).mean().detach(),
+                        'delta_ratio':                     ((x - x_pre).abs().mean() / (x_pre.abs().mean() + eps)).detach(),
+                        'x_out_over_x_pre':                (x.abs().mean() / (x_pre.abs().mean() + eps)).detach(),
+                        'style_in_std':                    style.std().detach(),
+                        'style_in_spatial_std':            style.std(dim=(-2,-1)).mean().detach(),
+                        'residual_abs':                    residual_ref_correction.abs().mean().detach(),
+                        'residual_over_x_pre':             (residual_ref_correction.abs().mean() / (x_pre.abs().mean() + eps)).detach(),
+                        'applied_residual_abs':            applied_residual.abs().mean().detach(),
+                        'applied_residual_over_x_pre':     (applied_residual.abs().mean() / (x_pre.abs().mean() + eps)).detach(),
+                        'residual_spatial_std':            residual_ref_correction.std(dim=(-2,-1)).mean().detach(),
                     }
+                    if self.style_injection_mode in ['beta_residual', 'feature_residual']:
+                        dbg['ref_alpha'] = self._get_ref_alpha().detach()
+                    self.last_style_debug = dbg
         
         # activation (LeakyReLU)
         if self.activate:

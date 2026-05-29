@@ -265,6 +265,20 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             return
         self.log("global_local/alpha_grad_abs", p.grad.detach().abs().mean(), prog_bar=False)
 
+    def _log_ref_inject_alpha_grad(self):
+        if not getattr(self.params, 'log_ref_inject_alpha_grad', False):
+            return
+        interval = int(getattr(self.params, 'log_z_select_interval', 200))
+        if self.global_step % interval != 0:
+            return
+        for name, mod in self.netG_A.named_modules():
+            if type(mod).__name__ != 'StyleConv':
+                continue
+            p = getattr(mod, 'ref_alpha_logit', None)
+            if p is None or p.grad is None:
+                continue
+            self.log(f"ref_inject/{name}/alpha_grad_abs", p.grad.detach().abs().mean(), prog_bar=False)
+
     def _log_zselect_alpha_grad(self):
         if not getattr(self.params, 'log_z_select', False):
             return
@@ -680,6 +694,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             self.manual_backward(loss_G)
             self._log_global_local_alpha_grad()
             self._log_zselect_alpha_grad()
+            self._log_ref_inject_alpha_grad()
             self.clip_gradients(
                 optimizer_G_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
             )
