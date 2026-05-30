@@ -20,6 +20,11 @@ def _zero_init_last_conv(seq):
             break
 
 
+def _safe_entropy(prob, dim, norm_base):
+    ent = -(prob * prob.clamp_min(1e-8).log()).sum(dim=dim)
+    return ent.mean() / max(math.log(norm_base), 1e-8)
+
+
 class RegionCNNConditioner2D(nn.Module):
     """A. Region bottleneck + CNN fusion for 2D reference conditioning."""
 
@@ -132,6 +137,150 @@ class LocalWindowAttentionConditioner2D(nn.Module):
         return style, stats
 
 
+class RegionCNNConditioner25D(nn.Module):
+    """A. K-slice preserving 2.5D region bottleneck + source-conditioned slice fusion."""
+
+    def __init__(self, hidden=16, residual_scale=0.1, center_slice_bias=0.2):
+        super().__init__()
+        self.residual_scale = residual_scale
+        self.center_slice_bias = center_slice_bias
+
+        self.slice_logit_net = nn.Sequential(
+            nn.Conv2d(2, hidden, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden, 1, 3, padding=1),
+        )
+        _zero_init_last_conv(self.slice_logit_net)
+
+        self.fusion_net = nn.Sequential(
+            nn.Conv2d(2, hidden, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden, hidden, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden, 1, 3, padding=1),
+        )
+        _zero_init_last_conv(self.fusion_net)
+
+    def forward(self, source, ref_stack, out_size):
+        B, K, H, W = ref_stack.shape
+        h, w = out_size
+        center_idx = K // 2
+
+        src_low = F.interpolate(source, size=(h, w), mode='bilinear', align_corners=False)
+        ref_low = F.interpolate(ref_stack, size=(h, w), mode='bilinear', align_corners=False)  # [B,K,h,w]
+
+        # slice-wise region bottleneck
+        region_size = (max(1, h // 2), max(1, w // 2))
+        ref_region = F.adaptive_avg_pool2d(ref_low.view(B * K, 1, h, w), region_size)
+        ref_region_up = F.interpolate(ref_region, size=(h, w), mode='nearest').view(B, K, 1, h, w)
+
+        # source-conditioned slice fusion weights
+        src_rep = src_low.unsqueeze(1).expand(B, K, 1, h, w).reshape(B * K, 1, h, w)
+        pair = torch.cat([src_rep, ref_region_up.view(B * K, 1, h, w)], dim=1)
+        slice_logits = self.slice_logit_net(pair).view(B, K, 1, h, w)
+        slice_logits[:, center_idx:center_idx + 1] += self.center_slice_bias
+        slice_weight = torch.softmax(slice_logits, dim=1)         # [B,K,1,h,w]
+        fused_region = (slice_weight * ref_region_up).sum(dim=1)  # [B,1,h,w]
+
+        delta = self.fusion_net(torch.cat([src_low, fused_region], dim=1))
+        style = fused_region + self.residual_scale * delta
+
+        center_ref = ref_low[:, center_idx:center_idx + 1]
+        slice_prob = slice_weight.squeeze(2)  # [B,K,h,w]
+        stats = {
+            "base_std": ref_low.std().detach(),
+            "region_std": ref_region_up.std().detach(),
+            "style_std": style.std().detach(),
+            "style_center_delta": ((style - center_ref).abs().mean() / (center_ref.abs().mean() + 1e-8)).detach(),
+            "slice_entropy": _safe_entropy(slice_prob, dim=1, norm_base=K).detach(),
+            "center_slice_weight": slice_prob[:, center_idx].mean().detach(),
+            "max_slice_weight": slice_prob.max(dim=1).values.mean().detach(),
+        }
+        return style, stats
+
+
+class LocalWindowAttentionConditioner25D(nn.Module):
+    """B/C. source(2D) query vs ref_stack(K-slice) local window attention.
+
+    coarse=False (B): same-grid local attention across K slices.
+    coarse=True  (C): coarse-region local attention across K slices.
+    """
+
+    def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2):
+        super().__init__()
+        assert window % 2 == 1
+        self.dim = dim
+        self.window = window
+        self.coarse = coarse
+        self.residual_scale = residual_scale
+        self.center_slice_bias = center_slice_bias
+
+        self.q_proj = nn.Conv2d(1, dim, 1)
+        self.k_proj = nn.Conv2d(1, dim, 1)
+        self.v_proj = nn.Conv2d(1, dim, 1)
+        self.out_proj = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(dim, 1, 3, padding=1),
+        )
+        _zero_init_last_conv(self.out_proj)
+
+    def forward(self, source, ref_stack, out_size):
+        B, K, _, _ = ref_stack.shape
+        h, w = out_size
+        center_idx = K // 2
+        win = self.window
+        win2 = win * win
+        pad = win // 2
+
+        src_low = F.interpolate(source, size=(h, w), mode='bilinear', align_corners=False)
+        ref_low = F.interpolate(ref_stack, size=(h, w), mode='bilinear', align_corners=False)  # [B,K,h,w]
+
+        if self.coarse:
+            region_size = (max(1, h // 2), max(1, w // 2))
+            ref_base = F.adaptive_avg_pool2d(ref_low.view(B * K, 1, h, w), region_size)
+            ref_base = F.interpolate(ref_base, size=(h, w), mode='nearest').view(B, K, h, w)
+        else:
+            ref_base = ref_low
+
+        q = self.q_proj(src_low)  # [B,d,h,w]
+
+        k = self.k_proj(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.dim, h, w)
+        v = self.v_proj(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.dim, h, w)
+
+        # local unfold per slice: [B,K,d,win2,h,w]
+        k_unfold = F.unfold(k.reshape(B * K, self.dim, h, w), kernel_size=win, padding=pad)
+        v_unfold = F.unfold(v.reshape(B * K, self.dim, h, w), kernel_size=win, padding=pad)
+        k_unfold = k_unfold.view(B, K, self.dim, win2, h, w)
+        v_unfold = v_unfold.view(B, K, self.dim, win2, h, w)
+
+        # score: [B,K,win2,h,w]
+        score = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) / math.sqrt(self.dim)
+        score[:, center_idx:center_idx + 1] += self.center_slice_bias
+
+        attn = torch.softmax(score.view(B, K * win2, h, w), dim=1).view(B, K, win2, h, w)
+        ctx = (attn.unsqueeze(2) * v_unfold).sum(dim=1).sum(dim=2)  # [B,d,h,w]
+
+        delta = self.out_proj(ctx)
+        center_ref = ref_low[:, center_idx:center_idx + 1]
+        style = center_ref + self.residual_scale * delta
+
+        slice_prob = attn.sum(dim=2)       # [B,K,h,w]
+        spatial_center_prob = attn[:, :, win2 // 2].sum(dim=1)  # [B,h,w]
+        stats = {
+            "base_std": ref_low.std().detach(),
+            "ref_base_std": ref_base.std().detach(),
+            "style_std": style.std().detach(),
+            "style_center_delta": ((style - center_ref).abs().mean() / (center_ref.abs().mean() + 1e-8)).detach(),
+            "attn_entropy": _safe_entropy(attn.view(B, K * win2, h, w), dim=1, norm_base=K * win2).detach(),
+            "attn_max": attn.view(B, K * win2, h, w).max(dim=1).values.mean().detach(),
+            "slice_entropy": _safe_entropy(slice_prob, dim=1, norm_base=K).detach(),
+            "center_slice_weight": slice_prob[:, center_idx].mean().detach(),
+            "spatial_center_weight": spatial_center_prob.mean().detach(),
+        }
+        return style, stats
+
+
 class ProposedSynthesisModule(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
@@ -200,19 +349,34 @@ class ProposedSynthesisModule(nn.Module):
                     )
             self.z_aggs = nn.ModuleList([_make_z_agg() for _ in range(self.num_style_streams)])
 
-        # Reference conditioner for modes A~D (2D, single-output only)
+        # 2D conditioners (always built when mode != original)
+        # 2.5D conditioners (built when use_25d_style=True and ref_stack_size > 1)
+        self.ref_conditioner_2d = None
+        self.ref_conditioner_25d = None
+
         if self.ref_condition_mode == 'A_region_cnn':
-            self.ref_conditioner = RegionCNNConditioner2D(hidden=16, residual_scale=0.1)
+            self.ref_conditioner_2d = RegionCNNConditioner2D(hidden=16, residual_scale=0.1)
+            if self.use_25d_style and self.ref_stack_size > 1:
+                self.ref_conditioner_25d = RegionCNNConditioner25D(
+                    hidden=16, residual_scale=0.1, center_slice_bias=0.2,
+                )
         elif self.ref_condition_mode == 'B_local_attn':
-            self.ref_conditioner = LocalWindowAttentionConditioner2D(
-                dim=16, window=3, coarse=False, residual_scale=1.0,  # 0.1→1.0: 100step에서 style_base_delta≈0 확인
+            self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
+                dim=16, window=3, coarse=False, residual_scale=1.0,
             )
+            if self.use_25d_style and self.ref_stack_size > 1:
+                self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
+                    dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2,
+                )
         elif self.ref_condition_mode in ('C_coarse_attn', 'D_coarse_attn_residual'):
-            self.ref_conditioner = LocalWindowAttentionConditioner2D(
+            self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
                 dim=16, window=3, coarse=True, residual_scale=0.1,
             )
-        else:
-            self.ref_conditioner = None
+            if self.use_25d_style and self.ref_stack_size > 1:
+                self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
+                    dim=16, window=3, coarse=True, residual_scale=0.1, center_slice_bias=0.2,
+                )
+
         self._last_ref_condition_stats: dict = {}
 
         self.guide_net = nn.Sequential(
@@ -316,27 +480,59 @@ class ProposedSynthesisModule(nn.Module):
         H, W = source.shape[-2:]
         return max(1, H // 16), max(1, W // 16)
 
-    def _get_ref_map_2d(self, ref_all):
-        """Return single-channel [B,1,H,W] ref map for conditioner input."""
-        if self.use_25d_style:
-            return self._aggregate_ref_stack(ref_all)
-        return ref_all
+    def _get_ref_stack(self, ref_all):
+        """Return ref tensor for conditioners.
+        2D  : [B,1,H,W]
+        2.5D: [B,K,H,W]
+        """
+        if self.use_25d_style and self.ref_stack_size > 1:
+            return ref_all[:, :self.ref_stack_size]
+        return ref_all[:, :1]
 
     def _make_ref_condition(self, source, ref_all, encode_only=False):
-        """Compute style_guidance_1 and optional aux_style for mode D.
+        """Returns (base_style, aux_style), both [B,1,h,w].
 
-        Returns:
-            base_style : [B,1,h,w] — primary style map fed to StyleConv gamma/beta
-            aux_style  : [B,1,h,w] or None — residual attention style (D only)
+        2.5D path (use_25d_style=True, ref_stack_size>1):
+            A/B/C: new 25D conditioner replaces base_style
+            D    : original z_agg base_style + 25D conditioner as aux
+            original: original z_agg base_style
+
+        2D path:
+            A/B/C: 2D conditioner replaces base_style
+            D    : 2D base_style + 2D conditioner as aux
+            original: nearest-downsampled ref
         """
-        ref_map = self._get_ref_map_2d(ref_all)
         h, w = self._style_size(source)
+
+        # ── 2.5D path ──────────────────────────────────────────────────────
+        if self.use_25d_style and self.ref_stack_size > 1:
+            ref_stack = self._get_ref_stack(ref_all)                 # [B,K,H,W]
+            base_ref = self._aggregate_ref_stack(ref_all)            # [B,1,H,W] via z_agg
+            base_style = F.interpolate(base_ref, size=(h, w), mode='nearest')
+
+            if self.ref_condition_mode == 'original':
+                return base_style, None
+
+            cond_style, stats = self.ref_conditioner_25d(
+                source=source, ref_stack=ref_stack, out_size=(h, w)
+            )
+            if not encode_only:
+                self._last_ref_condition_stats = stats
+
+            if self.ref_condition_mode in ('A_region_cnn', 'B_local_attn', 'C_coarse_attn'):
+                return cond_style, None
+
+            # D: z_agg affine path 유지 + 25D attention aux
+            return base_style, cond_style
+
+        # ── 2D path ────────────────────────────────────────────────────────
+        ref_map = self._get_ref_stack(ref_all)                       # [B,1,H,W]
         base_style = F.interpolate(ref_map, size=(h, w), mode='nearest')
 
         if self.ref_condition_mode == 'original':
             return base_style, None
 
-        cond_style, stats = self.ref_conditioner(
+        cond_style, stats = self.ref_conditioner_2d(
             source=source, ref=ref_map, out_size=(h, w)
         )
         if not encode_only:
@@ -345,7 +541,6 @@ class ProposedSynthesisModule(nn.Module):
         if self.ref_condition_mode in ('A_region_cnn', 'B_local_attn', 'C_coarse_attn'):
             return cond_style, None
 
-        # D: keep original affine path; attention output is aux residual
         return base_style, cond_style
 
     def forward(self, merged_input, layers=[], encode_only=False):
