@@ -112,6 +112,21 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
         return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
 
+    def _setup_style_debug_flags(self):
+        if not hasattr(self, 'netG_A'):
+            return
+        log_style = getattr(self.params, 'log_style_modulation', False)
+        for mod in self.netG_A.modules():
+            if type(mod).__name__ == 'StyleConv':
+                mod._log_style_modulation = log_style
+
+    def _log_ref_condition_stats(self):
+        stats = getattr(self.netG_A, '_last_ref_condition_stats', None)
+        if not stats:
+            return
+        for k, v in stats.items():
+            self.log(f"ref_condition/{k}", v, prog_bar=False)
+
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
         use_25d = getattr(self.params, 'use_25d_style', False)
@@ -442,6 +457,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
     def training_step(self, batch: Any, batch_idx: int):
 
+        self._setup_style_debug_flags()
+
         real_c = real_d = fake_c = fake_d = None
         real_b_ref = real_c_ref = real_d_ref = None
         use_25d = getattr(self.params, 'use_25d_style', False)
@@ -491,6 +508,11 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     loss_G = self.backward_G_3D(real_a, real_b, None, None, fake_b, None, None, None, None, None)
                 else:
                     loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
+
+            if getattr(self.params, 'log_ref_condition', False):
+                interval = int(getattr(self.params, 'log_z_select_interval', 200))
+                if self.global_step % interval == 0:
+                    self._log_ref_condition_stats()
 
             self.manual_backward(loss_G)
             self.clip_gradients(

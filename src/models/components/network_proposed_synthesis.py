@@ -1,12 +1,136 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 def get_layer_by_dim(is_3d):
     dim = 3 if is_3d else 2
     Conv = getattr(nn, f'Conv{dim}d')
     Norm = getattr(nn, f'InstanceNorm{dim}d')
     return Conv, Norm, dim
+
+
+def _zero_init_last_conv(seq):
+    for m in reversed(list(seq.modules())):
+        if isinstance(m, nn.Conv2d):
+            nn.init.zeros_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+            break
+
+
+class RegionCNNConditioner2D(nn.Module):
+    """A. Region bottleneck + CNN fusion for 2D reference conditioning."""
+
+    def __init__(self, hidden=16, residual_scale=0.1):
+        super().__init__()
+        self.residual_scale = residual_scale
+        self.net = nn.Sequential(
+            nn.Conv2d(2, hidden, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden, hidden, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(hidden, 1, 3, padding=1),
+        )
+        _zero_init_last_conv(self.net)
+
+    def forward(self, source, ref, out_size):
+        src_low = F.interpolate(source, size=out_size, mode='bilinear', align_corners=False)
+        ref_low = F.interpolate(ref, size=out_size, mode='bilinear', align_corners=False)
+
+        h, w = out_size
+        region_size = (max(1, h // 2), max(1, w // 2))
+        ref_region = F.adaptive_avg_pool2d(ref_low, region_size)
+        ref_region_up = F.interpolate(ref_region, size=out_size, mode='nearest')
+
+        delta = self.net(torch.cat([src_low, ref_region_up], dim=1))
+        style = ref_region_up + self.residual_scale * delta
+
+        stats = {
+            "base_std": ref_low.std().detach(),
+            "region_std": ref_region_up.std().detach(),
+            "style_std": style.std().detach(),
+            "style_base_delta": ((style - ref_low).abs().mean() / (ref_low.abs().mean() + 1e-8)).detach(),
+        }
+        return style, stats
+
+
+class LocalWindowAttentionConditioner2D(nn.Module):
+    """B/C. Local QKV attention conditioner for 2D reference conditioning.
+
+    coarse=False (B): source Q attends to same-resolution ref K,V.
+    coarse=True  (C): source Q attends to 4x4 pooled (then nearest-up) ref K,V.
+    """
+
+    def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1):
+        super().__init__()
+        assert window % 2 == 1
+        self.dim = dim
+        self.window = window
+        self.coarse = coarse
+        self.residual_scale = residual_scale
+
+        self.q_proj = nn.Conv2d(1, dim, 1)
+        self.k_proj = nn.Conv2d(1, dim, 1)
+        self.v_proj = nn.Conv2d(1, dim, 1)
+        self.out_proj = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(dim, 1, 3, padding=1),
+        )
+        _zero_init_last_conv(self.out_proj)
+
+    def _local_attention(self, q, k, v):
+        B, d, h, w = q.shape
+        win = self.window
+        pad = win // 2
+        win2 = win * win
+
+        k_unfold = F.unfold(k, kernel_size=win, padding=pad).view(B, d, win2, h, w)
+        v_unfold = F.unfold(v, kernel_size=win, padding=pad).view(B, d, win2, h, w)
+
+        score = (q.unsqueeze(2) * k_unfold).sum(dim=1) / math.sqrt(d)  # [B, win2, h, w]
+        attn = torch.softmax(score, dim=1)
+        ctx = (attn.unsqueeze(1) * v_unfold).sum(dim=2)  # [B, d, h, w]
+        return ctx, attn
+
+    def forward(self, source, ref, out_size):
+        src_low = F.interpolate(source, size=out_size, mode='bilinear', align_corners=False)
+        ref_low = F.interpolate(ref, size=out_size, mode='bilinear', align_corners=False)
+
+        h, w = out_size
+        if self.coarse:
+            region_size = (max(1, h // 2), max(1, w // 2))
+            ref_base = F.interpolate(
+                F.adaptive_avg_pool2d(ref_low, region_size), size=out_size, mode='nearest'
+            )
+        else:
+            ref_base = ref_low
+
+        q = self.q_proj(src_low)
+        k = self.k_proj(ref_base)
+        v = self.v_proj(ref_base)
+
+        ctx, attn = self._local_attention(q, k, v)
+        delta = self.out_proj(ctx)
+        style = ref_base + self.residual_scale * delta
+
+        center_idx = (self.window * self.window) // 2
+        entropy = -(attn * (attn + 1e-8).log()).sum(dim=1).mean()
+        entropy_norm = entropy / math.log(self.window * self.window)
+
+        stats = {
+            "base_std": ref_low.std().detach(),
+            "ref_base_std": ref_base.std().detach(),
+            "style_std": style.std().detach(),
+            "style_base_delta": ((style - ref_low).abs().mean() / (ref_low.abs().mean() + 1e-8)).detach(),
+            "attn_entropy": entropy_norm.detach(),
+            "attn_max": attn.max(dim=1).values.mean().detach(),
+            "attn_center_weight": attn[:, center_idx:center_idx + 1].mean().detach(),
+        }
+        return style, stats
+
 
 class ProposedSynthesisModule(nn.Module):
     def __init__(self, **kwargs):
@@ -24,9 +148,23 @@ class ProposedSynthesisModule(nn.Module):
             self.use_25d_style = kwargs.get('use_25d_style', False)
             self.ref_stack_size = kwargs.get('ref_stack_size', 3)
             self.z_agg_deep = kwargs.get('z_agg_deep', False)
+            self.ref_condition_mode = kwargs.get('ref_condition_mode', 'original')
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
+
+        _valid_ref_condition_modes = [
+            'original', 'A_region_cnn', 'B_local_attn', 'C_coarse_attn', 'D_coarse_attn_residual',
+        ]
+        if self.ref_condition_mode not in _valid_ref_condition_modes:
+            raise ValueError(
+                f"Unknown ref_condition_mode={self.ref_condition_mode!r}. "
+                f"Choose from {_valid_ref_condition_modes}"
+            )
+        if self.is_3d and self.ref_condition_mode != 'original':
+            raise NotImplementedError("ref_condition_mode A~D는 2D 전용입니다.")
+        if (self.use_multiple_outputs or self.use_triple_outputs) and self.ref_condition_mode != 'original':
+            raise NotImplementedError("ref_condition_mode A~D는 단일 출력 모드에서만 지원됩니다.")
 
         Conv, _, _ = get_layer_by_dim(self.is_3d)
 
@@ -61,6 +199,21 @@ class ProposedSynthesisModule(nn.Module):
                         nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
                     )
             self.z_aggs = nn.ModuleList([_make_z_agg() for _ in range(self.num_style_streams)])
+
+        # Reference conditioner for modes A~D (2D, single-output only)
+        if self.ref_condition_mode == 'A_region_cnn':
+            self.ref_conditioner = RegionCNNConditioner2D(hidden=16, residual_scale=0.1)
+        elif self.ref_condition_mode == 'B_local_attn':
+            self.ref_conditioner = LocalWindowAttentionConditioner2D(
+                dim=16, window=3, coarse=False, residual_scale=0.1,
+            )
+        elif self.ref_condition_mode in ('C_coarse_attn', 'D_coarse_attn_residual'):
+            self.ref_conditioner = LocalWindowAttentionConditioner2D(
+                dim=16, window=3, coarse=True, residual_scale=0.1,
+            )
+        else:
+            self.ref_conditioner = None
+        self._last_ref_condition_stats: dict = {}
 
         self.guide_net = nn.Sequential(
             nn.Conv2d(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
@@ -159,36 +312,72 @@ class ProposedSynthesisModule(nn.Module):
         style_maps = [z_agg(chunk) for chunk, z_agg in zip(chunks, self.z_aggs)]
         return torch.cat(style_maps, dim=1)
 
+    def _style_size(self, source):
+        H, W = source.shape[-2:]
+        return max(1, H // 16), max(1, W // 16)
+
+    def _get_ref_map_2d(self, ref_all):
+        """Return single-channel [B,1,H,W] ref map for conditioner input."""
+        if self.use_25d_style:
+            return self._aggregate_ref_stack(ref_all)
+        return ref_all
+
+    def _make_ref_condition(self, source, ref_all, encode_only=False):
+        """Compute style_guidance_1 and optional aux_style for mode D.
+
+        Returns:
+            base_style : [B,1,h,w] — primary style map fed to StyleConv gamma/beta
+            aux_style  : [B,1,h,w] or None — residual attention style (D only)
+        """
+        ref_map = self._get_ref_map_2d(ref_all)
+        h, w = self._style_size(source)
+        base_style = F.interpolate(ref_map, size=(h, w), mode='nearest')
+
+        if self.ref_condition_mode == 'original':
+            return base_style, None
+
+        cond_style, stats = self.ref_conditioner(
+            source=source, ref=ref_map, out_size=(h, w)
+        )
+        if not encode_only:
+            self._last_ref_condition_stats = stats
+
+        if self.ref_condition_mode in ('A_region_cnn', 'B_local_attn', 'C_coarse_attn'):
+            return cond_style, None
+
+        # D: keep original affine path; attention output is aux residual
+        return base_style, cond_style
+
     def forward(self, merged_input, layers=[], encode_only=False):
 
         x = merged_input[:, :1, ...]
         ref_all = merged_input[:, 1:, ...]
-        ref = self._aggregate_ref_stack(ref_all)
 
         if self.is_3d:
+            # 3D path: original logic unchanged
+            ref = self._aggregate_ref_stack(ref_all)
             ref = ref.permute(0, 1, 4, 2, 3)
             style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
             style_guidance_1 = style_guidance_1.permute(0, 1, 3, 4, 2)
+            aux_style = None
         else:
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='nearest') # Final #TODO: sliding infer로 줄어든만큼 이것도 줄여줘야해. 8정도가 적절할듯
-        
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/8, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/32, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, scale_factor=1/64, mode='bilinear', align_corners=True) # Ablation
-        # style_guidance_1 = F.interpolate(ref, size=(1, 1), mode='nearest') # Ablation
+            style_guidance_1, aux_style = self._make_ref_condition(
+                source=x, ref_all=ref_all, encode_only=encode_only
+            )
+
         feats = []
-        feat0 = self.conv0(x, style_guidance_1) # [1, feat_ch, H, W]
-        feat1 = self.conv11(feat0, style_guidance_1) # [1, feat_ch, H/2, W/2]
-        feat1 = self.conv12(feat1, style_guidance_1) # [1, feat_ch, H/2, W/2]
-        feat2 = self.conv21(feat1, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat2 = self.conv22(feat2, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat3 = self.conv31(feat2, style_guidance_1) # [1, feat_ch, H/4, W/4] #TODO: 메모리 많아서 뺌.
-        feat3 = self.conv32(feat3, style_guidance_1) # [1, feat_ch, H/4, W/4]
-        feat4 = self.conv41(feat3 + feat2, style_guidance_1)# [1, feat_ch, H/2, W/2] #TODO: 원래 intput feat3 + feat2
-        feat4 = self.conv42(feat4, style_guidance_1)        # [1, feat_ch, H/2, W/2]
-        feat5 = self.conv51(feat4 + feat1, style_guidance_1)# [1, feat_ch, H, W]
-        feat5 = self.conv52(feat5, style_guidance_1)        # [1, feat_ch, H, W]
-        feat6 = self.conv6(feat5 + feat0, style_guidance_1) # [1, feat_ch, H, W]
+        feat0 = self.conv0(x, style_guidance_1, aux_style=aux_style)
+        feat1 = self.conv11(feat0, style_guidance_1, aux_style=aux_style)
+        feat1 = self.conv12(feat1, style_guidance_1, aux_style=aux_style)
+        feat2 = self.conv21(feat1, style_guidance_1, aux_style=aux_style)
+        feat2 = self.conv22(feat2, style_guidance_1, aux_style=aux_style)
+        feat3 = self.conv31(feat2, style_guidance_1, aux_style=aux_style)
+        feat3 = self.conv32(feat3, style_guidance_1, aux_style=aux_style)
+        feat4 = self.conv41(feat3 + feat2, style_guidance_1, aux_style=aux_style)
+        feat4 = self.conv42(feat4, style_guidance_1, aux_style=aux_style)
+        feat5 = self.conv51(feat4 + feat1, style_guidance_1, aux_style=aux_style)
+        feat5 = self.conv52(feat5, style_guidance_1, aux_style=aux_style)
+        feat6 = self.conv6(feat5 + feat0, style_guidance_1, aux_style=aux_style)
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 처리
         if self.use_separate_style_layers and self.use_triple_outputs:
@@ -372,7 +561,7 @@ class StyleConv(nn.Module):
                 self.noise_strength_2 = nn.Parameter(torch.zeros(1), requires_grad=True)
                 self.noise_strength_3 = nn.Parameter(torch.zeros(1), requires_grad=True)
 
-    def forward(self, x, style):
+    def forward(self, x, style, aux_style=None):
 
         if self.downsample:
             original_size = x.size()
@@ -482,9 +671,42 @@ class StyleConv(nn.Module):
                 gamma = torch.cat((gamma, gamma_2, gamma_3), dim=1)  # B, feat_ch, f_H, f_W
                 beta = torch.cat((beta, beta_2, beta_3), dim=1)
 
-            # 3. 거기서 감마 베타 나눠서 denorm
+            # 3. affine modulation
+            x_pre = x
             x = x * gamma + beta
-        
+
+            # D. coarse attention residual branch
+            if aux_style is not None:
+                aux_style_interp = F.interpolate(aux_style, size=x.size()[2:], mode=mode)
+                aux_actv = self.mlp_shared(aux_style_interp)
+                aux_beta = self.mlp_beta(aux_actv)
+                aux_alpha = 0.1
+                x = x + aux_alpha * aux_beta
+
+            if getattr(self, '_log_style_modulation', False):
+                with torch.no_grad():
+                    eps = 1e-8
+                    dbg = {
+                        'gamma_abs': gamma.abs().mean().detach(),
+                        'beta_abs': beta.abs().mean().detach(),
+                        'gamma_spatial_std': gamma.std(dim=(-2, -1)).mean().detach(),
+                        'beta_spatial_std': beta.std(dim=(-2, -1)).mean().detach(),
+                        'delta_ratio': ((x - x_pre).abs().mean() / (x_pre.abs().mean() + eps)).detach(),
+                        'x_out_over_x_pre': (x.abs().mean() / (x_pre.abs().mean() + eps)).detach(),
+                        'style_in_std': style.std().detach(),
+                        'style_in_spatial_std': style.std(dim=(-2, -1)).mean().detach(),
+                    }
+                    if aux_style is not None:
+                        dbg.update({
+                            'aux_style_std': aux_style.std().detach(),
+                            'aux_beta_abs': aux_beta.abs().mean().detach(),
+                            'aux_beta_spatial_std': aux_beta.std(dim=(-2, -1)).mean().detach(),
+                            'aux_applied_over_x_pre': (
+                                (aux_alpha * aux_beta).abs().mean() / (x_pre.abs().mean() + eps)
+                            ).detach(),
+                        })
+                    self.last_style_debug = dbg
+
         # activation (LeakyReLU)
         if self.activate:
             x = self.activation(x)
