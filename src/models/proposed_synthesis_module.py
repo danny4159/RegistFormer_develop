@@ -127,6 +127,14 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         for k, v in stats.items():
             self.log(f"ref_condition/{k}", v, prog_bar=False)
 
+    def _log_style_modulation_stats(self):
+        if not getattr(self.params, 'log_style_modulation', False):
+            return
+        for name, mod in self.netG_A.named_modules():
+            if type(mod).__name__ == 'StyleConv' and hasattr(mod, 'last_style_debug'):
+                for k, v in mod.last_style_debug.items():
+                    self.log(f"style/{name}/{k}", v, prog_bar=False)
+
     def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
         loss_G = torch.tensor(0.0, device=real_a.device)
         use_25d = getattr(self.params, 'use_25d_style', False)
@@ -509,10 +517,11 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 else:
                     loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
 
-            if getattr(self.params, 'log_ref_condition', False):
+            if getattr(self.params, 'log_ref_condition', False) or getattr(self.params, 'log_style_modulation', False):
                 interval = int(getattr(self.params, 'log_z_select_interval', 200))
                 if self.global_step % interval == 0:
                     self._log_ref_condition_stats()
+                    self._log_style_modulation_stats()
 
             self.manual_backward(loss_G)
             self.clip_gradients(

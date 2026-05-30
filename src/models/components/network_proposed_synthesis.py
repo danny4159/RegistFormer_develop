@@ -205,7 +205,7 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_conditioner = RegionCNNConditioner2D(hidden=16, residual_scale=0.1)
         elif self.ref_condition_mode == 'B_local_attn':
             self.ref_conditioner = LocalWindowAttentionConditioner2D(
-                dim=16, window=3, coarse=False, residual_scale=0.1,
+                dim=16, window=3, coarse=False, residual_scale=1.0,  # 0.1→1.0: 100step에서 style_base_delta≈0 확인
             )
         elif self.ref_condition_mode in ('C_coarse_attn', 'D_coarse_attn_residual'):
             self.ref_conditioner = LocalWindowAttentionConditioner2D(
@@ -680,7 +680,7 @@ class StyleConv(nn.Module):
                 aux_style_interp = F.interpolate(aux_style, size=x.size()[2:], mode=mode)
                 aux_actv = self.mlp_shared(aux_style_interp)
                 aux_beta = self.mlp_beta(aux_actv)
-                aux_alpha = 0.1
+                aux_alpha = 0.2
                 x = x + aux_alpha * aux_beta
 
             if getattr(self, '_log_style_modulation', False):
