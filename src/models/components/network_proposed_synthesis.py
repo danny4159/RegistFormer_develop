@@ -263,7 +263,10 @@ class LocalWindowAttentionConditioner25D(nn.Module):
 
         delta = self.out_proj(ctx)
         center_ref = ref_low[:, center_idx:center_idx + 1]
-        style = center_ref + self.residual_scale * delta
+        center_base = ref_base[:, center_idx:center_idx + 1]
+        # B: ref_base==ref_low, center_base==center_ref
+        # C/D: ref_base is coarse-region map → region bottleneck reflected in style from the start
+        style = center_base + self.residual_scale * delta
 
         slice_prob = attn.sum(dim=2)       # [B,K,h,w]
         spatial_center_prob = attn[:, :, win2 // 2].sum(dim=1)  # [B,h,w]
@@ -272,6 +275,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             "ref_base_std": ref_base.std().detach(),
             "style_std": style.std().detach(),
             "style_center_delta": ((style - center_ref).abs().mean() / (center_ref.abs().mean() + 1e-8)).detach(),
+            "style_base_delta": ((style - center_base).abs().mean() / (center_base.abs().mean() + 1e-8)).detach(),
             "attn_entropy": _safe_entropy(attn.view(B, K * win2, h, w), dim=1, norm_base=K * win2).detach(),
             "attn_max": attn.view(B, K * win2, h, w).max(dim=1).values.mean().detach(),
             "slice_entropy": _safe_entropy(slice_prob, dim=1, norm_base=K).detach(),
@@ -366,7 +370,7 @@ class ProposedSynthesisModule(nn.Module):
             )
             if self.use_25d_style and self.ref_stack_size > 1:
                 self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
-                    dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2,
+                    dim=16, window=3, coarse=False, residual_scale=1.0, center_slice_bias=0.2,
                 )
         elif self.ref_condition_mode in ('C_coarse_attn', 'D_coarse_attn_residual'):
             self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
