@@ -208,7 +208,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
 
     def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2,
                  blend_mode='none', use_rel_bias=False, use_multihead=False, use_direct_attn=False,
-                 use_qk_norm=False):
+                 use_qk_norm=False, init_temperature=10.0):
         super().__init__()
         assert window % 2 == 1
         self.dim = dim
@@ -235,9 +235,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         # prevents Q,K → 0 collapse; small init temperature amplifies tiny cosine differences
         self.use_qk_norm = bool(use_qk_norm)
         if self.use_qk_norm:
-            # log_temp: learnable log temperature, init = log(10) → temp=10 → sharp attention
-            # higher temp = sharper, lower = softer; model can tune this
-            self.log_temperature = nn.Parameter(torch.tensor(math.log(10.0)))
+            self.log_temperature = nn.Parameter(torch.tensor(math.log(float(init_temperature))))
 
         # Manhattan distance for each position in the local window
         r = window // 2
@@ -467,6 +465,7 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_condition_center_bias = kwargs.get('ref_condition_center_bias', 0.2)
             self.ref_condition_direct = kwargs.get('ref_condition_direct', False)
             self.ref_condition_qk_norm = kwargs.get('ref_condition_qk_norm', False)
+            self.ref_condition_init_temperature = kwargs.get('ref_condition_init_temperature', 10.0)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -546,6 +545,7 @@ class ProposedSynthesisModule(nn.Module):
                     use_multihead=self.ref_condition_multihead,
                     use_direct_attn=self.ref_condition_direct,
                     use_qk_norm=self.ref_condition_qk_norm,
+                    init_temperature=self.ref_condition_init_temperature,
                 )
         elif self.ref_condition_mode in ('C_coarse_attn', 'D_coarse_attn_residual'):
             self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
@@ -559,6 +559,7 @@ class ProposedSynthesisModule(nn.Module):
                     use_multihead=self.ref_condition_multihead,
                     use_direct_attn=self.ref_condition_direct,
                     use_qk_norm=self.ref_condition_qk_norm,
+                    init_temperature=self.ref_condition_init_temperature,
                 )
 
         self._last_ref_condition_stats: dict = {}
