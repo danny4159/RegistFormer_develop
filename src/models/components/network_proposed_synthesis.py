@@ -207,7 +207,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
     """
 
     def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2,
-                 blend_mode='none', use_rel_bias=False):
+                 blend_mode='none', use_rel_bias=False, use_multihead=False):
         super().__init__()
         assert window % 2 == 1
         self.dim = dim
@@ -222,6 +222,11 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         self.use_rel_bias = bool(use_rel_bias)
         self.spatial_rel_bias_strength = 0.05
         self.slice_rel_bias_strength = 0.05
+        self.use_multihead = bool(use_multihead)
+        self.num_heads = 4 if self.use_multihead else 1
+        if dim % self.num_heads != 0:
+            raise ValueError(f"dim={dim} must be divisible by num_heads={self.num_heads}")
+        self.head_dim = dim // self.num_heads
 
         # Manhattan distance for each position in the local window
         r = window // 2
@@ -259,70 +264,102 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         else:
             ref_base = ref_low
 
-        q = self.q_proj(src_low)  # [B,d,h,w]
-
+        q = self.q_proj(src_low)  # [B,dim,h,w]
         k = self.k_proj(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.dim, h, w)
         v = self.v_proj(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.dim, h, w)
 
-        # local unfold per slice: [B,K,d,win2,h,w]
-        k_unfold = F.unfold(k.reshape(B * K, self.dim, h, w), kernel_size=win, padding=pad)
-        v_unfold = F.unfold(v.reshape(B * K, self.dim, h, w), kernel_size=win, padding=pad)
-        k_unfold = k_unfold.view(B, K, self.dim, win2, h, w)
-        v_unfold = v_unfold.view(B, K, self.dim, win2, h, w)
+        if not self.use_multihead:
+            # ── single-head path ──────────────────────────────────────────
+            k_unfold = F.unfold(k.reshape(B * K, self.dim, h, w), kernel_size=win, padding=pad)
+            v_unfold = F.unfold(v.reshape(B * K, self.dim, h, w), kernel_size=win, padding=pad)
+            k_unfold = k_unfold.view(B, K, self.dim, win2, h, w)
+            v_unfold = v_unfold.view(B, K, self.dim, win2, h, w)
 
-        # score: [B,K,win2,h,w]
-        score = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) / math.sqrt(self.dim)
-        score[:, center_idx:center_idx + 1] += self.center_slice_bias
+            score = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) / math.sqrt(self.dim)
+            score[:, center_idx:center_idx + 1] += self.center_slice_bias
+            if self.use_rel_bias:
+                score = score - self.spatial_rel_bias_strength * self.spatial_rel_dist.to(score.device)
+                slice_dist = (torch.arange(K, device=score.device, dtype=score.dtype) - center_idx).abs()
+                score = score - self.slice_rel_bias_strength * slice_dist.view(1, K, 1, 1, 1)
 
-        if self.use_rel_bias:
-            # spatial: prefer center/nearby offsets within local window
-            score = score - self.spatial_rel_bias_strength * self.spatial_rel_dist.to(score.device)
-            # slice: prefer center slice, penalize by distance
-            slice_dist = (torch.arange(K, device=score.device, dtype=score.dtype) - center_idx).abs()
-            score = score - self.slice_rel_bias_strength * slice_dist.view(1, K, 1, 1, 1)
+            attn = torch.softmax(score.view(B, K * win2, h, w), dim=1).view(B, K, win2, h, w)
+            ctx = (attn.unsqueeze(2) * v_unfold).sum(dim=1).sum(dim=2)  # [B,dim,h,w]
+            attn_for_log = attn.unsqueeze(1)  # [B,1,K,win2,h,w]
 
-        attn = torch.softmax(score.view(B, K * win2, h, w), dim=1).view(B, K, win2, h, w)
-        ctx = (attn.unsqueeze(2) * v_unfold).sum(dim=1).sum(dim=2)  # [B,d,h,w]
+        else:
+            # ── multi-head path ───────────────────────────────────────────
+            Hh, Dh = self.num_heads, self.head_dim
+            qh = q.view(B, Hh, Dh, h, w)                          # [B,Hh,Dh,h,w]
+            kh = k.view(B, K, Hh, Dh, h, w)
+            vh = v.view(B, K, Hh, Dh, h, w)
+
+            kh_unfold = F.unfold(kh.reshape(B * K * Hh, Dh, h, w), kernel_size=win, padding=pad)
+            vh_unfold = F.unfold(vh.reshape(B * K * Hh, Dh, h, w), kernel_size=win, padding=pad)
+            kh_unfold = kh_unfold.view(B, K, Hh, Dh, win2, h, w)
+            vh_unfold = vh_unfold.view(B, K, Hh, Dh, win2, h, w)
+
+            # score: [B,K,Hh,win2,h,w]
+            score = (qh.unsqueeze(1).unsqueeze(4) * kh_unfold).sum(dim=3) / math.sqrt(Dh)
+            score[:, center_idx:center_idx + 1] += self.center_slice_bias
+            if self.use_rel_bias:
+                sp_dist = self.spatial_rel_dist.to(score.device)   # [1,1,win2,1,1]
+                score = score - self.spatial_rel_bias_strength * sp_dist.unsqueeze(2)
+                slice_dist = (torch.arange(K, device=score.device, dtype=score.dtype) - center_idx).abs()
+                score = score - self.slice_rel_bias_strength * slice_dist.view(1, K, 1, 1, 1, 1)
+
+            # softmax over K*win2, per head: [B,Hh,K,win2,h,w]
+            score_h = score.permute(0, 2, 1, 3, 4, 5).contiguous()
+            attn_h = torch.softmax(score_h.view(B, Hh, K * win2, h, w), dim=2).view(B, Hh, K, win2, h, w)
+
+            vh_unfold_h = vh_unfold.permute(0, 2, 1, 3, 4, 5, 6).contiguous()  # [B,Hh,K,Dh,win2,h,w]
+            ctx_h = (attn_h.unsqueeze(3) * vh_unfold_h).sum(dim=2).sum(dim=3)   # [B,Hh,Dh,h,w]
+            ctx = ctx_h.reshape(B, self.dim, h, w)
+            attn_for_log = attn_h  # [B,Hh,K,win2,h,w]
 
         delta = self.out_proj(ctx)
-        center_ref_low = ref_low[:, center_idx:center_idx + 1]   # raw center ref
-        center_base = ref_base[:, center_idx:center_idx + 1]     # coarse center ref
-
-        # full attention style (기존 25D-C 방식)
+        center_ref_low = ref_low[:, center_idx:center_idx + 1]
+        center_base = ref_base[:, center_idx:center_idx + 1]
         attn_style = center_base + self.residual_scale * delta
 
-        # blend
         if self.blend_mode == 'none':
-            blend_anchor = attn_style
-            blend_alpha = 1.0
-            style = attn_style
+            blend_anchor, blend_alpha, style = attn_style, 1.0, attn_style
         elif self.blend_mode == 'center_base':
-            blend_anchor = center_base
-            blend_alpha = 0.7
+            blend_anchor, blend_alpha = center_base, 0.7
             style = blend_anchor + blend_alpha * (attn_style - blend_anchor)
         elif self.blend_mode == 'center_ref_low':
-            blend_anchor = center_ref_low
-            blend_alpha = 0.5
+            blend_anchor, blend_alpha = center_ref_low, 0.5
             style = blend_anchor + blend_alpha * (attn_style - blend_anchor)
         else:
             raise RuntimeError(f"Invalid blend_mode={self.blend_mode}")
 
-        slice_prob = attn.sum(dim=2)                              # [B,K,h,w]
-        spatial_center_prob = attn[:, :, win2 // 2].sum(dim=1)   # [B,h,w]
+        # ── unified logging ───────────────────────────────────────────────
+        # attn_for_log: [B,Hh,K,win2,h,w]
+        attn_mean = attn_for_log.mean(dim=1)                      # [B,K,win2,h,w]
+        slice_prob = attn_mean.sum(dim=2)                         # [B,K,h,w]
+        spatial_center_prob = attn_mean[:, :, win2 // 2].sum(dim=1)  # [B,h,w]
 
-        # rel_bias diagnostics
+        attn_flat = attn_for_log.view(B, self.num_heads, K * win2, h, w)
+        attn_entropy = _safe_entropy(attn_flat, dim=2, norm_base=K * win2)
+        attn_max = attn_flat.max(dim=2).values.mean()
+
         with torch.no_grad():
-            slice_offsets = torch.arange(K, device=attn.device, dtype=attn.dtype) - float(center_idx)
+            slice_offsets = torch.arange(K, device=attn_mean.device, dtype=attn_mean.dtype) - float(center_idx)
             expected_abs_slice_offset = (slice_prob * slice_offsets.abs().view(1, K, 1, 1)).sum(dim=1).mean()
 
-            sp_dist = self.spatial_rel_dist.to(attn.device).view(1, 1, win2, 1, 1)
-            expected_spatial_l1 = (attn * sp_dist).sum(dim=(1, 2)).mean()
+            sp_dist = self.spatial_rel_dist.to(attn_mean.device).view(1, 1, win2, 1, 1)
+            expected_spatial_l1 = (attn_mean * sp_dist).sum(dim=(1, 2)).mean()
 
-            near_slice_mask = (slice_offsets.abs() <= 1).to(attn.dtype).view(1, K, 1, 1)
+            near_slice_mask = (slice_offsets.abs() <= 1).to(attn_mean.dtype).view(1, K, 1, 1)
             near_slice_weight = (slice_prob * near_slice_mask).sum(dim=1).mean()
+            near_spatial_mask = (sp_dist <= 1).to(attn_mean.dtype)
+            near_spatial_weight = (attn_mean * near_spatial_mask).sum(dim=(1, 2)).mean()
 
-            near_spatial_mask = (self.spatial_rel_dist.to(attn.device).view(1, 1, win2, 1, 1) <= 1).to(attn.dtype)
-            near_spatial_weight = (attn * near_spatial_mask).sum(dim=(1, 2)).mean()
+            # head diversity (multi-head only, zeros for single-head)
+            head_slice_prob = attn_for_log.sum(dim=3)              # [B,Hh,K,h,w]
+            head_center_w = head_slice_prob[:, :, center_idx].mean(dim=(0, 2, 3))  # [Hh]
+            head_spatial_center_w = attn_for_log[:, :, :, win2 // 2].sum(dim=2).mean(dim=(0, 2, 3))
+            head_center_slice_std = head_center_w.std(correction=0)
+            head_spatial_center_std = head_spatial_center_w.std(correction=0)
 
         stats = {
             "base_std": ref_low.std().detach(),
@@ -333,8 +370,10 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             "blend_to_attn_delta": ((style - attn_style).abs().mean() / (attn_style.abs().mean() + 1e-8)).detach(),
             "blend_anchor_delta": ((style - blend_anchor).abs().mean() / (blend_anchor.abs().mean() + 1e-8)).detach(),
             "blend_alpha": torch.as_tensor(blend_alpha, device=style.device).detach(),
-            "attn_entropy": _safe_entropy(attn.view(B, K * win2, h, w), dim=1, norm_base=K * win2).detach(),
-            "attn_max": attn.view(B, K * win2, h, w).max(dim=1).values.mean().detach(),
+            "multihead_enabled": torch.as_tensor(float(self.use_multihead), device=style.device).detach(),
+            "num_heads": torch.as_tensor(float(self.num_heads), device=style.device).detach(),
+            "attn_entropy": attn_entropy.mean().detach(),
+            "attn_max": attn_max.detach(),
             "slice_entropy": _safe_entropy(slice_prob, dim=1, norm_base=K).detach(),
             "center_slice_weight": slice_prob[:, center_idx].mean().detach(),
             "spatial_center_weight": spatial_center_prob.mean().detach(),
@@ -343,6 +382,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             "expected_spatial_l1": expected_spatial_l1.detach(),
             "near_slice_weight": near_slice_weight.detach(),
             "near_spatial_weight": near_spatial_weight.detach(),
+            "head_center_slice_std": head_center_slice_std.detach(),
+            "head_spatial_center_std": head_spatial_center_std.detach(),
         }
         return style, stats
 
@@ -366,6 +407,7 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_condition_mode = kwargs.get('ref_condition_mode', 'original')
             self.ref_condition_blend = kwargs.get('ref_condition_blend', 'none')
             self.ref_condition_rel_bias = kwargs.get('ref_condition_rel_bias', False)
+            self.ref_condition_multihead = kwargs.get('ref_condition_multihead', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -437,6 +479,7 @@ class ProposedSynthesisModule(nn.Module):
                     dim=16, window=3, coarse=False, residual_scale=1.0,
                     center_slice_bias=0.2, blend_mode=self.ref_condition_blend,
                     use_rel_bias=self.ref_condition_rel_bias,
+                    use_multihead=self.ref_condition_multihead,
                 )
         elif self.ref_condition_mode in ('C_coarse_attn', 'D_coarse_attn_residual'):
             self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
@@ -447,6 +490,7 @@ class ProposedSynthesisModule(nn.Module):
                     dim=16, window=3, coarse=True, residual_scale=0.1,
                     center_slice_bias=0.2, blend_mode=self.ref_condition_blend,
                     use_rel_bias=self.ref_condition_rel_bias,
+                    use_multihead=self.ref_condition_multihead,
                 )
 
         self._last_ref_condition_stats: dict = {}
