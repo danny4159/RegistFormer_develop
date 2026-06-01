@@ -31,6 +31,7 @@ netG_A:
   ref_stack_size: ${data.ref_stack_size}
   z_agg_deep: false          # true: 3-layer z_agg (K->hidden->hidden->1), false: 2-layer (K->hidden->1)
   ref_condition_mode: 'original'  # original | A_region_cnn | B_local_attn | C_coarse_attn | D_coarse_attn_residual
+  ref_condition_blend: 'none'     # none | center_base (alpha=0.7) | center_ref_low (alpha=0.5)
   # init_type: 'kaiming'
 
 netD_A:
@@ -98,6 +99,6 @@ params: # Other params
   ctx_agg_mode: 'softmin'    # 'softmin': center-biased soft-min (default) | 'mean': simple mean over all slices
   ctx_softmin_tau: 0.3       # soft-min temperature (작을수록 hard-min에 가까움) — softmin 전용
   ctx_shift_penalty: 0.05    # center slice preference bias per neighbor step — softmin 전용
-  log_ref_condition: false     # true: ref_condition/* 통계 로그 (A~D 실험용)
-  log_style_modulation: false  # true: StyleConv gamma/beta/aux_beta 통계 로그 (D 방식 aux_applied_over_x_pre 등)
+  log_ref_condition: true     # true: ref_condition/* 통계 로그 (A~D 실험용)
+  log_style_modulation: true  # true: StyleConv gamma/beta/aux_beta 통계 로그 (D 방식 aux_applied_over_x_pre 등)
   log_z_select_interval: 200   # ref_condition / style_modulation 로그 주기 (step)

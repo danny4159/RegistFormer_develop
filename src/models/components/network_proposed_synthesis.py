@@ -206,7 +206,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
     coarse=True  (C): coarse-region local attention across K slices.
     """
 
-    def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2):
+    def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2, blend_mode='none'):
         super().__init__()
         assert window % 2 == 1
         self.dim = dim
@@ -214,6 +214,10 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         self.coarse = coarse
         self.residual_scale = residual_scale
         self.center_slice_bias = center_slice_bias
+        _valid_blend = ['none', 'center_base', 'center_ref_low']
+        if blend_mode not in _valid_blend:
+            raise ValueError(f"Unknown blend_mode={blend_mode!r}. Choose from {_valid_blend}")
+        self.blend_mode = blend_mode
 
         self.q_proj = nn.Conv2d(1, dim, 1)
         self.k_proj = nn.Conv2d(1, dim, 1)
@@ -262,20 +266,39 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         ctx = (attn.unsqueeze(2) * v_unfold).sum(dim=1).sum(dim=2)  # [B,d,h,w]
 
         delta = self.out_proj(ctx)
-        center_ref = ref_low[:, center_idx:center_idx + 1]
-        center_base = ref_base[:, center_idx:center_idx + 1]
-        # B: ref_base==ref_low, center_base==center_ref
-        # C/D: ref_base is coarse-region map → region bottleneck reflected in style from the start
-        style = center_base + self.residual_scale * delta
+        center_ref_low = ref_low[:, center_idx:center_idx + 1]   # raw center ref
+        center_base = ref_base[:, center_idx:center_idx + 1]     # coarse center ref
 
-        slice_prob = attn.sum(dim=2)       # [B,K,h,w]
-        spatial_center_prob = attn[:, :, win2 // 2].sum(dim=1)  # [B,h,w]
+        # full attention style (기존 25D-C 방식)
+        attn_style = center_base + self.residual_scale * delta
+
+        # blend
+        if self.blend_mode == 'none':
+            blend_anchor = attn_style
+            blend_alpha = 1.0
+            style = attn_style
+        elif self.blend_mode == 'center_base':
+            blend_anchor = center_base
+            blend_alpha = 0.7
+            style = blend_anchor + blend_alpha * (attn_style - blend_anchor)
+        elif self.blend_mode == 'center_ref_low':
+            blend_anchor = center_ref_low
+            blend_alpha = 0.5
+            style = blend_anchor + blend_alpha * (attn_style - blend_anchor)
+        else:
+            raise RuntimeError(f"Invalid blend_mode={self.blend_mode}")
+
+        slice_prob = attn.sum(dim=2)                              # [B,K,h,w]
+        spatial_center_prob = attn[:, :, win2 // 2].sum(dim=1)   # [B,h,w]
         stats = {
             "base_std": ref_low.std().detach(),
             "ref_base_std": ref_base.std().detach(),
             "style_std": style.std().detach(),
-            "style_center_delta": ((style - center_ref).abs().mean() / (center_ref.abs().mean() + 1e-8)).detach(),
+            "style_center_delta": ((style - center_ref_low).abs().mean() / (center_ref_low.abs().mean() + 1e-8)).detach(),
             "style_base_delta": ((style - center_base).abs().mean() / (center_base.abs().mean() + 1e-8)).detach(),
+            "blend_to_attn_delta": ((style - attn_style).abs().mean() / (attn_style.abs().mean() + 1e-8)).detach(),
+            "blend_anchor_delta": ((style - blend_anchor).abs().mean() / (blend_anchor.abs().mean() + 1e-8)).detach(),
+            "blend_alpha": torch.as_tensor(blend_alpha, device=style.device).detach(),
             "attn_entropy": _safe_entropy(attn.view(B, K * win2, h, w), dim=1, norm_base=K * win2).detach(),
             "attn_max": attn.view(B, K * win2, h, w).max(dim=1).values.mean().detach(),
             "slice_entropy": _safe_entropy(slice_prob, dim=1, norm_base=K).detach(),
@@ -302,6 +325,7 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_stack_size = kwargs.get('ref_stack_size', 3)
             self.z_agg_deep = kwargs.get('z_agg_deep', False)
             self.ref_condition_mode = kwargs.get('ref_condition_mode', 'original')
+            self.ref_condition_blend = kwargs.get('ref_condition_blend', 'none')
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -370,7 +394,8 @@ class ProposedSynthesisModule(nn.Module):
             )
             if self.use_25d_style and self.ref_stack_size > 1:
                 self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
-                    dim=16, window=3, coarse=False, residual_scale=1.0, center_slice_bias=0.2,
+                    dim=16, window=3, coarse=False, residual_scale=1.0,
+                    center_slice_bias=0.2, blend_mode=self.ref_condition_blend,
                 )
         elif self.ref_condition_mode in ('C_coarse_attn', 'D_coarse_attn_residual'):
             self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
@@ -378,7 +403,8 @@ class ProposedSynthesisModule(nn.Module):
             )
             if self.use_25d_style and self.ref_stack_size > 1:
                 self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
-                    dim=16, window=3, coarse=True, residual_scale=0.1, center_slice_bias=0.2,
+                    dim=16, window=3, coarse=True, residual_scale=0.1,
+                    center_slice_bias=0.2, blend_mode=self.ref_condition_blend,
                 )
 
         self._last_ref_condition_stats: dict = {}
