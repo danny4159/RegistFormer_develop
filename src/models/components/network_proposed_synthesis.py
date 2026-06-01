@@ -206,7 +206,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
     coarse=True  (C): coarse-region local attention across K slices.
     """
 
-    def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2, blend_mode='none'):
+    def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2,
+                 blend_mode='none', use_rel_bias=False):
         super().__init__()
         assert window % 2 == 1
         self.dim = dim
@@ -218,6 +219,17 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         if blend_mode not in _valid_blend:
             raise ValueError(f"Unknown blend_mode={blend_mode!r}. Choose from {_valid_blend}")
         self.blend_mode = blend_mode
+        self.use_rel_bias = bool(use_rel_bias)
+        self.spatial_rel_bias_strength = 0.05
+        self.slice_rel_bias_strength = 0.05
+
+        # Manhattan distance for each position in the local window
+        r = window // 2
+        dist = [abs(dy) + abs(dx) for dy in range(-r, r + 1) for dx in range(-r, r + 1)]
+        self.register_buffer(
+            "spatial_rel_dist",
+            torch.tensor(dist, dtype=torch.float32).view(1, 1, window * window, 1, 1),
+        )
 
         self.q_proj = nn.Conv2d(1, dim, 1)
         self.k_proj = nn.Conv2d(1, dim, 1)
@@ -262,6 +274,13 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         score = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) / math.sqrt(self.dim)
         score[:, center_idx:center_idx + 1] += self.center_slice_bias
 
+        if self.use_rel_bias:
+            # spatial: prefer center/nearby offsets within local window
+            score = score - self.spatial_rel_bias_strength * self.spatial_rel_dist.to(score.device)
+            # slice: prefer center slice, penalize by distance
+            slice_dist = (torch.arange(K, device=score.device, dtype=score.dtype) - center_idx).abs()
+            score = score - self.slice_rel_bias_strength * slice_dist.view(1, K, 1, 1, 1)
+
         attn = torch.softmax(score.view(B, K * win2, h, w), dim=1).view(B, K, win2, h, w)
         ctx = (attn.unsqueeze(2) * v_unfold).sum(dim=1).sum(dim=2)  # [B,d,h,w]
 
@@ -290,6 +309,21 @@ class LocalWindowAttentionConditioner25D(nn.Module):
 
         slice_prob = attn.sum(dim=2)                              # [B,K,h,w]
         spatial_center_prob = attn[:, :, win2 // 2].sum(dim=1)   # [B,h,w]
+
+        # rel_bias diagnostics
+        with torch.no_grad():
+            slice_offsets = torch.arange(K, device=attn.device, dtype=attn.dtype) - float(center_idx)
+            expected_abs_slice_offset = (slice_prob * slice_offsets.abs().view(1, K, 1, 1)).sum(dim=1).mean()
+
+            sp_dist = self.spatial_rel_dist.to(attn.device).view(1, 1, win2, 1, 1)
+            expected_spatial_l1 = (attn * sp_dist).sum(dim=(1, 2)).mean()
+
+            near_slice_mask = (slice_offsets.abs() <= 1).to(attn.dtype).view(1, K, 1, 1)
+            near_slice_weight = (slice_prob * near_slice_mask).sum(dim=1).mean()
+
+            near_spatial_mask = (self.spatial_rel_dist.to(attn.device).view(1, 1, win2, 1, 1) <= 1).to(attn.dtype)
+            near_spatial_weight = (attn * near_spatial_mask).sum(dim=(1, 2)).mean()
+
         stats = {
             "base_std": ref_low.std().detach(),
             "ref_base_std": ref_base.std().detach(),
@@ -304,6 +338,11 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             "slice_entropy": _safe_entropy(slice_prob, dim=1, norm_base=K).detach(),
             "center_slice_weight": slice_prob[:, center_idx].mean().detach(),
             "spatial_center_weight": spatial_center_prob.mean().detach(),
+            "rel_bias_enabled": torch.as_tensor(float(self.use_rel_bias), device=style.device).detach(),
+            "expected_abs_slice_offset": expected_abs_slice_offset.detach(),
+            "expected_spatial_l1": expected_spatial_l1.detach(),
+            "near_slice_weight": near_slice_weight.detach(),
+            "near_spatial_weight": near_spatial_weight.detach(),
         }
         return style, stats
 
@@ -326,6 +365,7 @@ class ProposedSynthesisModule(nn.Module):
             self.z_agg_deep = kwargs.get('z_agg_deep', False)
             self.ref_condition_mode = kwargs.get('ref_condition_mode', 'original')
             self.ref_condition_blend = kwargs.get('ref_condition_blend', 'none')
+            self.ref_condition_rel_bias = kwargs.get('ref_condition_rel_bias', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -396,6 +436,7 @@ class ProposedSynthesisModule(nn.Module):
                 self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
                     dim=16, window=3, coarse=False, residual_scale=1.0,
                     center_slice_bias=0.2, blend_mode=self.ref_condition_blend,
+                    use_rel_bias=self.ref_condition_rel_bias,
                 )
         elif self.ref_condition_mode in ('C_coarse_attn', 'D_coarse_attn_residual'):
             self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
@@ -405,6 +446,7 @@ class ProposedSynthesisModule(nn.Module):
                 self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
                     dim=16, window=3, coarse=True, residual_scale=0.1,
                     center_slice_bias=0.2, blend_mode=self.ref_condition_blend,
+                    use_rel_bias=self.ref_condition_rel_bias,
                 )
 
         self._last_ref_condition_stats: dict = {}
