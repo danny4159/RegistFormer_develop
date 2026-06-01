@@ -408,6 +408,8 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_condition_blend = kwargs.get('ref_condition_blend', 'none')
             self.ref_condition_rel_bias = kwargs.get('ref_condition_rel_bias', False)
             self.ref_condition_multihead = kwargs.get('ref_condition_multihead', False)
+            self.ref_condition_window = kwargs.get('ref_condition_window', 3)
+            self.ref_condition_dim = kwargs.get('ref_condition_dim', 16)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -420,6 +422,9 @@ class ProposedSynthesisModule(nn.Module):
                 f"Unknown ref_condition_mode={self.ref_condition_mode!r}. "
                 f"Choose from {_valid_ref_condition_modes}"
             )
+        if self.ref_condition_window not in [1, 3]:
+            raise ValueError(f"ref_condition_window must be 1 or 3, got {self.ref_condition_window}")
+
         if self.is_3d and self.ref_condition_mode != 'original':
             raise NotImplementedError("ref_condition_mode A~D는 2D 전용입니다.")
         if (self.use_multiple_outputs or self.use_triple_outputs) and self.ref_condition_mode != 'original':
@@ -464,30 +469,31 @@ class ProposedSynthesisModule(nn.Module):
         self.ref_conditioner_2d = None
         self.ref_conditioner_25d = None
 
+        _cd = self.ref_condition_dim  # shorthand
         if self.ref_condition_mode == 'A_region_cnn':
-            self.ref_conditioner_2d = RegionCNNConditioner2D(hidden=16, residual_scale=0.1)
+            self.ref_conditioner_2d = RegionCNNConditioner2D(hidden=_cd, residual_scale=0.1)
             if self.use_25d_style and self.ref_stack_size > 1:
                 self.ref_conditioner_25d = RegionCNNConditioner25D(
-                    hidden=16, residual_scale=0.1, center_slice_bias=0.2,
+                    hidden=_cd, residual_scale=0.1, center_slice_bias=0.2,
                 )
         elif self.ref_condition_mode == 'B_local_attn':
             self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
-                dim=16, window=3, coarse=False, residual_scale=1.0,
+                dim=_cd, window=self.ref_condition_window, coarse=False, residual_scale=1.0,
             )
             if self.use_25d_style and self.ref_stack_size > 1:
                 self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
-                    dim=16, window=3, coarse=False, residual_scale=1.0,
+                    dim=_cd, window=self.ref_condition_window, coarse=False, residual_scale=1.0,
                     center_slice_bias=0.2, blend_mode=self.ref_condition_blend,
                     use_rel_bias=self.ref_condition_rel_bias,
                     use_multihead=self.ref_condition_multihead,
                 )
         elif self.ref_condition_mode in ('C_coarse_attn', 'D_coarse_attn_residual'):
             self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
-                dim=16, window=3, coarse=True, residual_scale=0.1,
+                dim=_cd, window=self.ref_condition_window, coarse=True, residual_scale=0.1,
             )
             if self.use_25d_style and self.ref_stack_size > 1:
                 self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
-                    dim=16, window=3, coarse=True, residual_scale=0.1,
+                    dim=_cd, window=self.ref_condition_window, coarse=True, residual_scale=0.1,
                     center_slice_bias=0.2, blend_mode=self.ref_condition_blend,
                     use_rel_bias=self.ref_condition_rel_bias,
                     use_multihead=self.ref_condition_multihead,
