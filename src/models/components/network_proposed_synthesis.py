@@ -207,7 +207,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
     """
 
     def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2,
-                 blend_mode='none', use_rel_bias=False, use_multihead=False, use_direct_attn=False):
+                 blend_mode='none', use_rel_bias=False, use_multihead=False, use_direct_attn=False,
+                 use_qk_norm=False):
         super().__init__()
         assert window % 2 == 1
         self.dim = dim
@@ -230,6 +231,13 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         # direct: attention weights directly mix raw ref values; no V_proj/out_proj shortcut
         self.use_direct_attn = bool(use_direct_attn)
         self.direct_alpha = 0.5   # center_ref_low anchor, alpha fixed
+        # qk_norm: cosine similarity attention + learnable temperature
+        # prevents Q,K → 0 collapse; small init temperature amplifies tiny cosine differences
+        self.use_qk_norm = bool(use_qk_norm)
+        if self.use_qk_norm:
+            # log_temp: learnable log temperature, init = log(10) → temp=10 → sharp attention
+            # higher temp = sharper, lower = softer; model can tune this
+            self.log_temperature = nn.Parameter(torch.tensor(math.log(10.0)))
 
         # Manhattan distance for each position in the local window
         r = window // 2
@@ -271,13 +279,22 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         q = self.q_proj(src_low)  # [B,dim,h,w]
         k = self.k_proj(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.dim, h, w)
 
+        # QK normalization: cosine similarity, prevents Q,K → 0 collapse
+        if self.use_qk_norm:
+            q = F.normalize(q, dim=1, eps=1e-8)  # unit norm per spatial position
+            k = F.normalize(k, dim=2, eps=1e-8)
+
         # k unfold for score computation (always needed)
         k_unfold_flat = F.unfold(k.reshape(B * K, self.dim, h, w), kernel_size=win, padding=pad)
         k_unfold = k_unfold_flat.view(B, K, self.dim, win2, h, w)
 
         # ── score computation (shared for both direct / non-direct) ──────────────────
         if not self.use_multihead:
-            score_nobias = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) / math.sqrt(self.dim)
+            if self.use_qk_norm:
+                temperature = self.log_temperature.exp()
+                score_nobias = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) * temperature
+            else:
+                score_nobias = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) / math.sqrt(self.dim)
             score = score_nobias.clone()
             score[:, center_idx:center_idx + 1] += self.center_slice_bias
             if self.use_rel_bias:
@@ -292,7 +309,11 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             kh = k.view(B, K, Hh, Dh, h, w)
             kh_unfold = F.unfold(kh.reshape(B * K * Hh, Dh, h, w), kernel_size=win, padding=pad)
             kh_unfold = kh_unfold.view(B, K, Hh, Dh, win2, h, w)
-            score_nobias = (qh.unsqueeze(1).unsqueeze(4) * kh_unfold).sum(dim=3) / math.sqrt(Dh)
+            if self.use_qk_norm:
+                temperature = self.log_temperature.exp()
+                score_nobias = (qh.unsqueeze(1).unsqueeze(4) * kh_unfold).sum(dim=3) * temperature
+            else:
+                score_nobias = (qh.unsqueeze(1).unsqueeze(4) * kh_unfold).sum(dim=3) / math.sqrt(Dh)
             score = score_nobias.clone()
             score[:, center_idx:center_idx + 1] += self.center_slice_bias
             if self.use_rel_bias:
@@ -384,6 +405,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             qk_score_std = score.std().detach()
             q_abs = q.abs().mean().detach()
             k_abs = k.abs().mean().detach()
+            temperature_val = (self.log_temperature.exp().detach()
+                               if self.use_qk_norm else torch.zeros(1, device=style.device))
 
         stats = {
             "base_std": ref_low.std().detach(),
@@ -395,6 +418,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             "blend_anchor_delta": ((style - blend_anchor).abs().mean() / (blend_anchor.abs().mean() + 1e-8)).detach(),
             "blend_alpha": torch.as_tensor(blend_alpha, device=style.device).detach(),
             "direct_attn_enabled": torch.as_tensor(float(self.use_direct_attn), device=style.device).detach(),
+            "qk_norm_enabled": torch.as_tensor(float(self.use_qk_norm), device=style.device).detach(),
+            "qk_temperature": temperature_val.squeeze().detach(),
             "qk_score_std_nobias": qk_score_std_nobias,
             "qk_score_std": qk_score_std,
             "q_abs": q_abs,
@@ -441,6 +466,7 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_condition_dim = kwargs.get('ref_condition_dim', 16)
             self.ref_condition_center_bias = kwargs.get('ref_condition_center_bias', 0.2)
             self.ref_condition_direct = kwargs.get('ref_condition_direct', False)
+            self.ref_condition_qk_norm = kwargs.get('ref_condition_qk_norm', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -519,6 +545,7 @@ class ProposedSynthesisModule(nn.Module):
                     use_rel_bias=self.ref_condition_rel_bias,
                     use_multihead=self.ref_condition_multihead,
                     use_direct_attn=self.ref_condition_direct,
+                    use_qk_norm=self.ref_condition_qk_norm,
                 )
         elif self.ref_condition_mode in ('C_coarse_attn', 'D_coarse_attn_residual'):
             self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
@@ -531,6 +558,7 @@ class ProposedSynthesisModule(nn.Module):
                     use_rel_bias=self.ref_condition_rel_bias,
                     use_multihead=self.ref_condition_multihead,
                     use_direct_attn=self.ref_condition_direct,
+                    use_qk_norm=self.ref_condition_qk_norm,
                 )
 
         self._last_ref_condition_stats: dict = {}
