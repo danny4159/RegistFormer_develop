@@ -36,6 +36,8 @@ netG_A:
   ref_condition_multihead: false  # true: 4-head local cross-attention (head_dim=4 when dim=16)
   ref_condition_window: 3         # local window size: 1 (slice-only attn) | 3 (spatial+slice attn)
   ref_condition_dim: 16           # hidden dim for conditioner Q/K/V projections (default 16)
+  ref_condition_center_bias: 0.2  # center slice score bias; lower = attention learns more freely (e.g. 0.05)
+  ref_condition_direct: false     # true: attention weights directly mix raw ref values (no V_proj/out_proj shortcut)
   # init_type: 'kaiming'
 
 netD_A:
