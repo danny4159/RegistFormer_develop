@@ -210,7 +210,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
                  blend_mode='none', use_rel_bias=False, use_multihead=False, use_direct_attn=False,
                  use_qk_norm=False, init_temperature=10.0):
         super().__init__()
-        assert window in (1, 2, 3)
+        assert window % 2 == 1, f"window must be odd, got {window}"
         self.dim = dim
         self.window = window
         self.coarse = coarse
@@ -238,11 +238,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             self.log_temperature = nn.Parameter(torch.tensor(math.log(float(init_temperature))))
 
         # Manhattan distance for each position in the local window
-        if window % 2 == 1:
-            coords = range(-(window // 2), window // 2 + 1)
-        else:
-            coords = range(0, window)  # even window: offsets 0..win-1
-        dist = [abs(dy) + abs(dx) for dy in coords for dx in coords]
+        r = window // 2
+        dist = [abs(dy) + abs(dx) for dy in range(-r, r + 1) for dx in range(-r, r + 1)]
         self.register_buffer(
             "spatial_rel_dist",
             torch.tensor(dist, dtype=torch.float32).view(1, 1, window * window, 1, 1),
@@ -260,12 +257,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             _zero_init_last_conv(self.out_proj)
 
     def _unfold_same(self, x, win):
-        """Unfold preserving spatial size for odd OR even window."""
-        if win % 2 == 1:
-            return F.unfold(x, kernel_size=win, padding=win // 2)
-        # even window: asymmetric pad (left/top = win//2-1, right/bottom = win//2)
-        x = F.pad(x, (win // 2 - 1, win // 2, win // 2 - 1, win // 2))
-        return F.unfold(x, kernel_size=win, padding=0)
+        """Unfold preserving spatial size (odd window, symmetric padding)."""
+        return F.unfold(x, kernel_size=win, padding=win // 2)
 
     def forward(self, source, ref_stack, out_size):
         B, K, _, _ = ref_stack.shape
@@ -488,8 +481,8 @@ class ProposedSynthesisModule(nn.Module):
                 f"Unknown ref_condition_mode={self.ref_condition_mode!r}. "
                 f"Choose from {_valid_ref_condition_modes}"
             )
-        if self.ref_condition_window not in [1, 2, 3]:
-            raise ValueError(f"ref_condition_window must be 1, 2 or 3, got {self.ref_condition_window}")
+        if self.ref_condition_window not in [1, 3, 5]:
+            raise ValueError(f"ref_condition_window must be 1, 3 or 5, got {self.ref_condition_window}")
 
         if self.is_3d and self.ref_condition_mode != 'original':
             raise NotImplementedError("ref_condition_mode A~D는 2D 전용입니다.")
@@ -537,8 +530,7 @@ class ProposedSynthesisModule(nn.Module):
 
         _cd = self.ref_condition_dim  # shorthand
         _cb = self.ref_condition_center_bias  # shorthand
-        # 2D conditioner only supports odd window; clamp (unused when use_25d_style)
-        _w2d = self.ref_condition_window if self.ref_condition_window % 2 == 1 else 3
+        _w2d = self.ref_condition_window  # window is always odd (1/3/5)
         if self.ref_condition_mode == 'A_region_cnn':
             self.ref_conditioner_2d = RegionCNNConditioner2D(hidden=_cd, residual_scale=0.1)
             if self.use_25d_style and self.ref_stack_size >= 1:
