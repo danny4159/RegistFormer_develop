@@ -210,7 +210,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
                  blend_mode='none', use_rel_bias=False, use_multihead=False, use_direct_attn=False,
                  use_qk_norm=False, init_temperature=10.0):
         super().__init__()
-        assert window % 2 == 1
+        assert window in (1, 2, 3)
         self.dim = dim
         self.window = window
         self.coarse = coarse
@@ -238,8 +238,11 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             self.log_temperature = nn.Parameter(torch.tensor(math.log(float(init_temperature))))
 
         # Manhattan distance for each position in the local window
-        r = window // 2
-        dist = [abs(dy) + abs(dx) for dy in range(-r, r + 1) for dx in range(-r, r + 1)]
+        if window % 2 == 1:
+            coords = range(-(window // 2), window // 2 + 1)
+        else:
+            coords = range(0, window)  # even window: offsets 0..win-1
+        dist = [abs(dy) + abs(dx) for dy in coords for dx in coords]
         self.register_buffer(
             "spatial_rel_dist",
             torch.tensor(dist, dtype=torch.float32).view(1, 1, window * window, 1, 1),
@@ -255,6 +258,14 @@ class LocalWindowAttentionConditioner25D(nn.Module):
                 nn.Conv2d(dim, 1, 3, padding=1),
             )
             _zero_init_last_conv(self.out_proj)
+
+    def _unfold_same(self, x, win):
+        """Unfold preserving spatial size for odd OR even window."""
+        if win % 2 == 1:
+            return F.unfold(x, kernel_size=win, padding=win // 2)
+        # even window: asymmetric pad (left/top = win//2-1, right/bottom = win//2)
+        x = F.pad(x, (win // 2 - 1, win // 2, win // 2 - 1, win // 2))
+        return F.unfold(x, kernel_size=win, padding=0)
 
     def forward(self, source, ref_stack, out_size):
         B, K, _, _ = ref_stack.shape
@@ -283,7 +294,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             k = F.normalize(k, dim=2, eps=1e-8)
 
         # k unfold for score computation (always needed)
-        k_unfold_flat = F.unfold(k.reshape(B * K, self.dim, h, w), kernel_size=win, padding=pad)
+        k_unfold_flat = self._unfold_same(k.reshape(B * K, self.dim, h, w), win)
         k_unfold = k_unfold_flat.view(B, K, self.dim, win2, h, w)
 
         # ── score computation (shared for both direct / non-direct) ──────────────────
@@ -305,7 +316,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             Hh, Dh = self.num_heads, self.head_dim
             qh = q.view(B, Hh, Dh, h, w)
             kh = k.view(B, K, Hh, Dh, h, w)
-            kh_unfold = F.unfold(kh.reshape(B * K * Hh, Dh, h, w), kernel_size=win, padding=pad)
+            kh_unfold = self._unfold_same(kh.reshape(B * K * Hh, Dh, h, w), win)
             kh_unfold = kh_unfold.view(B, K, Hh, Dh, win2, h, w)
             if self.use_qk_norm:
                 temperature = self.log_temperature.exp()
@@ -333,9 +344,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         if self.use_direct_attn:
             # Direct: attention weights → raw ref_base values directly
             # No V_proj / out_proj. Attention must learn to select slices/windows.
-            ref_base_unfold = F.unfold(
-                ref_base.reshape(B * K, 1, h, w), kernel_size=win, padding=pad
-            ).view(B, K, win2, h, w)
+            ref_base_unfold = self._unfold_same(ref_base.reshape(B * K, 1, h, w), win).view(B, K, win2, h, w)
             weighted_ref = (attn_mean * ref_base_unfold).sum(dim=(1, 2)).unsqueeze(1)  # [B,1,h,w]
             # Fixed anchor: center_ref_low + alpha=0.5
             attn_style = weighted_ref
@@ -346,12 +355,12 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             # Original: V_proj → out_proj → delta
             v = self.v_proj(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.dim, h, w)
             if not self.use_multihead:
-                v_unfold = F.unfold(v.reshape(B * K, self.dim, h, w), kernel_size=win, padding=pad)
+                v_unfold = self._unfold_same(v.reshape(B * K, self.dim, h, w), win)
                 v_unfold = v_unfold.view(B, K, self.dim, win2, h, w)
                 ctx = (attn.unsqueeze(2) * v_unfold).sum(dim=1).sum(dim=2)
             else:
                 vh = v.view(B, K, Hh, Dh, h, w)
-                vh_unfold = F.unfold(vh.reshape(B * K * Hh, Dh, h, w), kernel_size=win, padding=pad)
+                vh_unfold = self._unfold_same(vh.reshape(B * K * Hh, Dh, h, w), win)
                 vh_unfold = vh_unfold.view(B, K, Hh, Dh, win2, h, w)
                 vh_unfold_h = vh_unfold.permute(0, 2, 1, 3, 4, 5, 6).contiguous()
                 ctx_h = (attn_h.unsqueeze(3) * vh_unfold_h).sum(dim=2).sum(dim=3)
@@ -466,6 +475,7 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_condition_direct = kwargs.get('ref_condition_direct', False)
             self.ref_condition_qk_norm = kwargs.get('ref_condition_qk_norm', False)
             self.ref_condition_init_temperature = kwargs.get('ref_condition_init_temperature', 10.0)
+            self.ref_condition_downsample = kwargs.get('ref_condition_downsample', 16)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -478,8 +488,8 @@ class ProposedSynthesisModule(nn.Module):
                 f"Unknown ref_condition_mode={self.ref_condition_mode!r}. "
                 f"Choose from {_valid_ref_condition_modes}"
             )
-        if self.ref_condition_window not in [1, 3]:
-            raise ValueError(f"ref_condition_window must be 1 or 3, got {self.ref_condition_window}")
+        if self.ref_condition_window not in [1, 2, 3]:
+            raise ValueError(f"ref_condition_window must be 1, 2 or 3, got {self.ref_condition_window}")
 
         if self.is_3d and self.ref_condition_mode != 'original':
             raise NotImplementedError("ref_condition_mode A~D는 2D 전용입니다.")
@@ -527,17 +537,19 @@ class ProposedSynthesisModule(nn.Module):
 
         _cd = self.ref_condition_dim  # shorthand
         _cb = self.ref_condition_center_bias  # shorthand
+        # 2D conditioner only supports odd window; clamp (unused when use_25d_style)
+        _w2d = self.ref_condition_window if self.ref_condition_window % 2 == 1 else 3
         if self.ref_condition_mode == 'A_region_cnn':
             self.ref_conditioner_2d = RegionCNNConditioner2D(hidden=_cd, residual_scale=0.1)
-            if self.use_25d_style and self.ref_stack_size > 1:
+            if self.use_25d_style and self.ref_stack_size >= 1:
                 self.ref_conditioner_25d = RegionCNNConditioner25D(
                     hidden=_cd, residual_scale=0.1, center_slice_bias=_cb,
                 )
         elif self.ref_condition_mode == 'B_local_attn':
             self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
-                dim=_cd, window=self.ref_condition_window, coarse=False, residual_scale=1.0,
+                dim=_cd, window=_w2d, coarse=False, residual_scale=1.0,
             )
-            if self.use_25d_style and self.ref_stack_size > 1:
+            if self.use_25d_style and self.ref_stack_size >= 1:
                 self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
                     dim=_cd, window=self.ref_condition_window, coarse=False, residual_scale=1.0,
                     center_slice_bias=_cb, blend_mode=self.ref_condition_blend,
@@ -549,9 +561,9 @@ class ProposedSynthesisModule(nn.Module):
                 )
         elif self.ref_condition_mode in ('C_coarse_attn', 'D_coarse_attn_residual'):
             self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
-                dim=_cd, window=self.ref_condition_window, coarse=True, residual_scale=0.1,
+                dim=_cd, window=_w2d, coarse=True, residual_scale=0.1,
             )
-            if self.use_25d_style and self.ref_stack_size > 1:
+            if self.use_25d_style and self.ref_stack_size >= 1:
                 self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
                     dim=_cd, window=self.ref_condition_window, coarse=True, residual_scale=0.1,
                     center_slice_bias=_cb, blend_mode=self.ref_condition_blend,
@@ -663,14 +675,15 @@ class ProposedSynthesisModule(nn.Module):
 
     def _style_size(self, source):
         H, W = source.shape[-2:]
-        return max(1, H // 16), max(1, W // 16)
+        ds = self.ref_condition_downsample
+        return max(1, H // ds), max(1, W // ds)
 
     def _get_ref_stack(self, ref_all):
         """Return ref tensor for conditioners.
         2D  : [B,1,H,W]
         2.5D: [B,K,H,W]
         """
-        if self.use_25d_style and self.ref_stack_size > 1:
+        if self.use_25d_style and self.ref_stack_size >= 1:
             return ref_all[:, :self.ref_stack_size]
         return ref_all[:, :1]
 
@@ -690,7 +703,7 @@ class ProposedSynthesisModule(nn.Module):
         h, w = self._style_size(source)
 
         # ── 2.5D path ──────────────────────────────────────────────────────
-        if self.use_25d_style and self.ref_stack_size > 1:
+        if self.use_25d_style and self.ref_stack_size >= 1:
             ref_stack = self._get_ref_stack(ref_all)                 # [B,K,H,W]
             base_ref = self._aggregate_ref_stack(ref_all)            # [B,1,H,W] via z_agg
             base_style = F.interpolate(base_ref, size=(h, w), mode='nearest')
