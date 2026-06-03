@@ -30,7 +30,8 @@ netG_A:
   use_25d_style: ${data.use_25d_style}
   ref_stack_size: ${data.ref_stack_size}
   z_agg_deep: false          # true: 3-layer z_agg (K->hidden->hidden->1), false: 2-layer (K->hidden->1)
-  ref_condition_mode: 'original'  # original | A_region_cnn | B_local_attn | C_coarse_attn | D_coarse_attn_residual
+  ref_condition_mode: 'original'  # original | C_coarse_attn (local-window attention)
+  ref_condition_coarse: true      # C: true=region-pooled K,V (coarse) | false=full-res K,V (=구 B_local_attn)
   ref_condition_blend: 'none'     # none | center_base (alpha=0.7) | center_ref_low (alpha=0.5)
   ref_condition_rel_bias: false   # true: spatial+slice distance prior on attention score (strength=0.05)
   ref_condition_multihead: false  # true: 4-head local cross-attention (head_dim=4 when dim=16)
@@ -40,7 +41,7 @@ netG_A:
   ref_condition_direct: false     # true: attention weights directly mix raw ref values (no V_proj/out_proj shortcut)
   ref_condition_qk_norm: false    # true: cosine similarity QK + learnable temperature (prevents Q,K→0 collapse)
   ref_condition_init_temperature: 10.0  # initial temperature for QK softmax (higher=sharper; 3.0=soft, 10.0=default, 30.0=sharp)
-  ref_condition_downsample: 16     # style map downsample factor: 16 (1/16, default) | 8 | 4
+  ref_condition_downsample: 16     # style map downsample factor: 16 (1/16) | 8 | 4 | 2 | 1
   # init_type: 'kaiming'
 
 netD_A:
