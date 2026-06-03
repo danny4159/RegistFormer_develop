@@ -42,6 +42,7 @@ netG_A:
   ref_condition_qk_norm: false    # true: cosine similarity QK + learnable temperature (prevents Q,K→0 collapse)
   ref_condition_init_temperature: 10.0  # initial temperature for QK softmax (higher=sharper; 3.0=soft, 10.0=default, 30.0=sharp)
   ref_condition_downsample: 16     # style map downsample factor: 16 (1/16) | 8 | 4 | 2 | 1
+  ref_condition_direct_alpha: 0.5  # style = center_ref + alpha*(weighted_ref - center_ref); 0=center only, 1=full attention
   # init_type: 'kaiming'
 
 netD_A:

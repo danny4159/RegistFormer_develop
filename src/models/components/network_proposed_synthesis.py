@@ -110,7 +110,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
 
     def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2,
                  blend_mode='none', use_rel_bias=False, use_multihead=False, use_direct_attn=False,
-                 use_qk_norm=False, init_temperature=10.0):
+                 use_qk_norm=False, init_temperature=10.0, direct_alpha=0.5):
         super().__init__()
         assert window % 2 == 1, f"window must be odd, got {window}"
         self.dim = dim
@@ -132,7 +132,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         self.head_dim = dim // self.num_heads
         # direct: attention weights directly mix raw ref values; no V_proj/out_proj shortcut
         self.use_direct_attn = bool(use_direct_attn)
-        self.direct_alpha = 0.5   # center_ref_low anchor, alpha fixed
+        self.direct_alpha = float(direct_alpha)  # style = center_ref + alpha*(weighted_ref - center_ref)
         # qk_norm: cosine similarity attention + learnable temperature
         # prevents Q,K → 0 collapse; small init temperature amplifies tiny cosine differences
         self.use_qk_norm = bool(use_qk_norm)
@@ -433,6 +433,7 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_condition_direct = kwargs.get('ref_condition_direct', False)
             self.ref_condition_qk_norm = kwargs.get('ref_condition_qk_norm', False)
             self.ref_condition_init_temperature = kwargs.get('ref_condition_init_temperature', 10.0)
+            self.ref_condition_direct_alpha = kwargs.get('ref_condition_direct_alpha', 0.5)
             self.ref_condition_downsample = kwargs.get('ref_condition_downsample', 16)
 
         except KeyError as e:
@@ -508,6 +509,7 @@ class ProposedSynthesisModule(nn.Module):
                     use_direct_attn=self.ref_condition_direct,
                     use_qk_norm=self.ref_condition_qk_norm,
                     init_temperature=self.ref_condition_init_temperature,
+                    direct_alpha=self.ref_condition_direct_alpha,
                 )
         elif self.ref_condition_mode == 'conv_fusion':
             # matched conv baseline (only 2.5D; uses K-slice). coarse/dim shared with C.
