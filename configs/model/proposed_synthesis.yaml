@@ -30,7 +30,7 @@ netG_A:
   use_25d_style: ${data.use_25d_style}
   ref_stack_size: ${data.ref_stack_size}
   z_agg_deep: false          # true: 3-layer z_agg (K->hidden->hidden->1), false: 2-layer (K->hidden->1)
-  ref_condition_mode: 'original'  # original | C_coarse_attn (local-window attention)
+  ref_condition_mode: 'original'  # original | C_coarse_attn (attention) | conv_fusion (matched conv baseline)
   ref_condition_coarse: true      # C: true=region-pooled K,V (coarse) | false=full-res K,V (=구 B_local_attn)
   ref_condition_blend: 'none'     # none | center_base (alpha=0.7) | center_ref_low (alpha=0.5)
   ref_condition_rel_bias: false   # true: spatial+slice distance prior on attention score (strength=0.05)

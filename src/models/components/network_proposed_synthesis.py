@@ -344,6 +344,68 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         return style, stats
 
 
+class SliceConvFusionConditioner25D(nn.Module):
+    """Conv counterpart of the attention conditioner (matched baseline).
+
+    Same inputs (source + K ref slices), same role (source-conditioned K-slice
+    fusion), same anchor blend (center_ref + 0.5*(fused - center_ref)).
+    Only difference vs attention: per-slice weights are predicted by a small
+    CONV stack over concat([source, ref_slices]) instead of QK dot-product.
+    Isolates "dynamic metric matching (attention)" vs "learned conv predictor".
+    """
+
+    def __init__(self, dim=16, coarse=True, k=5, blend_alpha=0.5):
+        super().__init__()
+        self.coarse = coarse
+        self.k = k
+        self.blend_alpha = blend_alpha
+        # conv weight-predictor: concat(src, K ref) -> per-slice logits (K)
+        self.weight_net = nn.Sequential(
+            nn.Conv2d(1 + k, dim, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(dim, dim, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(dim, k, 3, padding=1),
+        )
+        _zero_init_last_conv(self.weight_net)  # start uniform (softmax(0)) → mean fusion
+
+    def forward(self, source, ref_stack, out_size):
+        B, K, H, W = ref_stack.shape
+        h, w = out_size
+        center_idx = K // 2
+
+        src_low = F.interpolate(source, size=(h, w), mode='bilinear', align_corners=False)
+        ref_low = F.interpolate(ref_stack, size=(h, w), mode='bilinear', align_corners=False)
+        if self.coarse:
+            region_size = (max(1, h // 2), max(1, w // 2))
+            ref_base = F.adaptive_avg_pool2d(ref_low.view(B * K, 1, h, w), region_size)
+            ref_base = F.interpolate(ref_base, size=(h, w), mode='nearest').view(B, K, h, w)
+        else:
+            ref_base = ref_low
+
+        # source-conditioned per-slice weights via conv (vs attention's QK)
+        logit = self.weight_net(torch.cat([src_low, ref_base], dim=1))  # [B,K,h,w]
+        weight = torch.softmax(logit, dim=1)                            # [B,K,h,w]
+        fused = (weight * ref_base).sum(dim=1, keepdim=True)            # [B,1,h,w]
+
+        center_ref = ref_low[:, center_idx:center_idx + 1]
+        style = center_ref + self.blend_alpha * (fused - center_ref)
+
+        with torch.no_grad():
+            stats = {
+                "base_std": ref_low.std().detach(),
+                "ref_base_std": ref_base.std().detach(),
+                "style_std": style.std().detach(),
+                "style_center_delta": ((style - center_ref).abs().mean()
+                                       / (center_ref.abs().mean() + 1e-8)).detach(),
+                "slice_entropy": _safe_entropy(weight, dim=1, norm_base=K).detach(),
+                "center_slice_weight": weight[:, center_idx].mean().detach(),
+                "max_slice_weight": weight.max(dim=1).values.mean().detach(),
+                "conv_fusion_enabled": torch.as_tensor(1.0, device=style.device),
+            }
+        return style, stats
+
+
 class ProposedSynthesisModule(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
@@ -376,7 +438,7 @@ class ProposedSynthesisModule(nn.Module):
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
 
-        _valid_ref_condition_modes = ['original', 'C_coarse_attn']
+        _valid_ref_condition_modes = ['original', 'C_coarse_attn', 'conv_fusion']
         if self.ref_condition_mode not in _valid_ref_condition_modes:
             raise ValueError(
                 f"Unknown ref_condition_mode={self.ref_condition_mode!r}. "
@@ -446,6 +508,12 @@ class ProposedSynthesisModule(nn.Module):
                     use_direct_attn=self.ref_condition_direct,
                     use_qk_norm=self.ref_condition_qk_norm,
                     init_temperature=self.ref_condition_init_temperature,
+                )
+        elif self.ref_condition_mode == 'conv_fusion':
+            # matched conv baseline (only 2.5D; uses K-slice). coarse/dim shared with C.
+            if self.use_25d_style and self.ref_stack_size >= 1:
+                self.ref_conditioner_25d = SliceConvFusionConditioner25D(
+                    dim=_cd, coarse=_coarse, k=self.ref_stack_size,
                 )
 
         self._last_ref_condition_stats: dict = {}
