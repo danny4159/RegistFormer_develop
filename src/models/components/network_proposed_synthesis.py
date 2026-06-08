@@ -445,8 +445,8 @@ class ProposedSynthesisModule(nn.Module):
                 f"Unknown ref_condition_mode={self.ref_condition_mode!r}. "
                 f"Choose from {_valid_ref_condition_modes}"
             )
-        if self.ref_condition_window not in [1, 3, 5]:
-            raise ValueError(f"ref_condition_window must be 1, 3 or 5, got {self.ref_condition_window}")
+        if self.ref_condition_window < 1 or self.ref_condition_window % 2 == 0:
+            raise ValueError(f"ref_condition_window must be a positive odd int (1/3/5/7/9...), got {self.ref_condition_window}")
 
         if self.is_3d and self.ref_condition_mode != 'original':
             raise NotImplementedError("ref_condition_mode C_coarse_attn은 2D 전용입니다.")
