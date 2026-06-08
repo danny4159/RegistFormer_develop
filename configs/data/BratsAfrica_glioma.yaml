@@ -1,0 +1,47 @@
+##### Dataset Processing Code Implementation #####
+# BraTS-Africa (glioma) — produced by scripts/dummy/bratsafrica_glioma_preprocess.py
+# H5 layout per split: groups t1c / t1n / t2f / t2w / seg
+#   t1c,t1n,t2f,t2w : float32, percentile-clipped + normalized to [-1, 1]
+#   seg             : uint8 integer label map (0/1/2/3), unchanged
+# Shape per dataset: (240, 240, 155). Data is already 1mm isotropic & co-registered
+# (no misalignment / slice-thickness simulation, no _moved set).
+
+## Core setting (Important)
+_target_: src.data.SynthRAD_MR_CT_Pelvis_datamodule.SynthRAD_MR_CT_Pelvis_DataModule
+name: BratsAfrica_glioma
+type: nifti
+data_dir: ${paths.root_dir}/data/BratsAfrica_glioma
+data_group_1: "t2w"        # source input modality
+data_group_2: "t1n"        # target GT modality (synthesis target)
+data_group_3: "t1n"        # reference image (aligned; no _moved set exists)
+data_group_4: null
+data_group_5: null
+data_group_6: null
+data_group_7: null
+is_3d: False # True: 3D processing, False: 2D processing
+batch_size: 1
+num_workers: 6
+pin_memory: False
+use_split_inference: False # Inference for valid and test is divided into half from the original image (for memory issue)
+eval_on_align: False       # use gc/nmi/fid validation metrics (matches ModelCheckpoint monitor val/fid_B)
+use_sliding_inference: False
+use_multiple_outputs: False
+use_triple_outputs: False
+use_misalign_simul: False  # no misalignment simulation (BraTS already aligned)
+use_25d_style: False       # override via CLI (data.use_25d_style=true)
+ref_stack_size: 3
+apply_rigid_registration: False  # data already co-registered → skip 3D rigid reg
+registration_targets: []         # nothing to register
+
+## Dataset File Name
+train_file: 'BratsAfrica_glioma_train.h5'
+val_file: 'BratsAfrica_glioma_val.h5'
+test_file: 'BratsAfrica_glioma_test.h5'
+
+## Preprocessing
+reverse: False
+flip_prob: 0
+rot_prob: 0
+padding_size: null # Padding to height, width   [256, 256] -> [target_height, target_width] or null
+crop_size: null    # Random crop to height, width  [128, 128] -> [target_height, target_width] or null
+norm_ZeroToOne: False # True: Normalize to [0, 1], False: Assume normalized on [-1, 1]
