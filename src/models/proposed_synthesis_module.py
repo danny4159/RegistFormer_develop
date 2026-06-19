@@ -1,3 +1,4 @@
+import math
 import numpy as np
 
 from typing import Any
@@ -438,6 +439,24 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_l1_d = self.criterionL1(_center_slice(real_d_ref), fake_d) * self.params.lambda_l1
                 self.log("L1_d_Loss", loss_l1_d.detach(), prog_bar=True)
                 loss_G += loss_l1_d
+
+        ##################################################################################################################
+        ## 4. Slice attention regularization (patch_slice_fusion only)
+        aux = getattr(self.netG_A, "_last_ref_condition_aux_losses", {})
+
+        lambda_ent = float(getattr(self.params, "lambda_slice_entropy", 0.0))
+        if lambda_ent > 0 and "slice_entropy_raw" in aux:
+            target_eff_k = float(getattr(self.params, "slice_entropy_target_eff_k", 2.0))
+            target_entropy = math.log(max(target_eff_k, 1.0))
+            loss_ent = ((aux["slice_entropy_raw"] - target_entropy) ** 2) * lambda_ent
+            self.log("loss_G/slice_entropy", loss_ent.detach(), prog_bar=False)
+            loss_G = loss_G + loss_ent
+
+        lambda_tv = float(getattr(self.params, "lambda_slice_smoothness", 0.0))
+        if lambda_tv > 0 and "slice_smoothness" in aux:
+            loss_tv = aux["slice_smoothness"] * lambda_tv
+            self.log("loss_G/slice_smoothness", loss_tv.detach(), prog_bar=False)
+            loss_G = loss_G + loss_tv
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
