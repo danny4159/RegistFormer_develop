@@ -89,6 +89,7 @@ params: # Other params
   lambda_nce: 5
   lambda_mind: 0
   lambda_l1: 0
+  lambda_perceptual: 0  # VGG feature L2 perceptual loss (same 2.5D softmin form as contextual)
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
