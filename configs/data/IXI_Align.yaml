@@ -18,7 +18,7 @@ data_group_5: null # PD_moved
 data_group_6: null # MRA (for triple outputs)
 data_group_7: null # MRA_moved (for triple outputs)
 is_3d: False # True: 3D processing, False: 2D processing
-batch_size: 4 #5 #10 #4 #30 #16 #12 #2 #1
+batch_size: 1 #5 #10 #4 #30 #16 #12 #2 #1
 num_workers: 6 # 3
 pin_memory: False
 use_split_inference: False # Inference for valid and test is divided into half from the original image (for memory issue)
@@ -27,8 +27,8 @@ use_sliding_inference: False
 use_multiple_outputs: False
 use_triple_outputs: False  # Set True for 3 outputs (T1, PD, MRA)
 use_misalign_simul: True
-use_25d_style: False
-ref_stack_size: 3
+use_25d_style: True
+ref_stack_size: 5
 apply_rigid_registration: True  # True: training 시작 시 3D rigid registration 수행 후 캐싱
 registration_targets: [3, 5, 7]  # group_1 기준 fixed, 여기 명시된 group만 moving으로 등록 (정의 안된 group은 자동 스킵)
 
@@ -54,7 +54,7 @@ reverse: False # New
 flip_prob: 0 #.5 #0.5
 rot_prob: 0 #.5 #0.5
 padding_size: null # Padding to hegith, width   [256, 256] -> [target_height, target_width] or null
-crop_size: null # Random crop to hegith, width  [128, 128] -> [target_height, target_width] or null
+crop_size: [128, 128] # Random crop to hegith, width  [128, 128] -> [target_height, target_width] or null
 norm_ZeroToOne: False # True: Normalize to [0, 1], False: Assume normalized on [-1, 1]
 
 ## Intenional Misalignment
