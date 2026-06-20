@@ -572,6 +572,9 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
                                    / (center_ref.abs().mean() + 1e-8)).detach(),
             "weighted_ref_center_delta": ((weighted_ref - center_ref).abs().mean()
                                           / (center_ref.abs().mean() + 1e-8)).detach(),
+            "ref_usage_ratio": (
+                (style - center_ref).abs().mean() / ((weighted_ref - center_ref).abs().mean() + 1e-8)
+            ).detach(),
             "ref_base_std": ref_base.std().detach(),
         }
 
