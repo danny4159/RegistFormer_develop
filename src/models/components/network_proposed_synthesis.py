@@ -372,6 +372,7 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         direct_alpha=1.0,
         use_confidence_gate=True,
         confidence_mode='entropy',        # 'entropy' | 'max'
+        confidence_min=0.2,               # floor for confidence (prevents gradient starvation at init)
         detach_confidence=False,
         slice_score_pool='logsumexp',     # 'logsumexp' | 'max' | 'mean'
         spatial_tau=0.5,
@@ -379,13 +380,24 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         use_feature_injection=False,      # Stage 3: decoder feature concat (not yet implemented)
     ):
         super().__init__()
+        _valid_pool = ['logsumexp', 'max', 'mean']
+        if slice_score_pool not in _valid_pool:
+            raise ValueError(f"slice_score_pool={slice_score_pool!r} invalid. Choose from {_valid_pool}")
+        _valid_conf = ['entropy', 'max']
+        if confidence_mode not in _valid_conf:
+            raise ValueError(f"confidence_mode={confidence_mode!r} invalid. Choose from {_valid_conf}")
+        if use_feature_injection:
+            raise NotImplementedError("ref_patch_use_feature_injection is not implemented yet.")
         assert window % 2 == 1, f"window must be odd, got {window}"
+        assert spatial_tau > 0, f"spatial_tau must be > 0, got {spatial_tau}"
+
         self.dim = dim
         self.window = window
         self.coarse = coarse
         self.direct_alpha = float(direct_alpha)
         self.use_confidence_gate = bool(use_confidence_gate)
         self.confidence_mode = confidence_mode
+        self.confidence_min = float(confidence_min)
         self.detach_confidence = bool(detach_confidence)
         self.slice_score_pool = slice_score_pool
         self.spatial_tau = float(spatial_tau)
@@ -456,9 +468,12 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
             ent_norm = torch.zeros_like(ent)
 
         if self.confidence_mode == 'entropy':
-            confidence = 1.0 - ent_norm
+            confidence_raw = 1.0 - ent_norm
         else:  # max
-            confidence = alpha.max(dim=1, keepdim=True).values
+            confidence_raw = alpha.max(dim=1, keepdim=True).values
+
+        # Floor: confidence_min prevents gradient starvation when attention is uniform at init
+        confidence = self.confidence_min + (1.0 - self.confidence_min) * confidence_raw
 
         if self.detach_confidence:
             confidence = confidence.detach()
@@ -487,6 +502,9 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
 
         # ── aux losses (differentiable — no detach) ───────────────────────────
         aux_losses = {}
+        # slice_reg_valid=1 only when K>1; Lightning module gates entropy/smoothness loss by this
+        aux_losses["slice_reg_valid"] = torch.as_tensor(float(K > 1), device=source.device)
+
         if K > 1:
             # Raw entropy mean: Lightning module computes MSE against target
             ent_raw = -(alpha * alpha.clamp_min(1e-8).log()).sum(dim=1)   # [B,h,w]
@@ -658,6 +676,7 @@ class ProposedSynthesisModule(nn.Module):
             # patch_slice_fusion specific options
             self.ref_patch_use_confidence_gate = kwargs.get('ref_patch_use_confidence_gate', True)
             self.ref_patch_confidence_mode = kwargs.get('ref_patch_confidence_mode', 'entropy')
+            self.ref_patch_confidence_min = kwargs.get('ref_patch_confidence_min', 0.2)
             self.ref_patch_detach_confidence = kwargs.get('ref_patch_detach_confidence', False)
             self.ref_patch_slice_score_pool = kwargs.get('ref_patch_slice_score_pool', 'logsumexp')
             self.ref_patch_spatial_tau = kwargs.get('ref_patch_spatial_tau', 0.5)
@@ -756,6 +775,7 @@ class ProposedSynthesisModule(nn.Module):
                     direct_alpha=self.ref_condition_direct_alpha,
                     use_confidence_gate=self.ref_patch_use_confidence_gate,
                     confidence_mode=self.ref_patch_confidence_mode,
+                    confidence_min=self.ref_patch_confidence_min,
                     detach_confidence=self.ref_patch_detach_confidence,
                     slice_score_pool=self.ref_patch_slice_score_pool,
                     spatial_tau=self.ref_patch_spatial_tau,

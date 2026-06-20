@@ -20,7 +20,7 @@ netG_A:
   netG_type: 'proposed_synthesis'
   input_nc: 1
   output_nc: 1
-  feat_ch: 128 #256 # For triple_outputs, use 126 or 132 (multiple of 3)
+  feat_ch: 264 #256 # For triple_outputs, use 126 or 132 (multiple of 3)
   demodulate: true
   use_multiple_outputs: ${data.use_multiple_outputs}
   use_triple_outputs: ${data.use_triple_outputs}
@@ -30,23 +30,24 @@ netG_A:
   use_25d_style: ${data.use_25d_style}
   ref_stack_size: ${data.ref_stack_size}
   z_agg_deep: false          # true: 3-layer z_agg (K->hidden->hidden->1), false: 2-layer (K->hidden->1)
-  ref_condition_mode: 'original'  # original | C_coarse_attn (attention) | conv_fusion (matched conv baseline)
-  ref_condition_coarse: true      # C: true=region-pooled K,V (coarse) | false=full-res K,V (=구 B_local_attn)
+  ref_condition_mode: 'patch_slice_fusion'  # original | C_coarse_attn | conv_fusion | patch_slice_fusion
+  ref_condition_coarse: true      # true=region-pooled K,V (coarse) | false=full-res K,V
   ref_condition_blend: 'none'     # none | center_base (alpha=0.7) | center_ref_low (alpha=0.5)
   ref_condition_rel_bias: false   # true: spatial+slice distance prior on attention score (strength=0.05)
   ref_condition_multihead: false  # true: 4-head local cross-attention (head_dim=4 when dim=16)
   ref_condition_window: 3         # local window size (odd): 1 (slice-only) | 3 | 5
   ref_condition_dim: 16           # hidden dim for conditioner Q/K/V projections (default 16)
-  ref_condition_center_bias: 0.2  # center slice score bias; lower = attention learns more freely (e.g. 0.05)
+  ref_condition_center_bias: 0.0  # center slice score bias (0.0: let attention learn freely)
   ref_condition_direct: false     # true: attention weights directly mix raw ref values (no V_proj/out_proj shortcut)
-  ref_condition_qk_norm: false    # true: cosine similarity QK + learnable temperature (prevents Q,K→0 collapse)
+  ref_condition_qk_norm: true     # true: cosine similarity QK + learnable temperature (prevents Q,K→0 collapse)
   ref_condition_init_temperature: 10.0  # initial temperature for QK softmax (higher=sharper; 3.0=soft, 10.0=default, 30.0=sharp)
-  ref_condition_downsample: 16     # style map downsample factor: 16 (1/16) | 8 | 4 | 2 | 1
-  ref_condition_direct_alpha: 0.5  # style = center_ref + alpha*(weighted_ref - center_ref); 0=center only, 1=full attention
+  ref_condition_downsample: 8      # style map downsample factor: 8 (16×16 patch grid) | 16 (8×8)
+  ref_condition_direct_alpha: 1.0  # style = center_ref + alpha*(weighted_ref - center_ref); 0=center only, 1=full attention
 
   # patch_slice_fusion specific options (used when ref_condition_mode='patch_slice_fusion')
   ref_patch_use_confidence_gate: true       # entropy-based confidence gate
   ref_patch_confidence_mode: 'entropy'      # 'entropy' | 'max'
+  ref_patch_confidence_min: 0.2            # confidence floor (prevents gradient starvation at init)
   ref_patch_detach_confidence: false        # true: confidence is stop-gradient
   ref_patch_slice_score_pool: 'logsumexp'  # 'logsumexp' | 'max' | 'mean'
   ref_patch_spatial_tau: 0.5               # temperature for spatial logsumexp pooling
@@ -85,7 +86,7 @@ netF_A: # For PatchNCELoss
   init_type: 'xavier' #'xavier'
   init_gain: 0.02
   nc: 256
-  input_nc: 512 # ${model.netG_A.feat_ch} #TODO: input_nc must be 'feat_ch * output_nc'  for multiple/triple outputs
+  input_nc: 264 # must match netG_A.feat_ch (single output: feat_ch * 1)
 
 
 
@@ -95,7 +96,7 @@ params: # Other params
   # lambda_cycle_a: 1
   # lambda_cycle_b: 1
   # lambda_sc: 0.1
-  lambda_nce: 5
+  lambda_nce: 1.5
   lambda_mind: 0
   lambda_l1: 0
   lambda_perceptual: 0  # VGG feature L2 perceptual loss (same 2.5D softmin form as contextual)
