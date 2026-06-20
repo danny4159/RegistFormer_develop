@@ -344,6 +344,247 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         return style, stats
 
 
+class PatchwiseSliceFusionConditioner25D(nn.Module):
+    """patch_slice_fusion conditioner — per-patch K-slice soft selection.
+
+    Unlike LocalWindowAttentionConditioner25D (joint K×spatial softmax),
+    this separates slice selection from spatial refinement:
+
+    1) score_kw[B,K,win2,h,w]  — Q at each patch vs K at local neighbors
+    2) score_slice[B,K,h,w]    — pool win2 via logsumexp/max/mean
+    3) alpha = softmax(score_slice * T, dim=K)  ← per-patch slice weights
+    4) weighted_ref = Σ_k alpha_k * ref_k        (Stage 1/2: same-position value)
+       or Σ_k Σ_δ alpha_k * beta_kδ * ref_k(p+δ) (Stage 3: spatial value fusion)
+    5) confidence = f(entropy of alpha)
+    6) style = center_ref + direct_alpha * confidence * (weighted_ref - center_ref)
+
+    Returns (style, stats, aux_losses).
+    aux_losses contains differentiable tensors for entropy/smoothness regularization.
+    """
+
+    def __init__(
+        self,
+        dim=16,
+        window=3,
+        coarse=True,
+        use_qk_norm=True,
+        init_temperature=10.0,
+        direct_alpha=1.0,
+        use_confidence_gate=True,
+        confidence_mode='entropy',        # 'entropy' | 'max'
+        confidence_min=0.2,               # floor for confidence (prevents gradient starvation at init)
+        detach_confidence=False,
+        slice_score_pool='logsumexp',     # 'logsumexp' | 'max' | 'mean'
+        spatial_tau=0.5,
+        use_spatial_value_fusion=False,   # Stage 3: value also from local window
+        use_feature_injection=False,      # Stage 3: decoder feature concat (not yet implemented)
+    ):
+        super().__init__()
+        _valid_pool = ['logsumexp', 'max', 'mean']
+        if slice_score_pool not in _valid_pool:
+            raise ValueError(f"slice_score_pool={slice_score_pool!r} invalid. Choose from {_valid_pool}")
+        _valid_conf = ['entropy', 'max']
+        if confidence_mode not in _valid_conf:
+            raise ValueError(f"confidence_mode={confidence_mode!r} invalid. Choose from {_valid_conf}")
+        if use_feature_injection:
+            raise NotImplementedError("ref_patch_use_feature_injection is not implemented yet.")
+        assert window % 2 == 1, f"window must be odd, got {window}"
+        assert spatial_tau > 0, f"spatial_tau must be > 0, got {spatial_tau}"
+
+        self.dim = dim
+        self.window = window
+        self.coarse = coarse
+        self.direct_alpha = float(direct_alpha)
+        self.use_confidence_gate = bool(use_confidence_gate)
+        self.confidence_mode = confidence_mode
+        self.confidence_min = float(confidence_min)
+        self.detach_confidence = bool(detach_confidence)
+        self.slice_score_pool = slice_score_pool
+        self.spatial_tau = float(spatial_tau)
+        self.use_spatial_value_fusion = bool(use_spatial_value_fusion)
+        self.use_qk_norm = bool(use_qk_norm)
+
+        if self.use_qk_norm:
+            self.log_temperature = nn.Parameter(torch.tensor(math.log(float(init_temperature))))
+
+        self.q_proj = nn.Conv2d(1, dim, 1)
+        self.k_proj = nn.Conv2d(1, dim, 1)
+
+    def _unfold_same(self, x, win):
+        return F.unfold(x, kernel_size=win, padding=win // 2)
+
+    def forward(self, source, ref_stack, out_size):
+        B, K, _, _ = ref_stack.shape
+        h, w = out_size
+        center_idx = K // 2
+        win = self.window
+        win2 = win * win
+
+        src_low = F.interpolate(source, size=(h, w), mode='bilinear', align_corners=False)
+        ref_low = F.interpolate(ref_stack, size=(h, w), mode='bilinear', align_corners=False)  # [B,K,h,w]
+
+        if self.coarse:
+            region_size = (max(1, h // 2), max(1, w // 2))
+            ref_base = F.adaptive_avg_pool2d(ref_low.view(B * K, 1, h, w), region_size)
+            ref_base = F.interpolate(ref_base, size=(h, w), mode='nearest').view(B, K, h, w)
+        else:
+            ref_base = ref_low
+
+        # ── Q/K projection ───────────────────────────────────────────────────
+        q = self.q_proj(src_low)                                                       # [B,C,h,w]
+        k = self.k_proj(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.dim, h, w)  # [B,K,C,h,w]
+
+        if self.use_qk_norm:
+            q = F.normalize(q, dim=1, eps=1e-8)
+            k = F.normalize(k, dim=2, eps=1e-8)
+            temperature = self.log_temperature.exp()
+        else:
+            temperature = torch.tensor(1.0 / math.sqrt(self.dim), device=q.device, dtype=q.dtype)
+
+        # ── per-patch per-slice score via local window ────────────────────────
+        # k_unfold: [B, K, C, win2, h, w]
+        k_unfold = self._unfold_same(k.reshape(B * K, self.dim, h, w), win)
+        k_unfold = k_unfold.view(B, K, self.dim, win2, h, w)
+
+        # score_kw: [B, K, win2, h, w]
+        score_kw = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) * temperature
+
+        # Pool spatial window → per-patch per-slice score: [B, K, h, w]
+        if self.slice_score_pool == 'logsumexp':
+            score_slice = torch.logsumexp(score_kw / self.spatial_tau, dim=2) * self.spatial_tau
+        elif self.slice_score_pool == 'max':
+            score_slice = score_kw.max(dim=2).values
+        else:  # mean
+            score_slice = score_kw.mean(dim=2)
+
+        # ── K-direction softmax: per-patch slice weights ──────────────────────
+        alpha = torch.softmax(score_slice, dim=1)  # [B, K, h, w]
+
+        # ── confidence from alpha entropy ─────────────────────────────────────
+        ent = -(alpha * alpha.clamp_min(1e-8).log()).sum(dim=1, keepdim=True)  # [B,1,h,w]
+        if K > 1:
+            ent_norm = ent / math.log(K)
+        else:
+            ent_norm = torch.zeros_like(ent)
+
+        if self.confidence_mode == 'entropy':
+            confidence_raw = 1.0 - ent_norm
+        else:  # max
+            confidence_raw = alpha.max(dim=1, keepdim=True).values
+
+        # Floor: confidence_min prevents gradient starvation when attention is uniform at init
+        confidence = self.confidence_min + (1.0 - self.confidence_min) * confidence_raw
+
+        if self.detach_confidence:
+            confidence = confidence.detach()
+
+        # ── weighted ref ──────────────────────────────────────────────────────
+        center_ref = ref_low[:, center_idx:center_idx + 1]  # [B,1,h,w]
+
+        if self.use_spatial_value_fusion:
+            # Stage 3: weighted sum over both K slices AND local spatial window
+            ref_base_unfold = self._unfold_same(
+                ref_base.reshape(B * K, 1, h, w), win
+            ).view(B, K, win2, h, w)  # [B,K,win2,h,w]
+
+            beta = torch.softmax(score_kw / self.spatial_tau, dim=2)     # [B,K,win2,h,w]
+            alpha_beta = alpha.unsqueeze(2) * beta                        # [B,K,win2,h,w]
+            weighted_ref = (alpha_beta * ref_base_unfold).sum(dim=(1, 2)).unsqueeze(1)  # [B,1,h,w]
+        else:
+            # Stage 1/2: same-position value, only K-direction fusion
+            weighted_ref = (alpha * ref_base).sum(dim=1, keepdim=True)   # [B,1,h,w]
+
+        # ── final style with confidence gate ─────────────────────────────────
+        if self.use_confidence_gate:
+            style = center_ref + self.direct_alpha * confidence * (weighted_ref - center_ref)
+        else:
+            style = center_ref + self.direct_alpha * (weighted_ref - center_ref)
+
+        # ── aux losses (differentiable — no detach) ───────────────────────────
+        aux_losses = {}
+        # slice_reg_valid=1 only when K>1; Lightning module gates entropy/smoothness loss by this
+        aux_losses["slice_reg_valid"] = torch.as_tensor(float(K > 1), device=source.device)
+
+        if K > 1:
+            # Raw entropy mean: Lightning module computes MSE against target
+            ent_raw = -(alpha * alpha.clamp_min(1e-8).log()).sum(dim=1)   # [B,h,w]
+            aux_losses["slice_entropy_raw"] = ent_raw.mean()
+
+            # TV smoothness on alpha
+            dy = (alpha[:, :, 1:, :] - alpha[:, :, :-1, :]).abs().mean()
+            dx = (alpha[:, :, :, 1:] - alpha[:, :, :, :-1]).abs().mean()
+            aux_losses["slice_smoothness"] = dx + dy
+        else:
+            aux_losses["slice_entropy_raw"] = torch.zeros([], device=source.device)
+            aux_losses["slice_smoothness"] = torch.zeros([], device=source.device)
+
+        # ── stats (detached, for TensorBoard logging) ─────────────────────────
+        with torch.no_grad():
+            alpha_det = alpha.detach()
+            ent_det = -(alpha_det * alpha_det.clamp_min(1e-8).log()).sum(dim=1)   # [B,h,w]
+            ent_norm_det = ent_det / max(math.log(K), 1e-8) if K > 1 else torch.zeros_like(ent_det)
+            eff_k = torch.exp(ent_det)
+            max_w = alpha_det.max(dim=1).values
+
+            if K >= 2:
+                top2_vals = alpha_det.topk(k=min(2, K), dim=1).values
+                top1_w = top2_vals[:, 0]
+                top2_w = top2_vals[:, 1]
+                top2_mass = top2_vals.sum(dim=1)
+            else:
+                top1_w = alpha_det[:, 0]
+                top2_w = torch.zeros_like(top1_w)
+                top2_mass = top1_w.clone()
+
+            center_w = alpha_det[:, center_idx]
+            slice_offsets = torch.arange(K, device=alpha.device, dtype=alpha.dtype) - center_idx
+            expected_abs_offset = (alpha_det * slice_offsets.abs().view(1, K, 1, 1)).sum(dim=1)
+
+            score_det = score_slice.detach()
+            if K >= 2:
+                top2_scores = score_det.topk(k=2, dim=1).values
+                score_margin_val = (top2_scores[:, 0] - top2_scores[:, 1]).mean()
+            else:
+                score_margin_val = torch.zeros([], device=source.device)
+
+            temperature_val = (self.log_temperature.exp().detach()
+                               if self.use_qk_norm else torch.zeros(1, device=style.device).squeeze())
+
+        stats = {
+            "slice_entropy_norm": ent_norm_det.mean(),
+            "slice_eff_k": eff_k.mean(),
+            "slice_max_weight": max_w.mean(),
+            "slice_top1_weight": top1_w.mean(),
+            "slice_top2_weight": top2_w.mean(),
+            "slice_top2_mass": top2_mass.mean(),
+            "center_slice_weight": center_w.mean(),
+            "expected_abs_slice_offset": expected_abs_offset.mean(),
+            "confidence_mean": confidence.detach().mean(),
+            "confidence_std": confidence.detach().std(),
+            "slice_weight_margin_top1_top2": (top1_w - top2_w).mean(),
+            "slice_score_std": score_det.std(),
+            "qk_temperature": temperature_val,
+            "q_abs": q.detach().abs().mean(),
+            "k_abs": k.detach().abs().mean(),
+            "weighted_ref_std": weighted_ref.detach().std(),
+            "style_std": style.detach().std(),
+            "style_center_delta": ((style - center_ref).abs().mean()
+                                   / (center_ref.abs().mean() + 1e-8)).detach(),
+            "weighted_ref_center_delta": ((weighted_ref - center_ref).abs().mean()
+                                          / (center_ref.abs().mean() + 1e-8)).detach(),
+            "ref_usage_ratio": (
+                (style - center_ref).abs().mean() / ((weighted_ref - center_ref).abs().mean() + 1e-8)
+            ).detach(),
+            "ref_base_std": ref_base.std().detach(),
+        }
+
+        for i in range(K):
+            offset = i - center_idx
+            stats[f"slice_weight_{offset:+d}"] = alpha_det[:, i].mean()
+
+        return style, stats, aux_losses
+
+
 class SliceConvFusionConditioner25D(nn.Module):
     """Conv counterpart of the attention conditioner (matched baseline).
 
@@ -435,11 +676,20 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_condition_init_temperature = kwargs.get('ref_condition_init_temperature', 10.0)
             self.ref_condition_direct_alpha = kwargs.get('ref_condition_direct_alpha', 0.5)
             self.ref_condition_downsample = kwargs.get('ref_condition_downsample', 16)
+            # patch_slice_fusion specific options
+            self.ref_patch_use_confidence_gate = kwargs.get('ref_patch_use_confidence_gate', True)
+            self.ref_patch_confidence_mode = kwargs.get('ref_patch_confidence_mode', 'entropy')
+            self.ref_patch_confidence_min = kwargs.get('ref_patch_confidence_min', 0.2)
+            self.ref_patch_detach_confidence = kwargs.get('ref_patch_detach_confidence', False)
+            self.ref_patch_slice_score_pool = kwargs.get('ref_patch_slice_score_pool', 'logsumexp')
+            self.ref_patch_spatial_tau = kwargs.get('ref_patch_spatial_tau', 0.5)
+            self.ref_patch_use_spatial_value_fusion = kwargs.get('ref_patch_use_spatial_value_fusion', False)
+            self.ref_patch_use_feature_injection = kwargs.get('ref_patch_use_feature_injection', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
 
-        _valid_ref_condition_modes = ['original', 'C_coarse_attn', 'conv_fusion']
+        _valid_ref_condition_modes = ['original', 'C_coarse_attn', 'conv_fusion', 'patch_slice_fusion']
         if self.ref_condition_mode not in _valid_ref_condition_modes:
             raise ValueError(
                 f"Unknown ref_condition_mode={self.ref_condition_mode!r}. "
@@ -449,9 +699,9 @@ class ProposedSynthesisModule(nn.Module):
             raise ValueError(f"ref_condition_window must be a positive odd int (1/3/5/7/9...), got {self.ref_condition_window}")
 
         if self.is_3d and self.ref_condition_mode != 'original':
-            raise NotImplementedError("ref_condition_mode C_coarse_attn은 2D 전용입니다.")
+            raise NotImplementedError("ref_condition_mode는 2D 전용입니다.")
         if (self.use_multiple_outputs or self.use_triple_outputs) and self.ref_condition_mode != 'original':
-            raise NotImplementedError("ref_condition_mode C_coarse_attn은 단일 출력 모드에서만 지원됩니다.")
+            raise NotImplementedError("ref_condition_mode는 단일 출력 모드에서만 지원됩니다.")
 
         Conv, _, _ = get_layer_by_dim(self.is_3d)
 
@@ -517,8 +767,27 @@ class ProposedSynthesisModule(nn.Module):
                 self.ref_conditioner_25d = SliceConvFusionConditioner25D(
                     dim=_cd, coarse=_coarse, k=self.ref_stack_size,
                 )
+        elif self.ref_condition_mode == 'patch_slice_fusion':
+            if self.use_25d_style and self.ref_stack_size >= 1:
+                self.ref_conditioner_25d = PatchwiseSliceFusionConditioner25D(
+                    dim=_cd,
+                    window=self.ref_condition_window,
+                    coarse=_coarse,
+                    use_qk_norm=self.ref_condition_qk_norm,
+                    init_temperature=self.ref_condition_init_temperature,
+                    direct_alpha=self.ref_condition_direct_alpha,
+                    use_confidence_gate=self.ref_patch_use_confidence_gate,
+                    confidence_mode=self.ref_patch_confidence_mode,
+                    confidence_min=self.ref_patch_confidence_min,
+                    detach_confidence=self.ref_patch_detach_confidence,
+                    slice_score_pool=self.ref_patch_slice_score_pool,
+                    spatial_tau=self.ref_patch_spatial_tau,
+                    use_spatial_value_fusion=self.ref_patch_use_spatial_value_fusion,
+                    use_feature_injection=self.ref_patch_use_feature_injection,
+                )
 
         self._last_ref_condition_stats: dict = {}
+        self._last_ref_condition_aux_losses: dict = {}
 
         self.guide_net = nn.Sequential(
             nn.Conv2d(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
@@ -634,9 +903,11 @@ class ProposedSynthesisModule(nn.Module):
     def _make_ref_condition(self, source, ref_all, encode_only=False):
         """Returns (base_style, aux_style), both [B,1,h,w].
 
-        original        : z_agg(2.5D) / nearest-downsampled(2D) ref as style
-        C_coarse_attn   : local-window attention conditioner replaces style
-                          (coarse=True: region-pooled K,V | coarse=False: full-res)
+        original          : z_agg(2.5D) / nearest-downsampled(2D) ref as style
+        C_coarse_attn     : joint K×spatial local-window attention
+        conv_fusion       : matched conv baseline
+        patch_slice_fusion: per-patch K-direction softmax + confidence gate
+                            returns 3-tuple (style, stats, aux_losses)
         aux_style is always None (kept for forward signature compatibility).
         """
         h, w = self._style_size(source)
@@ -648,11 +919,15 @@ class ProposedSynthesisModule(nn.Module):
                 return F.interpolate(base_ref, size=(h, w), mode='nearest'), None
 
             ref_stack = self._get_ref_stack(ref_all)                 # [B,K,H,W]
-            cond_style, stats = self.ref_conditioner_25d(
-                source=source, ref_stack=ref_stack, out_size=(h, w)
-            )
+            out = self.ref_conditioner_25d(source=source, ref_stack=ref_stack, out_size=(h, w))
+            if len(out) == 3:
+                cond_style, stats, aux_losses = out
+            else:
+                cond_style, stats = out
+                aux_losses = {}
             if not encode_only:
                 self._last_ref_condition_stats = stats
+                self._last_ref_condition_aux_losses = aux_losses
             return cond_style, None
 
         # ── 2D path ────────────────────────────────────────────────────────
@@ -665,6 +940,7 @@ class ProposedSynthesisModule(nn.Module):
         )
         if not encode_only:
             self._last_ref_condition_stats = stats
+            self._last_ref_condition_aux_losses = {}
         return cond_style, None
 
     def forward(self, merged_input, layers=[], encode_only=False):

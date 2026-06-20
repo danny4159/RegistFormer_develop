@@ -1,14 +1,39 @@
+import math
 import numpy as np
 
 from typing import Any
 import itertools
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from src.losses.gan_loss import GANLoss
 from src.losses.contextual_loss import Contextual_Loss, VGG_Model
 from src.losses.patch_nce_loss import PatchNCELoss
 from src.losses.mind_loss import MINDLoss
+
+
+class PerceptualVGGLoss(nn.Module):
+    """VGG feature L2 perceptual loss (Johnson et al.).
+    Uses the same VGG layers as contextual loss but computes MSE on features instead of contextual similarity.
+    """
+    def __init__(self, feat_layers: dict):
+        super().__init__()
+        self.vgg = VGG_Model(listen_list=list(feat_layers.keys()))
+        self.weights = feat_layers
+
+    def forward(self, fake: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+        if fake.shape[1] == 1:
+            fake = fake.repeat(1, 3, 1, 1)
+        if ref.shape[1] == 1:
+            ref = ref.repeat(1, 3, 1, 1)
+        fake_feats = self.vgg(fake)
+        with torch.no_grad():
+            ref_feats = self.vgg(ref)
+        loss = torch.tensor(0.0, device=fake.device)
+        for layer, w in self.weights.items():
+            loss = loss + w * F.mse_loss(fake_feats[layer], ref_feats[layer])
+        return loss
 
 from src import utils
 from src.models.base_module_AtoB_BtoA import BaseModule_AtoB_BtoA
@@ -71,6 +96,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
         # loss function
         self.criterionContextual = Contextual_Loss(style_feat_layers) if params.lambda_style != 0 else None
+        lambda_perceptual = getattr(params, 'lambda_perceptual', 0)
+        self.criterionPerceptual = PerceptualVGGLoss(style_feat_layers) if lambda_perceptual != 0 else None
         self.criterionGAN = GANLoss(gan_type='lsgan')
         self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size) if params.lambda_nce != 0 else None
 
@@ -111,6 +138,26 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         shift_penalty_base = getattr(self.params, 'ctx_shift_penalty', 0.05)
         shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
         return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
+
+    def _perceptual_stack_loss(self, fake_img, ref_stack, lambda_perceptual):
+        """VGG perceptual loss for 2.5D ref stack — same softmin aggregation as contextual."""
+        K = ref_stack.shape[1]
+        center_idx = K // 2
+        p_losses = [self.criterionPerceptual(fake_img, ref_stack[:, i:i+1]).squeeze() for i in range(K)]
+        tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
+        shift_penalty_base = getattr(self.params, 'ctx_shift_penalty', 0.05)
+        shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
+        return self._softmin_contextual(p_losses, shift_penalties, tau) * lambda_perceptual
+
+    def _l1_stack_loss(self, fake_img, ref_stack, lambda_l1):
+        """L1 loss for 2.5D ref stack — same softmin aggregation as contextual."""
+        K = ref_stack.shape[1]
+        center_idx = K // 2
+        l1_losses = [self.criterionL1(fake_img, ref_stack[:, i:i+1]).squeeze() for i in range(K)]
+        tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
+        shift_penalty_base = getattr(self.params, 'ctx_shift_penalty', 0.05)
+        shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
+        return self._softmin_contextual(l1_losses, shift_penalties, tau) * lambda_l1
 
     def _setup_style_debug_flags(self):
         if not hasattr(self, 'netG_A'):
@@ -191,6 +238,24 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                         loss_style_d = self.criterionContextual(eff_d, fake_d) * self.params.lambda_style
                     self.log("Context_d_Loss", loss_style_d.detach(), prog_bar=True)
                     loss_G += loss_style_d.squeeze()
+
+        ##################################################################################################################
+        ## 2b. Perceptual loss (VGG feature L2, same 2.5D softmin aggregation as contextual)
+        if self.criterionPerceptual:
+            lambda_perceptual = getattr(self.params, 'lambda_perceptual', 0)
+            if use_25d and eff_b is not None:
+                loss_perceptual_b = self._perceptual_stack_loss(fake_b, eff_b, lambda_perceptual)
+            else:
+                loss_perceptual_b = self.criterionPerceptual(fake_b, eff_b) * lambda_perceptual
+            self.log("Perceptual_b_Loss", loss_perceptual_b.detach(), prog_bar=True)
+            loss_G += loss_perceptual_b
+
+        ##################################################################################################################
+        ## 2c. L1 stack loss (2.5D softmin, replaces old center-slice-only L1)
+        if self.criterionL1 and use_25d and eff_b is not None:
+            loss_l1_b = self._l1_stack_loss(fake_b, eff_b, self.params.lambda_l1)
+            self.log("L1_b_Loss", loss_l1_b.detach(), prog_bar=True)
+            loss_G += loss_l1_b
 
         ##################################################################################################################
         ## 3. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
@@ -355,8 +420,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 self.log("MIND_d_Loss", loss_mind_d.detach(), prog_bar=True)
                 loss_G += loss_mind_d
 
-        if self.criterionL1:
-            # For 2.5D: L1 uses center slice of stack
+        if self.criterionL1 and not use_25d:
+            # 2D case: L1 uses center slice (2.5D case handled above in section 2c)
             def _center_slice(t):
                 if t is not None and use_25d and t.shape[1] > 1:
                     return t[:, t.shape[1] // 2: t.shape[1] // 2 + 1]
@@ -374,6 +439,26 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 loss_l1_d = self.criterionL1(_center_slice(real_d_ref), fake_d) * self.params.lambda_l1
                 self.log("L1_d_Loss", loss_l1_d.detach(), prog_bar=True)
                 loss_G += loss_l1_d
+
+        ##################################################################################################################
+        ## 4. Slice attention regularization (patch_slice_fusion only)
+        aux = getattr(self.netG_A, "_last_ref_condition_aux_losses", {})
+        # slice_reg_valid=1 only when K>1; prevents constant entropy loss when K=1
+        slice_reg_valid = float(aux.get("slice_reg_valid", 1.0))
+
+        lambda_ent = float(getattr(self.params, "lambda_slice_entropy", 0.0))
+        if lambda_ent > 0 and "slice_entropy_raw" in aux:
+            target_eff_k = float(getattr(self.params, "slice_entropy_target_eff_k", 2.0))
+            target_entropy = math.log(max(target_eff_k, 1.0))
+            loss_ent = slice_reg_valid * ((aux["slice_entropy_raw"] - target_entropy) ** 2) * lambda_ent
+            self.log("loss_G/slice_entropy", loss_ent.detach(), prog_bar=False)
+            loss_G = loss_G + loss_ent
+
+        lambda_tv = float(getattr(self.params, "lambda_slice_smoothness", 0.0))
+        if lambda_tv > 0 and "slice_smoothness" in aux:
+            loss_tv = slice_reg_valid * aux["slice_smoothness"] * lambda_tv
+            self.log("loss_G/slice_smoothness", loss_tv.detach(), prog_bar=False)
+            loss_G = loss_G + loss_tv
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
