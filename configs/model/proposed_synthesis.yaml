@@ -52,6 +52,10 @@ netG_A:
   ref_patch_spatial_tau: 0.5               # temperature for spatial logsumexp pooling
   ref_patch_use_spatial_value_fusion: false # Stage 3: value also from local spatial window
   ref_patch_use_feature_injection: false    # Stage 3: decoder feature injection (not yet implemented)
+  ref_patch_fixed_temperature: false        # true: temperature frozen (buffer), false: learnable
+  ref_patch_selector_target_mode: 'none'   # 'none' | 'edge' | 'mind' — teacher target for alpha
+  ref_patch_selector_target_tau: 0.2       # softmax temperature for target_alpha
+  ref_patch_selector_target_detach: true   # true: target_alpha is stop-gradient
   # init_type: 'kaiming'
 
 netD_A:
@@ -104,6 +108,7 @@ params: # Other params
   lambda_slice_entropy: 0.02        # MSE loss: (mean_entropy - log(target_eff_k))^2
   lambda_slice_smoothness: 0.005    # TV loss on alpha[B,K,h,w]
   slice_entropy_target_eff_k: 2.0   # target effective slice count (entropy = log(2) ≈ 0.693)
+  lambda_slice_target: 0.0          # KL(target_alpha || alpha) loss weight (0=off)
 
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}

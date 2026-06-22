@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from src.losses.mind_loss import mind as _mind_fn
 
 
 def get_layer_by_dim(is_3d):
@@ -344,6 +345,34 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         return style, stats
 
 
+def _gradient_mag_2d(x: torch.Tensor) -> torch.Tensor:
+    """Gradient magnitude for [B,1,H,W] or [B,K,H,W] tensors."""
+    B, C, H, W = x.shape
+    x_ = x.reshape(B * C, 1, H, W)
+    dx = F.pad(x_[..., :, 1:] - x_[..., :, :-1], (0, 1, 0, 0))
+    dy = F.pad(x_[..., 1:, :] - x_[..., :-1, :], (0, 0, 0, 1))
+    g = torch.sqrt(dx * dx + dy * dy + 1e-8)
+    return g.reshape(B, C, H, W)
+
+
+def _mind_desc_2d_batched(
+    x: torch.Tensor,
+    sigma: float = 2.0,
+    eps: float = 1e-5,
+    neigh_size: int = 9,
+    patch_size: int = 7,
+) -> torch.Tensor:
+    """Compute MIND descriptor for a batch of [N,1,H,W] images.
+
+    Returns [N, C, H', W'] where H' = H - reduce_size*2.
+    """
+    desc = _mind_fn(x, sigma=sigma, eps=eps, neigh_size=neigh_size, patch_size=patch_size)
+    # desc: [N, 1, H', W', C]
+    desc = desc.squeeze(1)           # [N, H', W', C]
+    desc = desc.permute(0, 3, 1, 2)  # [N, C, H', W']
+    return desc.contiguous()
+
+
 class PatchwiseSliceFusionConditioner25D(nn.Module):
     """patch_slice_fusion conditioner — per-patch K-slice soft selection.
 
@@ -378,6 +407,14 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         spatial_tau=0.5,
         use_spatial_value_fusion=False,   # Stage 3: value also from local window
         use_feature_injection=False,      # Stage 3: decoder feature concat (not yet implemented)
+        fixed_temperature=False,          # True: temperature is frozen (buffer), False: learnable
+        selector_target_mode='none',      # 'none' | 'edge' | 'mind'
+        selector_target_tau=0.2,
+        selector_target_detach=True,
+        mind_sigma=2.0,
+        mind_eps=1e-5,
+        mind_neigh_size=9,
+        mind_patch_size=7,
     ):
         super().__init__()
         _valid_pool = ['logsumexp', 'max', 'mean']
@@ -386,6 +423,9 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         _valid_conf = ['entropy', 'max']
         if confidence_mode not in _valid_conf:
             raise ValueError(f"confidence_mode={confidence_mode!r} invalid. Choose from {_valid_conf}")
+        _valid_sel = ['none', 'edge', 'mind']
+        if selector_target_mode not in _valid_sel:
+            raise ValueError(f"selector_target_mode={selector_target_mode!r}, choose from {_valid_sel}")
         if use_feature_injection:
             raise NotImplementedError("ref_patch_use_feature_injection is not implemented yet.")
         assert window % 2 == 1, f"window must be odd, got {window}"
@@ -403,9 +443,25 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         self.spatial_tau = float(spatial_tau)
         self.use_spatial_value_fusion = bool(use_spatial_value_fusion)
         self.use_qk_norm = bool(use_qk_norm)
+        self.fixed_temperature = bool(fixed_temperature)
 
         if self.use_qk_norm:
-            self.log_temperature = nn.Parameter(torch.tensor(math.log(float(init_temperature))))
+            if self.fixed_temperature:
+                self.register_buffer(
+                    "temperature_buffer",
+                    torch.tensor(float(init_temperature), dtype=torch.float32),
+                )
+            else:
+                self.log_temperature = nn.Parameter(torch.tensor(math.log(float(init_temperature))))
+
+        # selector target
+        self.selector_target_mode = selector_target_mode
+        self.selector_target_tau = float(selector_target_tau)
+        self.selector_target_detach = bool(selector_target_detach)
+        self.mind_sigma = float(mind_sigma)
+        self.mind_eps = float(mind_eps)
+        self.mind_neigh_size = int(mind_neigh_size)
+        self.mind_patch_size = int(mind_patch_size)
 
         self.q_proj = nn.Conv2d(1, dim, 1)
         self.k_proj = nn.Conv2d(1, dim, 1)
@@ -437,9 +493,12 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         if self.use_qk_norm:
             q = F.normalize(q, dim=1, eps=1e-8)
             k = F.normalize(k, dim=2, eps=1e-8)
-            temperature = self.log_temperature.exp()
+            if self.fixed_temperature:
+                temperature = self.temperature_buffer.to(device=q.device, dtype=q.dtype)
+            else:
+                temperature = self.log_temperature.exp().clamp(0.1, 50.0)
         else:
-            temperature = torch.tensor(1.0 / math.sqrt(self.dim), device=q.device, dtype=q.dtype)
+            temperature = torch.as_tensor(1.0 / math.sqrt(self.dim), device=q.device, dtype=q.dtype)
 
         # ── per-patch per-slice score via local window ────────────────────────
         # k_unfold: [B, K, C, win2, h, w]
@@ -459,6 +518,38 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
 
         # ── K-direction softmax: per-patch slice weights ──────────────────────
         alpha = torch.softmax(score_slice, dim=1)  # [B, K, h, w]
+
+        # ── selector target (MIND/edge teacher for alpha) ─────────────────────
+        target_alpha = None
+        selector_dist = None
+
+        if K > 1 and self.selector_target_mode != 'none':
+            with torch.no_grad() if self.selector_target_detach else torch.enable_grad():
+                if self.selector_target_mode == 'edge':
+                    src_edge = _gradient_mag_2d(src_low)   # [B,1,h,w]
+                    ref_edge = _gradient_mag_2d(ref_low)   # [B,K,h,w]
+                    selector_dist = (ref_edge - src_edge).abs()  # [B,K,h,w]
+
+                elif self.selector_target_mode == 'mind':
+                    B_orig = source.shape[0]
+                    # Batch source + all ref slices together for efficiency
+                    ref_for_mind = ref_stack.reshape(B_orig * K, 1, *ref_stack.shape[2:])
+                    all_imgs = torch.cat([source, ref_for_mind], dim=0)  # [B*(K+1),1,H,W]
+                    desc_all = _mind_desc_2d_batched(
+                        all_imgs,
+                        sigma=self.mind_sigma, eps=self.mind_eps,
+                        neigh_size=self.mind_neigh_size, patch_size=self.mind_patch_size,
+                    )  # [B*(K+1), C, H', W']
+                    src_desc = desc_all[:B_orig]              # [B, C, H', W']
+                    ref_desc_flat = desc_all[B_orig:]         # [B*K, C, H', W']
+                    C_m, Hm, Wm = ref_desc_flat.shape[1], ref_desc_flat.shape[2], ref_desc_flat.shape[3]
+                    ref_desc = ref_desc_flat.reshape(B_orig, K, C_m, Hm, Wm)  # [B,K,C,H',W']
+                    dist_full = (ref_desc - src_desc.unsqueeze(1)).abs().mean(dim=2)  # [B,K,H',W']
+                    selector_dist = F.interpolate(dist_full, size=(h, w), mode='bilinear', align_corners=False)
+
+                target_alpha = torch.softmax(
+                    -selector_dist / max(self.selector_target_tau, 1e-6), dim=1
+                )  # [B,K,h,w]
 
         # ── confidence from alpha entropy ─────────────────────────────────────
         ent = -(alpha * alpha.clamp_min(1e-8).log()).sum(dim=1, keepdim=True)  # [B,1,h,w]
@@ -497,8 +588,10 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         # ── final style with confidence gate ─────────────────────────────────
         if self.use_confidence_gate:
             style = center_ref + self.direct_alpha * confidence * (weighted_ref - center_ref)
+            effective_confidence = confidence
         else:
             style = center_ref + self.direct_alpha * (weighted_ref - center_ref)
+            effective_confidence = torch.ones_like(weighted_ref)
 
         # ── aux losses (differentiable — no detach) ───────────────────────────
         aux_losses = {}
@@ -514,6 +607,14 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
             dy = (alpha[:, :, 1:, :] - alpha[:, :, :-1, :]).abs().mean()
             dx = (alpha[:, :, :, 1:] - alpha[:, :, :, :-1]).abs().mean()
             aux_losses["slice_smoothness"] = dx + dy
+
+            # Selector target KL loss
+            if target_alpha is not None:
+                _eps = 1e-8
+                slice_target_kl = (
+                    target_alpha * ((target_alpha + _eps).log() - (alpha + _eps).log())
+                ).sum(dim=1).mean()
+                aux_losses["slice_target_kl"] = slice_target_kl
         else:
             aux_losses["slice_entropy_raw"] = torch.zeros([], device=source.device)
             aux_losses["slice_smoothness"] = torch.zeros([], device=source.device)
@@ -547,40 +648,77 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
             else:
                 score_margin_val = torch.zeros([], device=source.device)
 
-            temperature_val = (self.log_temperature.exp().detach()
-                               if self.use_qk_norm else torch.zeros(1, device=style.device).squeeze())
+            if self.use_qk_norm:
+                if self.fixed_temperature:
+                    temperature_val = self.temperature_buffer.detach().to(device=style.device)
+                else:
+                    temperature_val = self.log_temperature.exp().detach()
+            else:
+                temperature_val = torch.zeros(1, device=style.device).squeeze()
+
+        eps = 1e-8
+        uniform_w = 1.0 / float(K)
+        weighted_delta_abs = (weighted_ref - center_ref).abs().mean().detach()
+        style_delta_abs = (style - center_ref).abs().mean().detach()
 
         stats = {
             "slice_entropy_norm": ent_norm_det.mean(),
             "slice_eff_k": eff_k.mean(),
+            "slice_eff_k_over_K": (eff_k.mean() / float(K)).detach(),
+            "slice_eff_k_gap_to_K": (float(K) - eff_k.mean()).detach(),
             "slice_max_weight": max_w.mean(),
             "slice_top1_weight": top1_w.mean(),
+            "slice_top1_over_uniform": (top1_w.mean() / uniform_w).detach(),
             "slice_top2_weight": top2_w.mean(),
             "slice_top2_mass": top2_mass.mean(),
             "center_slice_weight": center_w.mean(),
             "expected_abs_slice_offset": expected_abs_offset.mean(),
             "confidence_mean": confidence.detach().mean(),
             "confidence_std": confidence.detach().std(),
+            "effective_confidence_mean": effective_confidence.detach().mean(),
             "slice_weight_margin_top1_top2": (top1_w - top2_w).mean(),
             "slice_score_std": score_det.std(),
             "qk_temperature": temperature_val,
+            "qk_temperature_fixed": torch.as_tensor(float(self.fixed_temperature), device=style.device).detach(),
             "q_abs": q.detach().abs().mean(),
             "k_abs": k.detach().abs().mean(),
             "weighted_ref_std": weighted_ref.detach().std(),
             "style_std": style.detach().std(),
+            "weighted_ref_center_delta_abs": weighted_delta_abs,
+            "style_center_delta_abs": style_delta_abs,
             "style_center_delta": ((style - center_ref).abs().mean()
                                    / (center_ref.abs().mean() + 1e-8)).detach(),
             "weighted_ref_center_delta": ((weighted_ref - center_ref).abs().mean()
                                           / (center_ref.abs().mean() + 1e-8)).detach(),
-            "ref_usage_ratio": (
-                (style - center_ref).abs().mean() / ((weighted_ref - center_ref).abs().mean() + 1e-8)
-            ).detach(),
+            "ref_usage_ratio": ((style_delta_abs + eps) / (weighted_delta_abs + eps)).detach(),
             "ref_base_std": ref_base.std().detach(),
         }
 
         for i in range(K):
             offset = i - center_idx
             stats[f"slice_weight_{offset:+d}"] = alpha_det[:, i].mean()
+
+        # ── selector target stats ─────────────────────────────────────────────
+        if K > 1 and target_alpha is not None and selector_dist is not None:
+            with torch.no_grad():
+                ta = target_alpha.detach()
+                ta_ent = -(ta * ta.clamp_min(1e-8).log()).sum(dim=1)
+                ta_eff_k = torch.exp(ta_ent)
+                ta_top1 = ta.max(dim=1).values
+                agreement = (alpha_det.argmax(dim=1) == ta.argmax(dim=1)).float().mean()
+                kl_raw = aux_losses.get("slice_target_kl", torch.zeros([], device=source.device))
+                stats.update({
+                    "selector_target_enabled": torch.as_tensor(1.0, device=source.device),
+                    "selector_target_kl_raw": kl_raw.detach(),
+                    "selector_target_entropy": ta_ent.mean(),
+                    "selector_target_eff_k": ta_eff_k.mean(),
+                    "selector_target_top1": ta_top1.mean(),
+                    "selector_alpha_agreement": agreement,
+                    "selector_dist_mean": selector_dist.detach().mean(),
+                    "selector_dist_std": selector_dist.detach().std(),
+                })
+        else:
+            stats["selector_target_enabled"] = torch.as_tensor(0.0, device=source.device)
 
         return style, stats, aux_losses
 
@@ -685,6 +823,10 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_patch_spatial_tau = kwargs.get('ref_patch_spatial_tau', 0.5)
             self.ref_patch_use_spatial_value_fusion = kwargs.get('ref_patch_use_spatial_value_fusion', False)
             self.ref_patch_use_feature_injection = kwargs.get('ref_patch_use_feature_injection', False)
+            self.ref_patch_fixed_temperature = kwargs.get('ref_patch_fixed_temperature', False)
+            self.ref_patch_selector_target_mode = kwargs.get('ref_patch_selector_target_mode', 'none')
+            self.ref_patch_selector_target_tau = kwargs.get('ref_patch_selector_target_tau', 0.2)
+            self.ref_patch_selector_target_detach = kwargs.get('ref_patch_selector_target_detach', True)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -784,6 +926,10 @@ class ProposedSynthesisModule(nn.Module):
                     spatial_tau=self.ref_patch_spatial_tau,
                     use_spatial_value_fusion=self.ref_patch_use_spatial_value_fusion,
                     use_feature_injection=self.ref_patch_use_feature_injection,
+                    fixed_temperature=self.ref_patch_fixed_temperature,
+                    selector_target_mode=self.ref_patch_selector_target_mode,
+                    selector_target_tau=self.ref_patch_selector_target_tau,
+                    selector_target_detach=self.ref_patch_selector_target_detach,
                 )
 
         self._last_ref_condition_stats: dict = {}

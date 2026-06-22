@@ -460,6 +460,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             self.log("loss_G/slice_smoothness", loss_tv.detach(), prog_bar=False)
             loss_G = loss_G + loss_tv
 
+        lambda_target = float(getattr(self.params, "lambda_slice_target", 0.0))
+        if lambda_target > 0 and "slice_target_kl" in aux:
+            loss_target = slice_reg_valid * aux["slice_target_kl"] * lambda_target
+            self.log("loss_G/slice_target_kl", loss_target.detach(), prog_bar=False)
+            loss_G = loss_G + loss_target
+
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
         # assert not torch.isnan(loss_G).any(), "Total Loss is NaN"
