@@ -371,6 +371,58 @@ def _grad_mag_full_then_down(x: torch.Tensor, out_size: tuple) -> torch.Tensor:
     return g_low.reshape(B, C, out_size[0], out_size[1])
 
 
+class GlobalSliceSelector(nn.Module):
+    """Image-level slice prior: scores K ref slices against source globally.
+
+    Unlike the local per-patch Q/K selector, this sees the full source and
+    each full ref slice, then outputs a [B,K] logit that is added to the
+    local score_slice before softmax — decomposing selection into a global
+    z-offset prior and a local patch-wise residual.
+
+    source:    [B, 1, H, W]
+    ref_stack: [B, K, H, W]
+    returns:   [B, K]   logits (higher = more compatible)
+    """
+    def __init__(self, dim=32, qk_mode='image'):
+        super().__init__()
+        in_ch = 2 if qk_mode == 'image_edge' else 1
+        def _enc():
+            return nn.Sequential(
+                nn.Conv2d(in_ch, dim, 3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(dim, dim, 3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.AdaptiveAvgPool2d(1),
+            )
+        self.src_enc = _enc()
+        self.ref_enc = _enc()
+        self.scale = nn.Parameter(torch.tensor(1.0))
+        self.qk_mode = qk_mode
+
+    def forward(self, source, ref_stack):
+        B, K, H, W = ref_stack.shape
+        if self.qk_mode == 'image_edge':
+            src_edge = _grad_mag_full_then_down(source, (H, W))
+            ref_edge = _grad_mag_full_then_down(ref_stack, (H, W))
+            src_in = torch.cat([source, src_edge], dim=1)            # [B,2,H,W]
+            ref_in = torch.cat([
+                ref_stack.reshape(B * K, 1, H, W),
+                ref_edge.reshape(B * K, 1, H, W),
+            ], dim=1)                                                 # [B*K,2,H,W]
+        else:
+            src_in = source                                           # [B,1,H,W]
+            ref_in = ref_stack.reshape(B * K, 1, H, W)               # [B*K,1,H,W]
+
+        src_feat = self.src_enc(src_in).flatten(1)                    # [B,D]
+        ref_feat = self.ref_enc(ref_in).flatten(1).view(B, K, -1)     # [B,K,D]
+
+        src_feat = F.normalize(src_feat, dim=1)
+        ref_feat = F.normalize(ref_feat, dim=2)
+
+        logits = (ref_feat * src_feat[:, None, :]).sum(dim=2) * self.scale.exp()
+        return logits  # [B,K]
+
+
 def _mind_desc_2d_batched(
     x: torch.Tensor,
     sigma: float = 2.0,
@@ -432,6 +484,11 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         mind_neigh_size=9,
         mind_patch_size=7,
         qk_input_mode='image',            # 'image' | 'edge' | 'image_edge'
+        use_global_slice=False,           # add image-level GlobalSliceSelector prior
+        global_slice_weight=1.0,          # scale of global logits added to local score
+        global_slice_detach=False,        # True: stop-gradient on global logits
+        global_slice_dim=32,              # hidden dim for GlobalSliceSelector
+        global_slice_qk_mode='image',     # 'image' | 'image_edge' for GlobalSliceSelector
     ):
         super().__init__()
         _valid_pool = ['logsumexp', 'max', 'mean']
@@ -465,6 +522,9 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         self.use_qk_norm = bool(use_qk_norm)
         self.fixed_temperature = bool(fixed_temperature)
         self.qk_input_mode = qk_input_mode
+        self.use_global_slice = bool(use_global_slice)
+        self.global_slice_weight = float(global_slice_weight)
+        self.global_slice_detach = bool(global_slice_detach)
 
         if self.use_qk_norm:
             if self.fixed_temperature:
@@ -487,6 +547,13 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         qk_in_ch = 2 if qk_input_mode == 'image_edge' else 1
         self.q_proj = nn.Conv2d(qk_in_ch, dim, 1)
         self.k_proj = nn.Conv2d(qk_in_ch, dim, 1)
+
+        if self.use_global_slice:
+            self.global_selector = GlobalSliceSelector(
+                dim=global_slice_dim, qk_mode=global_slice_qk_mode
+            )
+        else:
+            self.global_selector = None
 
     def _unfold_same(self, x, win):
         return F.unfold(x, kernel_size=win, padding=win // 2)
@@ -553,6 +620,14 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
             score_slice = score_kw.max(dim=2).values
         else:  # mean
             score_slice = score_kw.mean(dim=2)
+
+        # ── Global slice prior (optional) ────────────────────────────────────
+        global_logits = None
+        if self.global_selector is not None:
+            global_logits = self.global_selector(source, ref_stack)  # [B, K]
+            if self.global_slice_detach:
+                global_logits = global_logits.detach()
+            score_slice = score_slice + self.global_slice_weight * global_logits[:, :, None, None]
 
         # ── K-direction softmax: per-patch slice weights ──────────────────────
         alpha = torch.softmax(score_slice, dim=1)  # [B, K, h, w]
@@ -766,6 +841,33 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         else:
             stats["selector_target_enabled"] = torch.as_tensor(0.0, device=source.device)
 
+        # ── GlobalSliceSelector stats ─────────────────────────────────────────
+        if global_logits is not None:
+            with torch.no_grad():
+                gl_det = global_logits.detach()                           # [B,K]
+                gl_soft = torch.softmax(gl_det, dim=1)                    # [B,K] — prob view
+                gl_ent = -(gl_soft * gl_soft.clamp_min(1e-8).log()).sum(dim=1)  # [B]
+                gl_eff_k = torch.exp(gl_ent)
+                gl_top1 = gl_soft.max(dim=1).values
+                gl_argmax = gl_soft.argmax(dim=1).float()
+                sl_offsets = torch.arange(K, device=alpha.device, dtype=alpha.dtype) - center_idx
+                gl_exp_offset = (gl_soft * sl_offsets.abs().unsqueeze(0)).sum(dim=1)
+                stats.update({
+                    "global_slice/eff_k": gl_eff_k.mean(),
+                    "global_slice/entropy_norm": (gl_ent / max(math.log(K), 1e-8)).mean(),
+                    "global_slice/top1": gl_top1.mean(),
+                    "global_slice/center_weight": gl_soft[:, center_idx].mean(),
+                    "global_slice/expected_abs_offset": gl_exp_offset.mean(),
+                    "global_slice/argmax_offset": (gl_argmax - center_idx).mean(),
+                    "global_slice/scale": self.global_selector.scale.exp().detach(),
+                    "global_slice/enabled": torch.as_tensor(1.0, device=style.device),
+                })
+                for i in range(K):
+                    off = i - center_idx
+                    stats[f"global_slice/weight_{off:+d}"] = gl_soft[:, i].mean()
+        else:
+            stats["global_slice/enabled"] = torch.as_tensor(0.0, device=style.device)
+
         # ── EdgeQK stats ─────────────────────────────────────────────────────
         stats.update({
             "qk_input_mode_image": torch.as_tensor(
@@ -922,6 +1024,12 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_patch_selector_target_tau = kwargs.get('ref_patch_selector_target_tau', 0.2)
             self.ref_patch_selector_target_detach = kwargs.get('ref_patch_selector_target_detach', True)
             self.ref_patch_qk_input_mode = kwargs.get('ref_patch_qk_input_mode', 'image')
+            # GlobalSliceSelector options
+            self.ref_patch_use_global_slice = kwargs.get('ref_patch_use_global_slice', False)
+            self.ref_patch_global_slice_weight = kwargs.get('ref_patch_global_slice_weight', 1.0)
+            self.ref_patch_global_slice_detach = kwargs.get('ref_patch_global_slice_detach', False)
+            self.ref_patch_global_slice_dim = kwargs.get('ref_patch_global_slice_dim', 32)
+            self.ref_patch_global_qk_mode = kwargs.get('ref_patch_global_qk_mode', 'image')
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -1026,6 +1134,11 @@ class ProposedSynthesisModule(nn.Module):
                     selector_target_tau=self.ref_patch_selector_target_tau,
                     selector_target_detach=self.ref_patch_selector_target_detach,
                     qk_input_mode=self.ref_patch_qk_input_mode,
+                    use_global_slice=self.ref_patch_use_global_slice,
+                    global_slice_weight=self.ref_patch_global_slice_weight,
+                    global_slice_detach=self.ref_patch_global_slice_detach,
+                    global_slice_dim=self.ref_patch_global_slice_dim,
+                    global_slice_qk_mode=self.ref_patch_global_qk_mode,
                 )
 
         self._last_ref_condition_stats: dict = {}

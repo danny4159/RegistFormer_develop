@@ -157,21 +157,28 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         else:
             # softmin (default)
             tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
-            # CtxResp uses a separate shift penalty (default 0.0) so non-center
-            # slices are not penalised in the responsibility target.
-            if return_per_slice:
-                shift_penalty_base = float(getattr(
-                    self.params, "slice_resp_shift_penalty",
-                    getattr(self.params, "ctx_shift_penalty", 0.05)
-                ))
-            else:
-                shift_penalty_base = float(getattr(self.params, 'ctx_shift_penalty', 0.05))
-            penalties = torch.tensor(
-                [abs(i - center_idx) * shift_penalty_base for i in range(K)],
+            # Contextual aggregate always uses ctx_shift_penalty.
+            # CtxResp target uses slice_resp_shift_penalty (default 0.0) so
+            # non-center slices are NOT penalised in the responsibility target.
+            ctx_shift = float(getattr(self.params, 'ctx_shift_penalty', 0.05))
+            ctx_penalties = torch.tensor(
+                [abs(i - center_idx) * ctx_shift for i in range(K)],
                 device=cx_stack.device, dtype=cx_stack.dtype,
             )
-            resp_scores = cx_stack + penalties
-            loss = -tau * torch.logsumexp(-resp_scores / tau, dim=0) * lambda_style
+            ctx_scores = cx_stack + ctx_penalties
+            loss = -tau * torch.logsumexp(-ctx_scores / tau, dim=0) * lambda_style
+
+            if return_per_slice:
+                resp_shift = float(getattr(
+                    self.params, 'slice_resp_shift_penalty', ctx_shift
+                ))
+                resp_penalties = torch.tensor(
+                    [abs(i - center_idx) * resp_shift for i in range(K)],
+                    device=cx_stack.device, dtype=cx_stack.dtype,
+                )
+                resp_scores = cx_stack + resp_penalties
+            else:
+                resp_scores = ctx_scores  # not returned, just for code path
 
         if return_per_slice:
             return loss, resp_scores.detach(), cx_stack.detach()

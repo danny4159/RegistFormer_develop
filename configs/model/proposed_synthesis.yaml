@@ -57,6 +57,12 @@ netG_A:
   ref_patch_selector_target_tau: 0.2       # softmax temperature for target_alpha
   ref_patch_selector_target_detach: true   # true: target_alpha is stop-gradient
   ref_patch_qk_input_mode: 'image'         # 'image' | 'edge' | 'image_edge' — EdgeQK feature
+  # GlobalSliceSelector — image-level z-offset prior
+  ref_patch_use_global_slice: false        # true: enable GlobalSliceSelector
+  ref_patch_global_slice_weight: 1.0       # additive weight of global logits on score_slice
+  ref_patch_global_slice_detach: false     # true: stop-gradient on global logits
+  ref_patch_global_slice_dim: 32           # hidden dim for GlobalSliceSelector encoders
+  ref_patch_global_qk_mode: 'image'        # 'image' | 'image_edge'
   # init_type: 'kaiming'
 
 netD_A:
