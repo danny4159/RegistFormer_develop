@@ -114,6 +114,7 @@ params: # Other params
   slice_resp_tau: 0.1               # softmax temperature for cx responsibility target (lower=sharper)
   slice_resp_warmup_steps: 0        # steps before CtxResp loss activates
   slice_resp_ramp_steps: 1000       # steps to linearly ramp CtxResp weight from 0 to 1
+  slice_resp_shift_penalty: 0.0     # shift penalty for CtxResp target (0=unbiased; separate from ctx_shift_penalty)
 
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}

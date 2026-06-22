@@ -144,8 +144,9 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             return loss
 
         agg_mode = getattr(self.params, 'ctx_agg_mode', 'softmin')
+        # .mean() instead of .squeeze() to safely handle batch_size > 1
         cx_losses = [
-            self.criterionContextual(ref_stack[:, i:i + 1], fake_img).squeeze()
+            self.criterionContextual(ref_stack[:, i:i + 1], fake_img).mean()
             for i in range(K)
         ]
         cx_stack = torch.stack(cx_losses)  # [K]
@@ -156,7 +157,15 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         else:
             # softmin (default)
             tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
-            shift_penalty_base = getattr(self.params, 'ctx_shift_penalty', 0.05)
+            # CtxResp uses a separate shift penalty (default 0.0) so non-center
+            # slices are not penalised in the responsibility target.
+            if return_per_slice:
+                shift_penalty_base = float(getattr(
+                    self.params, "slice_resp_shift_penalty",
+                    getattr(self.params, "ctx_shift_penalty", 0.05)
+                ))
+            else:
+                shift_penalty_base = float(getattr(self.params, 'ctx_shift_penalty', 0.05))
             penalties = torch.tensor(
                 [abs(i - center_idx) * shift_penalty_base for i in range(K)],
                 device=cx_stack.device, dtype=cx_stack.dtype,
@@ -253,6 +262,7 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             and use_25d
             and eff_b is not None
             and eff_b.shape[1] > 1
+            and not getattr(self.params, "ctx_center_only", False)
         )
 
         if self.criterionContextual:
@@ -492,7 +502,9 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         ## 4. Slice attention regularization (patch_slice_fusion only)
         aux = getattr(self.netG_A, "_last_ref_condition_aux_losses", {})
         # slice_reg_valid=1 only when K>1; prevents constant entropy loss when K=1
-        slice_reg_valid = float(aux.get("slice_reg_valid", 1.0))
+        slice_reg_valid = aux.get("slice_reg_valid", torch.as_tensor(1.0, device=loss_G.device))
+        if not torch.is_tensor(slice_reg_valid):
+            slice_reg_valid = torch.as_tensor(float(slice_reg_valid), device=loss_G.device)
 
         lambda_ent = float(getattr(self.params, "lambda_slice_entropy", 0.0))
         if lambda_ent > 0 and "slice_entropy_raw" in aux:
@@ -587,6 +599,10 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                         off = int(i - center_idx_r)
                         self.log(f"slice_resp/cx_raw_{off:+d}",   ctx_raw_scores_b[i],  prog_bar=False)
                         self.log(f"slice_resp/cx_score_{off:+d}", ctx_resp_scores_b[i], prog_bar=False)
+                    self.log("slice_resp/cx_score_range",
+                             (ctx_resp_scores_b.max() - ctx_resp_scores_b.min()).detach(), prog_bar=False)
+                    self.log("slice_resp/cx_raw_range",
+                             (ctx_raw_scores_b.max() - ctx_raw_scores_b.min()).detach(), prog_bar=False)
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
