@@ -56,6 +56,7 @@ netG_A:
   ref_patch_selector_target_mode: 'none'   # 'none' | 'edge' | 'mind' — teacher target for alpha
   ref_patch_selector_target_tau: 0.2       # softmax temperature for target_alpha
   ref_patch_selector_target_detach: true   # true: target_alpha is stop-gradient
+  ref_patch_qk_input_mode: 'image'         # 'image' | 'edge' | 'image_edge' — EdgeQK feature
   # init_type: 'kaiming'
 
 netD_A:
@@ -109,6 +110,10 @@ params: # Other params
   lambda_slice_smoothness: 0.005    # TV loss on alpha[B,K,h,w]
   slice_entropy_target_eff_k: 2.0   # target effective slice count (entropy = log(2) ≈ 0.693)
   lambda_slice_target: 0.0          # KL(target_alpha || alpha) loss weight (0=off)
+  lambda_slice_resp: 0.0            # CtxResp KL loss weight (0=off); set 0.1 to enable
+  slice_resp_tau: 0.1               # softmax temperature for cx responsibility target (lower=sharper)
+  slice_resp_warmup_steps: 0        # steps before CtxResp loss activates
+  slice_resp_ramp_steps: 1000       # steps to linearly ramp CtxResp weight from 0 to 1
 
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}

@@ -355,6 +355,22 @@ def _gradient_mag_2d(x: torch.Tensor) -> torch.Tensor:
     return g.reshape(B, C, H, W)
 
 
+def _grad_mag_full_then_down(x: torch.Tensor, out_size: tuple) -> torch.Tensor:
+    """Compute gradient magnitude at full resolution, normalise, then downsample.
+
+    x: [B, C, H, W]  (C=1 for source, C=K for ref_stack)
+    Returns: [B, C, out_h, out_w]  (mean-normalised per-image per-channel)
+    """
+    B, C, H, W = x.shape
+    x_flat = x.reshape(B * C, 1, H, W)
+    dx = F.pad(x_flat[..., :, 1:] - x_flat[..., :, :-1], (0, 1, 0, 0))
+    dy = F.pad(x_flat[..., 1:, :] - x_flat[..., :-1, :], (0, 0, 0, 1))
+    g = torch.sqrt(dx * dx + dy * dy + 1e-8)
+    g = g / (g.mean(dim=(2, 3), keepdim=True) + 1e-8)
+    g_low = F.interpolate(g, size=out_size, mode='bilinear', align_corners=False)
+    return g_low.reshape(B, C, out_size[0], out_size[1])
+
+
 def _mind_desc_2d_batched(
     x: torch.Tensor,
     sigma: float = 2.0,
@@ -415,6 +431,7 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         mind_eps=1e-5,
         mind_neigh_size=9,
         mind_patch_size=7,
+        qk_input_mode='image',            # 'image' | 'edge' | 'image_edge'
     ):
         super().__init__()
         _valid_pool = ['logsumexp', 'max', 'mean']
@@ -426,6 +443,9 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         _valid_sel = ['none', 'edge', 'mind']
         if selector_target_mode not in _valid_sel:
             raise ValueError(f"selector_target_mode={selector_target_mode!r}, choose from {_valid_sel}")
+        _valid_qk = ['image', 'edge', 'image_edge']
+        if qk_input_mode not in _valid_qk:
+            raise ValueError(f"qk_input_mode={qk_input_mode!r}, choose from {_valid_qk}")
         if use_feature_injection:
             raise NotImplementedError("ref_patch_use_feature_injection is not implemented yet.")
         assert window % 2 == 1, f"window must be odd, got {window}"
@@ -444,6 +464,7 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         self.use_spatial_value_fusion = bool(use_spatial_value_fusion)
         self.use_qk_norm = bool(use_qk_norm)
         self.fixed_temperature = bool(fixed_temperature)
+        self.qk_input_mode = qk_input_mode
 
         if self.use_qk_norm:
             if self.fixed_temperature:
@@ -463,8 +484,9 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         self.mind_neigh_size = int(mind_neigh_size)
         self.mind_patch_size = int(mind_patch_size)
 
-        self.q_proj = nn.Conv2d(1, dim, 1)
-        self.k_proj = nn.Conv2d(1, dim, 1)
+        qk_in_ch = 2 if qk_input_mode == 'image_edge' else 1
+        self.q_proj = nn.Conv2d(qk_in_ch, dim, 1)
+        self.k_proj = nn.Conv2d(qk_in_ch, dim, 1)
 
     def _unfold_same(self, x, win):
         return F.unfold(x, kernel_size=win, padding=win // 2)
@@ -487,8 +509,24 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
             ref_base = ref_low
 
         # ── Q/K projection ───────────────────────────────────────────────────
-        q = self.q_proj(src_low)                                                       # [B,C,h,w]
-        k = self.k_proj(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.dim, h, w)  # [B,K,C,h,w]
+        src_edge = None
+        ref_edge = None
+        if self.qk_input_mode == 'image':
+            q_in = src_low                                                      # [B,1,h,w]
+            k_in = ref_base.reshape(B * K, 1, h, w)                            # [B*K,1,h,w]
+        elif self.qk_input_mode == 'edge':
+            src_edge = _grad_mag_full_then_down(source, (h, w))                # [B,1,h,w]
+            ref_edge = _grad_mag_full_then_down(ref_stack, (h, w))             # [B,K,h,w]
+            q_in = src_edge
+            k_in = ref_edge.reshape(B * K, 1, h, w)
+        else:  # 'image_edge'
+            src_edge = _grad_mag_full_then_down(source, (h, w))                # [B,1,h,w]
+            ref_edge = _grad_mag_full_then_down(ref_stack, (h, w))             # [B,K,h,w]
+            q_in = torch.cat([src_low, src_edge], dim=1)                       # [B,2,h,w]
+            k_in = torch.cat([ref_base.reshape(B * K, 1, h, w),
+                               ref_edge.reshape(B * K, 1, h, w)], dim=1)      # [B*K,2,h,w]
+        q = self.q_proj(q_in)                                                   # [B,C,h,w]
+        k = self.k_proj(k_in).view(B, K, self.dim, h, w)                       # [B,K,C,h,w]
 
         if self.use_qk_norm:
             q = F.normalize(q, dim=1, eps=1e-8)
@@ -619,6 +657,14 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
             aux_losses["slice_entropy_raw"] = torch.zeros([], device=source.device)
             aux_losses["slice_smoothness"] = torch.zeros([], device=source.device)
 
+        # alpha mean per slice — differentiable, used by CtxResp KL loss in backward_G
+        if K > 1:
+            aux_losses["alpha_mean_per_slice"] = alpha.mean(dim=(0, 2, 3))    # [K]
+            aux_losses["alpha_mean_per_slice_b"] = alpha.mean(dim=(2, 3))      # [B,K]
+        else:
+            aux_losses["alpha_mean_per_slice"] = torch.ones(1, device=source.device)
+            aux_losses["alpha_mean_per_slice_b"] = torch.ones(B, 1, device=source.device)
+
         # ── stats (detached, for TensorBoard logging) ─────────────────────────
         with torch.no_grad():
             alpha_det = alpha.detach()
@@ -719,6 +765,54 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
                 })
         else:
             stats["selector_target_enabled"] = torch.as_tensor(0.0, device=source.device)
+
+        # ── EdgeQK stats ─────────────────────────────────────────────────────
+        stats.update({
+            "qk_input_mode_image": torch.as_tensor(
+                float(self.qk_input_mode == "image"), device=style.device).detach(),
+            "qk_input_mode_edge": torch.as_tensor(
+                float(self.qk_input_mode == "edge"), device=style.device).detach(),
+            "qk_input_mode_image_edge": torch.as_tensor(
+                float(self.qk_input_mode == "image_edge"), device=style.device).detach(),
+            "q_in_mean": q_in.detach().mean(),
+            "q_in_std": q_in.detach().std(),
+            "k_in_mean": k_in.detach().mean(),
+            "k_in_std": k_in.detach().std(),
+        })
+
+        if src_edge is not None and ref_edge is not None:
+            with torch.no_grad():
+                center_edge = ref_edge[:, center_idx:center_idx + 1]          # [B,1,h,w]
+                edge_center_delta = (
+                    (ref_edge - center_edge).abs().mean()
+                    / (center_edge.abs().mean() + 1e-8)
+                )
+                edge_slice_range = (
+                    ref_edge.max(dim=1).values - ref_edge.min(dim=1).values
+                ).mean()
+                src_ref_edge_delta = (
+                    (ref_edge - src_edge).abs().mean()
+                    / (src_edge.abs().mean() + 1e-8)
+                )
+            stats.update({
+                "src_edge_mean": src_edge.detach().mean(),
+                "src_edge_std": src_edge.detach().std(),
+                "ref_edge_mean": ref_edge.detach().mean(),
+                "ref_edge_std": ref_edge.detach().std(),
+                "ref_edge_center_delta": edge_center_delta.detach(),
+                "ref_edge_slice_range": edge_slice_range.detach(),
+                "src_ref_edge_delta": src_ref_edge_delta.detach(),
+            })
+        else:
+            stats.update({
+                "src_edge_mean": torch.zeros([], device=style.device),
+                "src_edge_std": torch.zeros([], device=style.device),
+                "ref_edge_mean": torch.zeros([], device=style.device),
+                "ref_edge_std": torch.zeros([], device=style.device),
+                "ref_edge_center_delta": torch.zeros([], device=style.device),
+                "ref_edge_slice_range": torch.zeros([], device=style.device),
+                "src_ref_edge_delta": torch.zeros([], device=style.device),
+            })
 
         return style, stats, aux_losses
 
@@ -827,6 +921,7 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_patch_selector_target_mode = kwargs.get('ref_patch_selector_target_mode', 'none')
             self.ref_patch_selector_target_tau = kwargs.get('ref_patch_selector_target_tau', 0.2)
             self.ref_patch_selector_target_detach = kwargs.get('ref_patch_selector_target_detach', True)
+            self.ref_patch_qk_input_mode = kwargs.get('ref_patch_qk_input_mode', 'image')
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -930,6 +1025,7 @@ class ProposedSynthesisModule(nn.Module):
                     selector_target_mode=self.ref_patch_selector_target_mode,
                     selector_target_tau=self.ref_patch_selector_target_tau,
                     selector_target_detach=self.ref_patch_selector_target_detach,
+                    qk_input_mode=self.ref_patch_qk_input_mode,
                 )
 
         self._last_ref_condition_stats: dict = {}
