@@ -623,13 +623,15 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
 
         # ── Global slice prior (optional) ────────────────────────────────────
         global_logits = None
+        global_logits_raw = None   # grad-enabled copy for CE loss
         if self.global_selector is not None:
-            global_logits = self.global_selector(source, ref_stack)  # [B, K]
-            if self.global_slice_detach:
-                global_logits = global_logits.detach()
+            global_logits_raw = self.global_selector(source, ref_stack)   # [B, K]
+            global_logits = global_logits_raw.detach() if self.global_slice_detach else global_logits_raw
             score_slice = score_slice + self.global_slice_weight * global_logits[:, :, None, None]
 
         # ── K-direction softmax: per-patch slice weights ──────────────────────
+        # score_slice_logits: [B,K] spatial mean before softmax — used by CtxResp CE losses
+        score_slice_logits = score_slice.mean(dim=(2, 3))   # [B, K], grad-enabled
         alpha = torch.softmax(score_slice, dim=1)  # [B, K, h, w]
 
         # ── selector target (MIND/edge teacher for alpha) ─────────────────────
@@ -739,6 +741,11 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         else:
             aux_losses["alpha_mean_per_slice"] = torch.ones(1, device=source.device)
             aux_losses["alpha_mean_per_slice_b"] = torch.ones(B, 1, device=source.device)
+
+        # CE-target tensors for CtxResp variants (grad-enabled)
+        aux_losses["score_slice_logits"] = score_slice_logits             # [B,K] before softmax
+        if global_logits_raw is not None:
+            aux_losses["global_slice_logits"] = global_logits_raw         # [B,K] raw GlobalSlice logits
 
         # ── stats (detached, for TensorBoard logging) ─────────────────────────
         with torch.no_grad():

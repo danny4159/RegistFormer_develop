@@ -534,17 +534,19 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             loss_G = loss_G + loss_target
 
         ##################################################################################################################
-        ## 4b. Contextual responsibility distillation — aligns alpha with cx-based teacher
+        ## 4b. Contextual responsibility distillation — aligns selector with cx-based teacher
+        ##   slice_resp_apply_to controls WHERE the CE/KL is applied:
+        ##     'alpha_mean_kl' : KL(target || alpha_mean)   — original, pushes alpha [K]
+        ##     'score_slice'   : soft-CE on score_slice_logits [B,K] (spatial mean before softmax)
+        ##     'global_logits' : soft-CE on GlobalSliceSelector logits [B,K] (direct training)
+        resp_apply_to = getattr(self.params, 'slice_resp_apply_to', 'alpha_mean_kl')
         if (
             lambda_resp > 0
             and ctx_resp_scores_b is not None
-            and "alpha_mean_per_slice" in aux
         ):
             eps = 1e-8
-            alpha_mean = aux["alpha_mean_per_slice"]   # [K], differentiable
             resp_tau = float(getattr(self.params, "slice_resp_tau", 0.1))
-
-            target_resp = torch.softmax(-ctx_resp_scores_b / max(resp_tau, eps), dim=0).detach()
+            target_resp = torch.softmax(-ctx_resp_scores_b / max(resp_tau, eps), dim=0).detach()  # [K]
 
             warmup = int(getattr(self.params, "slice_resp_warmup_steps", 0))
             ramp   = int(getattr(self.params, "slice_resp_ramp_steps", 1))
@@ -553,15 +555,53 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             else:
                 resp_weight = min(1.0, float(self.global_step - warmup) / float(max(ramp, 1)))
 
-            loss_resp_raw = (
-                target_resp * (target_resp.clamp_min(eps).log() - alpha_mean.clamp_min(eps).log())
-            ).sum()
-            loss_resp = slice_reg_valid * lambda_resp * resp_weight * loss_resp_raw
+            loss_resp_raw = None
+            if resp_apply_to == 'global_logits':
+                if "global_slice_logits" not in aux:
+                    raise RuntimeError(
+                        "slice_resp_apply_to='global_logits' requires aux['global_slice_logits']. "
+                        "Set model.netG_A.ref_patch_use_global_slice=true."
+                    )
+                logits = aux["global_slice_logits"]                        # [B,K], grad-enabled
+                logp   = F.log_softmax(logits, dim=1)                      # [B,K]
+                loss_resp_raw = -(target_resp.view(1, -1) * logp).sum(dim=1).mean()
 
-            self.log("loss_G/slice_resp",        loss_resp.detach(),                                prog_bar=False)
-            self.log("loss_G/slice_resp_raw",    loss_resp_raw.detach(),                            prog_bar=False)
-            self.log("loss_G/slice_resp_weight", torch.as_tensor(resp_weight, device=loss_G.device), prog_bar=False)
-            loss_G = loss_G + loss_resp
+            elif resp_apply_to == 'score_slice':
+                if "score_slice_logits" not in aux:
+                    raise RuntimeError(
+                        "slice_resp_apply_to='score_slice' requires aux['score_slice_logits']. "
+                        "Ensure ref_condition_mode='patch_slice_fusion'."
+                    )
+                logits = aux["score_slice_logits"]                         # [B,K], grad-enabled
+                logp   = F.log_softmax(logits, dim=1)                      # [B,K]
+                loss_resp_raw = -(target_resp.view(1, -1) * logp).sum(dim=1).mean()
+
+            elif resp_apply_to == 'alpha_mean_kl':
+                if "alpha_mean_per_slice" not in aux:
+                    raise RuntimeError(
+                        "slice_resp_apply_to='alpha_mean_kl' requires aux['alpha_mean_per_slice']. "
+                        "Ensure ref_condition_mode='patch_slice_fusion'."
+                    )
+                alpha_mean    = aux["alpha_mean_per_slice"]
+                loss_resp_raw = (
+                    target_resp * (target_resp.clamp_min(eps).log() - alpha_mean.clamp_min(eps).log())
+                ).sum()
+
+            else:
+                raise ValueError(
+                    f"Unknown slice_resp_apply_to={resp_apply_to!r}. "
+                    "Choose from: 'alpha_mean_kl' | 'score_slice' | 'global_logits'."
+                )
+
+            if loss_resp_raw is not None:
+                loss_resp = slice_reg_valid * lambda_resp * resp_weight * loss_resp_raw
+                self.log("loss_G/slice_resp",        loss_resp.detach(),                                 prog_bar=False)
+                self.log("loss_G/slice_resp_raw",    loss_resp_raw.detach(),                             prog_bar=False)
+                self.log("loss_G/slice_resp_weight", torch.as_tensor(resp_weight, device=loss_G.device), prog_bar=False)
+                self.log("slice_resp/apply_to_mode", torch.as_tensor(
+                    {'alpha_mean_kl': 0.0, 'score_slice': 1.0, 'global_logits': 2.0}.get(resp_apply_to, -1.0),
+                    device=loss_G.device), prog_bar=False)
+                loss_G = loss_G + loss_resp
 
             with torch.no_grad():
                 K_r = target_resp.numel()
@@ -573,7 +613,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 t_top1     = target_resp.max()
                 t_argmax   = target_resp.argmax()
 
-                a_det      = alpha_mean.detach()
+                # alpha_mean is always logged for reference (from alpha_mean_per_slice)
+                a_det      = aux["alpha_mean_per_slice"].detach() if "alpha_mean_per_slice" in aux else target_resp.new_zeros(K_r)
                 a_ent      = -(a_det * a_det.clamp_min(eps).log()).sum()
                 a_eff_k    = torch.exp(a_ent)
                 a_argmax   = a_det.argmax()
