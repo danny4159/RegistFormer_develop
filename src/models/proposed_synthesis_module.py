@@ -119,32 +119,21 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             losses = losses + penalties
         return -tau * torch.logsumexp(-losses / tau, dim=0)
 
-    def _contextual_stack_loss(self, fake_img, ref_stack, lambda_style,
-                               return_per_slice: bool = False):
+    def _contextual_stack_loss(self, fake_img, ref_stack, lambda_style):
         """Contextual loss for 2.5D ref stack.
         ctx_center_only=True : center slice only (2D equivalent).
         ctx_agg_mode='softmin': center-biased soft-min over K slices (default).
         ctx_agg_mode='mean'   : simple mean over all K slices.
-
-        return_per_slice=True: returns (loss, resp_scores, cx_stack)
-          resp_scores: [K] lower=better score used for CtxResp target (detached).
-          cx_stack:    [K] raw contextual losses per slice (detached).
         """
         K = ref_stack.shape[1]
         center_idx = K // 2
 
         if getattr(self.params, 'ctx_center_only', False):
-            loss = self.criterionContextual(
+            return self.criterionContextual(
                 ref_stack[:, center_idx:center_idx + 1], fake_img
             ) * lambda_style
-            if return_per_slice:
-                resp_scores = torch.full((K,), 1e3, device=fake_img.device, dtype=fake_img.dtype)
-                resp_scores[center_idx] = 0.0
-                return loss, resp_scores.detach(), resp_scores.detach()
-            return loss
 
         agg_mode = getattr(self.params, 'ctx_agg_mode', 'softmin')
-        # .mean() instead of .squeeze() to safely handle batch_size > 1
         cx_losses = [
             self.criterionContextual(ref_stack[:, i:i + 1], fake_img).mean()
             for i in range(K)
@@ -152,37 +141,17 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         cx_stack = torch.stack(cx_losses)  # [K]
 
         if agg_mode == 'mean':
-            loss = cx_stack.mean() * lambda_style
-            resp_scores = cx_stack
-        else:
-            # softmin (default)
-            tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
-            # Contextual aggregate always uses ctx_shift_penalty.
-            # CtxResp target uses slice_resp_shift_penalty (default 0.0) so
-            # non-center slices are NOT penalised in the responsibility target.
-            ctx_shift = float(getattr(self.params, 'ctx_shift_penalty', 0.05))
-            ctx_penalties = torch.tensor(
-                [abs(i - center_idx) * ctx_shift for i in range(K)],
-                device=cx_stack.device, dtype=cx_stack.dtype,
-            )
-            ctx_scores = cx_stack + ctx_penalties
-            loss = -tau * torch.logsumexp(-ctx_scores / tau, dim=0) * lambda_style
+            return cx_stack.mean() * lambda_style
 
-            if return_per_slice:
-                resp_shift = float(getattr(
-                    self.params, 'slice_resp_shift_penalty', ctx_shift
-                ))
-                resp_penalties = torch.tensor(
-                    [abs(i - center_idx) * resp_shift for i in range(K)],
-                    device=cx_stack.device, dtype=cx_stack.dtype,
-                )
-                resp_scores = cx_stack + resp_penalties
-            else:
-                resp_scores = ctx_scores  # not returned, just for code path
-
-        if return_per_slice:
-            return loss, resp_scores.detach(), cx_stack.detach()
-        return loss
+        # softmin (default)
+        tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
+        ctx_shift = float(getattr(self.params, 'ctx_shift_penalty', 0.05))
+        ctx_penalties = torch.tensor(
+            [abs(i - center_idx) * ctx_shift for i in range(K)],
+            device=cx_stack.device, dtype=cx_stack.dtype,
+        )
+        ctx_scores = cx_stack + ctx_penalties
+        return -tau * torch.logsumexp(-ctx_scores / tau, dim=0) * lambda_style
 
     def _perceptual_stack_loss(self, fake_img, ref_stack, lambda_perceptual):
         """VGG perceptual loss for 2.5D ref stack — same softmin aggregation as contextual."""
@@ -261,29 +230,9 @@ class ProposedSynthesisModule(BaseModule_AtoB):
 
         ##################################################################################################################
         ## 2. Contextual loss
-        ctx_resp_scores_b = None
-        ctx_raw_scores_b = None
-        lambda_resp = float(getattr(self.params, "lambda_slice_resp", 0.0))
-        need_ctx_resp = (
-            lambda_resp > 0
-            and use_25d
-            and eff_b is not None
-            and eff_b.shape[1] > 1
-            and not getattr(self.params, "ctx_center_only", False)
-        )
-
         if self.criterionContextual:
             if use_25d and eff_b is not None:
-                if need_ctx_resp:
-                    loss_style_b, ctx_resp_scores_b, ctx_raw_scores_b = \
-                        self._contextual_stack_loss(
-                            fake_b, eff_b, self.params.lambda_style,
-                            return_per_slice=True,
-                        )
-                else:
-                    loss_style_b = self._contextual_stack_loss(
-                        fake_b, eff_b, self.params.lambda_style,
-                    )
+                loss_style_b = self._contextual_stack_loss(fake_b, eff_b, self.params.lambda_style)
             else:
                 loss_style_b = self.criterionContextual(eff_b, fake_b) * self.params.lambda_style
             self.log("Context_b_Loss", loss_style_b.detach(), prog_bar=True)
@@ -532,125 +481,6 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             loss_target = slice_reg_valid * aux["slice_target_kl"] * lambda_target
             self.log("loss_G/slice_target_kl", loss_target.detach(), prog_bar=False)
             loss_G = loss_G + loss_target
-
-        ##################################################################################################################
-        ## 4b. Contextual responsibility distillation — aligns selector with cx-based teacher
-        ##   slice_resp_apply_to controls WHERE the CE/KL is applied:
-        ##     'alpha_mean_kl' : KL(target || alpha_mean)   — original, pushes alpha [K]
-        ##     'score_slice'   : soft-CE on score_slice_logits [B,K] (spatial mean before softmax)
-        ##     'global_logits' : soft-CE on GlobalSliceSelector logits [B,K] (direct training)
-        resp_apply_to = getattr(self.params, 'slice_resp_apply_to', 'alpha_mean_kl')
-        if (
-            lambda_resp > 0
-            and ctx_resp_scores_b is not None
-        ):
-            eps = 1e-8
-            resp_tau = float(getattr(self.params, "slice_resp_tau", 0.1))
-            target_resp = torch.softmax(-ctx_resp_scores_b / max(resp_tau, eps), dim=0).detach()  # [K]
-
-            warmup = int(getattr(self.params, "slice_resp_warmup_steps", 0))
-            ramp   = int(getattr(self.params, "slice_resp_ramp_steps", 1))
-            if self.global_step < warmup:
-                resp_weight = 0.0
-            else:
-                resp_weight = min(1.0, float(self.global_step - warmup) / float(max(ramp, 1)))
-
-            loss_resp_raw = None
-            if resp_apply_to == 'global_logits':
-                if "global_slice_logits" not in aux:
-                    raise RuntimeError(
-                        "slice_resp_apply_to='global_logits' requires aux['global_slice_logits']. "
-                        "Set model.netG_A.ref_patch_use_global_slice=true."
-                    )
-                logits = aux["global_slice_logits"]                        # [B,K], grad-enabled
-                logp   = F.log_softmax(logits, dim=1)                      # [B,K]
-                loss_resp_raw = -(target_resp.view(1, -1) * logp).sum(dim=1).mean()
-
-            elif resp_apply_to == 'score_slice':
-                if "score_slice_logits" not in aux:
-                    raise RuntimeError(
-                        "slice_resp_apply_to='score_slice' requires aux['score_slice_logits']. "
-                        "Ensure ref_condition_mode='patch_slice_fusion'."
-                    )
-                logits = aux["score_slice_logits"]                         # [B,K], grad-enabled
-                logp   = F.log_softmax(logits, dim=1)                      # [B,K]
-                loss_resp_raw = -(target_resp.view(1, -1) * logp).sum(dim=1).mean()
-
-            elif resp_apply_to == 'alpha_mean_kl':
-                if "alpha_mean_per_slice" not in aux:
-                    raise RuntimeError(
-                        "slice_resp_apply_to='alpha_mean_kl' requires aux['alpha_mean_per_slice']. "
-                        "Ensure ref_condition_mode='patch_slice_fusion'."
-                    )
-                alpha_mean    = aux["alpha_mean_per_slice"]
-                loss_resp_raw = (
-                    target_resp * (target_resp.clamp_min(eps).log() - alpha_mean.clamp_min(eps).log())
-                ).sum()
-
-            else:
-                raise ValueError(
-                    f"Unknown slice_resp_apply_to={resp_apply_to!r}. "
-                    "Choose from: 'alpha_mean_kl' | 'score_slice' | 'global_logits'."
-                )
-
-            if loss_resp_raw is not None:
-                loss_resp = slice_reg_valid * lambda_resp * resp_weight * loss_resp_raw
-                self.log("loss_G/slice_resp",        loss_resp.detach(),                                 prog_bar=False)
-                self.log("loss_G/slice_resp_raw",    loss_resp_raw.detach(),                             prog_bar=False)
-                self.log("loss_G/slice_resp_weight", torch.as_tensor(resp_weight, device=loss_G.device), prog_bar=False)
-                self.log("slice_resp/apply_to_mode", torch.as_tensor(
-                    {'alpha_mean_kl': 0.0, 'score_slice': 1.0, 'global_logits': 2.0}.get(resp_apply_to, -1.0),
-                    device=loss_G.device), prog_bar=False)
-                loss_G = loss_G + loss_resp
-
-            with torch.no_grad():
-                K_r = target_resp.numel()
-                center_idx_r = K_r // 2
-                offsets_r = torch.arange(K_r, device=target_resp.device, dtype=target_resp.dtype) - center_idx_r
-
-                t_ent      = -(target_resp * target_resp.clamp_min(eps).log()).sum()
-                t_eff_k    = torch.exp(t_ent)
-                t_top1     = target_resp.max()
-                t_argmax   = target_resp.argmax()
-
-                # alpha_mean is always logged for reference (from alpha_mean_per_slice)
-                a_det      = aux["alpha_mean_per_slice"].detach() if "alpha_mean_per_slice" in aux else target_resp.new_zeros(K_r)
-                a_ent      = -(a_det * a_det.clamp_min(eps).log()).sum()
-                a_eff_k    = torch.exp(a_ent)
-                a_argmax   = a_det.argmax()
-                agreement  = (t_argmax == a_argmax).float()
-
-                self.log("slice_resp/target_eff_k",               t_eff_k,                                         prog_bar=False)
-                self.log("slice_resp/target_entropy_norm",        t_ent / max(math.log(K_r), eps),                 prog_bar=False)
-                self.log("slice_resp/target_top1",                t_top1,                                          prog_bar=False)
-                self.log("slice_resp/target_center_weight",       target_resp[center_idx_r],                       prog_bar=False)
-                self.log("slice_resp/target_expected_abs_offset", (target_resp * offsets_r.abs()).sum(),            prog_bar=False)
-                self.log("slice_resp/target_argmax_index",        t_argmax.float(),                                prog_bar=False)
-                self.log("slice_resp/target_argmax_offset",       offsets_r[t_argmax],                             prog_bar=False)
-
-                self.log("slice_resp/alpha_eff_k",                a_eff_k,                                         prog_bar=False)
-                self.log("slice_resp/alpha_top1",                 a_det.max(),                                     prog_bar=False)
-                self.log("slice_resp/alpha_center_weight",        a_det[center_idx_r],                             prog_bar=False)
-                self.log("slice_resp/alpha_expected_abs_offset",  (a_det * offsets_r.abs()).sum(),                 prog_bar=False)
-                self.log("slice_resp/alpha_argmax_index",         a_argmax.float(),                                prog_bar=False)
-                self.log("slice_resp/alpha_argmax_offset",        offsets_r[a_argmax],                             prog_bar=False)
-                self.log("slice_resp/alpha_target_agreement",     agreement,                                       prog_bar=False)
-                self.log("slice_resp/alpha_target_l1",            (a_det - target_resp).abs().mean(),              prog_bar=False)
-
-                for i in range(K_r):
-                    off = int(i - center_idx_r)
-                    self.log(f"slice_resp/target_weight_{off:+d}", target_resp[i], prog_bar=False)
-                    self.log(f"slice_resp/alpha_weight_{off:+d}",  a_det[i],       prog_bar=False)
-
-                if ctx_raw_scores_b is not None:
-                    for i in range(K_r):
-                        off = int(i - center_idx_r)
-                        self.log(f"slice_resp/cx_raw_{off:+d}",   ctx_raw_scores_b[i],  prog_bar=False)
-                        self.log(f"slice_resp/cx_score_{off:+d}", ctx_resp_scores_b[i], prog_bar=False)
-                    self.log("slice_resp/cx_score_range",
-                             (ctx_resp_scores_b.max() - ctx_resp_scores_b.min()).detach(), prog_bar=False)
-                    self.log("slice_resp/cx_raw_range",
-                             (ctx_raw_scores_b.max() - ctx_raw_scores_b.min()).detach(), prog_bar=False)
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G

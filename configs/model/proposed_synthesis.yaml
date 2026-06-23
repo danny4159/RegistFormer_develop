@@ -57,12 +57,6 @@ netG_A:
   ref_patch_selector_target_tau: 0.2       # softmax temperature for target_alpha
   ref_patch_selector_target_detach: true   # true: target_alpha is stop-gradient
   ref_patch_qk_input_mode: 'image'         # 'image' | 'edge' | 'image_edge' — EdgeQK feature
-  # GlobalSliceSelector — image-level z-offset prior
-  ref_patch_use_global_slice: false        # true: enable GlobalSliceSelector
-  ref_patch_global_slice_weight: 1.0       # additive weight of global logits on score_slice
-  ref_patch_global_slice_detach: false     # true: stop-gradient on global logits
-  ref_patch_global_slice_dim: 32           # hidden dim for GlobalSliceSelector encoders
-  ref_patch_global_qk_mode: 'image'        # 'image' | 'image_edge'
   # init_type: 'kaiming'
 
 netD_A:
@@ -116,12 +110,6 @@ params: # Other params
   lambda_slice_smoothness: 0.005    # TV loss on alpha[B,K,h,w]
   slice_entropy_target_eff_k: 2.0   # target effective slice count (entropy = log(2) ≈ 0.693)
   lambda_slice_target: 0.0          # KL(target_alpha || alpha) loss weight (0=off)
-  lambda_slice_resp: 0.0            # CtxResp KL loss weight (0=off); set 0.1 to enable
-  slice_resp_tau: 0.1               # softmax temperature for cx responsibility target (lower=sharper)
-  slice_resp_warmup_steps: 0        # steps before CtxResp loss activates
-  slice_resp_ramp_steps: 1000       # steps to linearly ramp CtxResp weight from 0 to 1
-  slice_resp_shift_penalty: 0.0     # shift penalty for CtxResp target (0=unbiased; separate from ctx_shift_penalty)
-  slice_resp_apply_to: 'alpha_mean_kl'  # where CE/KL is applied: 'alpha_mean_kl' | 'score_slice' | 'global_logits'
 
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
