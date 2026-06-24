@@ -434,6 +434,8 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         qk_input_mode='image',            # 'image' | 'edge' | 'image_edge'
         alpha_mode='learned',             # 'learned' | 'ncc' — if 'ncc', Q/K skipped; NCC used directly
         ncc_window=7,                     # patch window size for NCC computation (alpha_mode='ncc')
+        ncc_ds=None,                      # downsample factor for NCC: None=same as out_size, int=finer scale (e.g. 2→64x64 for 128 input)
+        ncc_use_edge=False,               # True: use gradient-magnitude edge map instead of raw image for NCC
     ):
         super().__init__()
         _valid_pool = ['logsumexp', 'max', 'mean']
@@ -491,6 +493,8 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
             raise ValueError(f"alpha_mode={alpha_mode!r}, choose from {_valid_alpha}")
         self.alpha_mode = alpha_mode
         self.ncc_window = int(ncc_window)
+        self.ncc_ds = int(ncc_ds) if ncc_ds is not None else None
+        self.ncc_use_edge = bool(ncc_use_edge)
 
         qk_in_ch = 2 if qk_input_mode == 'image_edge' else 1
         self.q_proj = nn.Conv2d(qk_in_ch, dim, 1)
@@ -530,13 +534,36 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
                     temperature = self.log_temperature.exp().clamp(0.1, 50.0)
             else:
                 temperature = torch.as_tensor(1.0, device=src_low.device, dtype=src_low.dtype)
-            src_unfold = F.unfold(src_low, kernel_size=nw, padding=nw // 2)       # [B, nw^2, h*w]
+
+            H_in = source.shape[-2]
+            W_in = source.shape[-1]
+            if self.ncc_ds is not None:
+                h_ncc = max(H_in // self.ncc_ds, 1)
+                w_ncc = max(W_in // self.ncc_ds, 1)
+            else:
+                h_ncc, w_ncc = h, w
+
+            if self.ncc_use_edge:
+                src_ncc = _grad_mag_full_then_down(source, (h_ncc, w_ncc))          # [B,1,h_ncc,w_ncc]
+                ref_ncc = _grad_mag_full_then_down(ref_stack, (h_ncc, w_ncc))       # [B,K,h_ncc,w_ncc]
+            else:
+                src_ncc = F.interpolate(source, size=(h_ncc, w_ncc), mode='bilinear', align_corners=False)
+                ref_ncc = F.interpolate(ref_stack, size=(h_ncc, w_ncc), mode='bilinear', align_corners=False)
+
+            HW_ncc = h_ncc * w_ncc
+            src_unfold = F.unfold(src_ncc, kernel_size=nw, padding=nw // 2)                    # [B, nw^2, HW_ncc]
             ref_unfold = F.unfold(
-                ref_base.reshape(B * K, 1, h, w), kernel_size=nw, padding=nw // 2
-            )                                                                       # [B*K, nw^2, h*w]
-            src_n = F.normalize(src_unfold, dim=1)                                 # [B, nw^2, h*w]
-            ref_n = F.normalize(ref_unfold, dim=1).reshape(B, K, nw * nw, h * w)  # [B,K,nw^2,h*w]
-            ncc_map = (src_n.unsqueeze(1) * ref_n).sum(dim=2).reshape(B, K, h, w) # [B,K,h,w]
+                ref_ncc.reshape(B * K, 1, h_ncc, w_ncc), kernel_size=nw, padding=nw // 2
+            )                                                                                    # [B*K, nw^2, HW_ncc]
+            src_n = F.normalize(src_unfold, dim=1)                                              # [B, nw^2, HW_ncc]
+            ref_n = F.normalize(ref_unfold, dim=1).reshape(B, K, nw * nw, HW_ncc)              # [B,K,nw^2,HW_ncc]
+            ncc_map = (src_n.unsqueeze(1) * ref_n).sum(dim=2).reshape(B, K, h_ncc, w_ncc)     # [B,K,h_ncc,w_ncc]
+
+            if h_ncc != h or w_ncc != w:
+                ncc_map = F.interpolate(ncc_map.reshape(B * K, 1, h_ncc, w_ncc),
+                                        size=(h, w), mode='bilinear', align_corners=False
+                                        ).reshape(B, K, h, w)
+
             score_slice = ncc_map * temperature
             alpha = torch.softmax(score_slice, dim=1)
             q_in = src_low
@@ -1008,6 +1035,8 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_patch_qk_input_mode = kwargs.get('ref_patch_qk_input_mode', 'image')
             self.ref_patch_alpha_mode = kwargs.get('ref_patch_alpha_mode', 'learned')
             self.ref_patch_ncc_window = kwargs.get('ref_patch_ncc_window', 7)
+            self.ref_patch_ncc_ds = kwargs.get('ref_patch_ncc_ds', None)
+            self.ref_patch_ncc_use_edge = kwargs.get('ref_patch_ncc_use_edge', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -1114,6 +1143,8 @@ class ProposedSynthesisModule(nn.Module):
                     qk_input_mode=self.ref_patch_qk_input_mode,
                     alpha_mode=self.ref_patch_alpha_mode,
                     ncc_window=self.ref_patch_ncc_window,
+                    ncc_ds=self.ref_patch_ncc_ds,
+                    ncc_use_edge=self.ref_patch_ncc_use_edge,
                 )
 
         self._last_ref_condition_stats: dict = {}

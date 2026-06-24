@@ -57,6 +57,10 @@ netG_A:
   ref_patch_selector_target_tau: 0.2       # softmax temperature for target_alpha
   ref_patch_selector_target_detach: true   # true: target_alpha is stop-gradient
   ref_patch_qk_input_mode: 'image'         # 'image' | 'edge' | 'image_edge' — EdgeQK feature
+  ref_patch_alpha_mode: 'learned'          # 'learned' | 'ncc' — ncc: deterministic NCC-based alpha (no Q/K)
+  ref_patch_ncc_window: 7                  # local window size for NCC computation (alpha_mode='ncc')
+  ref_patch_ncc_ds: null                   # downsample factor for NCC: null=same as style map, int=finer (e.g. 2→64x64)
+  ref_patch_ncc_use_edge: false            # true: use gradient-magnitude edge map instead of raw image for NCC
   # init_type: 'kaiming'
 
 netD_A:
