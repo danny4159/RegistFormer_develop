@@ -874,7 +874,7 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
             stats[f"slice_weight_{offset:+d}"] = alpha_det[:, i].mean()
 
         # ── selector target stats ─────────────────────────────────────────────
-        if K > 1 and target_alpha is not None and selector_dist is not None:
+        if K > 1 and target_alpha is not None:
             with torch.no_grad():
                 ta = target_alpha.detach()
                 ta_ent = -(ta * ta.clamp_min(1e-8).log()).sum(dim=1)
