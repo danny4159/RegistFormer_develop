@@ -444,7 +444,7 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         _valid_conf = ['entropy', 'max']
         if confidence_mode not in _valid_conf:
             raise ValueError(f"confidence_mode={confidence_mode!r} invalid. Choose from {_valid_conf}")
-        _valid_sel = ['none', 'edge', 'mind']
+        _valid_sel = ['none', 'edge', 'mind', 'ncc']
         if selector_target_mode not in _valid_sel:
             raise ValueError(f"selector_target_mode={selector_target_mode!r}, choose from {_valid_sel}")
         _valid_qk = ['image', 'edge', 'image_edge']
@@ -495,6 +495,7 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         self.ncc_window = int(ncc_window)
         self.ncc_ds = int(ncc_ds) if ncc_ds is not None else None
         self.ncc_use_edge = bool(ncc_use_edge)
+        self.selector_target_ncc_ds = 1  # default: full-res NCC teacher
 
         qk_in_ch = 2 if qk_input_mode == 'image_edge' else 1
         self.q_proj = nn.Conv2d(qk_in_ch, dim, 1)
@@ -642,7 +643,31 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
 
         if K > 1 and self.selector_target_mode != 'none':
             with torch.no_grad() if self.selector_target_detach else torch.enable_grad():
-                if self.selector_target_mode == 'edge':
+                if self.selector_target_mode == 'ncc':
+                    # NCC-based teacher at finer resolution (detects misalignment better)
+                    ncc_ds_t = getattr(self, 'selector_target_ncc_ds', 1)
+                    H_src = source.shape[-2]; W_src = source.shape[-1]
+                    h_t = max(H_src // ncc_ds_t, 1); w_t = max(W_src // ncc_ds_t, 1)
+                    nw_t = 7
+                    src_t = F.interpolate(source, (h_t, w_t), mode='bilinear', align_corners=False)
+                    ref_t = F.interpolate(ref_stack, (h_t, w_t), mode='bilinear', align_corners=False)
+                    src_unf_t = F.unfold(src_t, kernel_size=nw_t, padding=nw_t // 2)
+                    ref_unf_t = F.unfold(ref_t.reshape(B * K, 1, h_t, w_t), kernel_size=nw_t, padding=nw_t // 2)
+                    src_n_t = F.normalize(src_unf_t, dim=1)
+                    ref_n_t = F.normalize(ref_unf_t, dim=1).reshape(B, K, nw_t * nw_t, h_t * w_t)
+                    ncc_map_t = (src_n_t.unsqueeze(1) * ref_n_t).sum(dim=2).reshape(B, K, h_t, w_t)
+                    if h_t != h or w_t != w:
+                        ncc_map_t = F.interpolate(
+                            ncc_map_t.reshape(B * K, 1, h_t, w_t), (h, w),
+                            mode='bilinear', align_corners=False
+                        ).reshape(B, K, h, w)
+                    target_alpha = torch.softmax(
+                        ncc_map_t / max(self.selector_target_tau, 1e-6), dim=1
+                    )
+                    if self.selector_target_detach:
+                        target_alpha = target_alpha.detach()
+
+                elif self.selector_target_mode == 'edge':
                     src_edge = _gradient_mag_2d(src_low)   # [B,1,h,w]
                     ref_edge = _gradient_mag_2d(ref_low)   # [B,K,h,w]
                     selector_dist = (ref_edge - src_edge).abs()  # [B,K,h,w]
@@ -664,9 +689,10 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
                     dist_full = (ref_desc - src_desc.unsqueeze(1)).abs().mean(dim=2)  # [B,K,H',W']
                     selector_dist = F.interpolate(dist_full, size=(h, w), mode='bilinear', align_corners=False)
 
-                target_alpha = torch.softmax(
-                    -selector_dist / max(self.selector_target_tau, 1e-6), dim=1
-                )  # [B,K,h,w]
+                if selector_dist is not None:
+                    target_alpha = torch.softmax(
+                        -selector_dist / max(self.selector_target_tau, 1e-6), dim=1
+                    )  # [B,K,h,w]
 
         # ── confidence from alpha entropy ─────────────────────────────────────
         ent = -(alpha * alpha.clamp_min(1e-8).log()).sum(dim=1, keepdim=True)  # [B,1,h,w]
@@ -1037,6 +1063,7 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_patch_ncc_window = kwargs.get('ref_patch_ncc_window', 7)
             self.ref_patch_ncc_ds = kwargs.get('ref_patch_ncc_ds', None)
             self.ref_patch_ncc_use_edge = kwargs.get('ref_patch_ncc_use_edge', False)
+            self.ref_patch_selector_target_ncc_ds = kwargs.get('ref_patch_selector_target_ncc_ds', 1)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -1146,6 +1173,7 @@ class ProposedSynthesisModule(nn.Module):
                     ncc_ds=self.ref_patch_ncc_ds,
                     ncc_use_edge=self.ref_patch_ncc_use_edge,
                 )
+                self.ref_conditioner_25d.selector_target_ncc_ds = self.ref_patch_selector_target_ncc_ds
 
         self._last_ref_condition_stats: dict = {}
         self._last_ref_condition_aux_losses: dict = {}
