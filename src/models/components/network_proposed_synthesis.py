@@ -889,8 +889,8 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
                     "selector_target_eff_k": ta_eff_k.mean(),
                     "selector_target_top1": ta_top1.mean(),
                     "selector_alpha_agreement": agreement,
-                    "selector_dist_mean": selector_dist.detach().mean(),
-                    "selector_dist_std": selector_dist.detach().std(),
+                    "selector_dist_mean": selector_dist.detach().mean() if selector_dist is not None else torch.zeros([], device=source.device),
+                    "selector_dist_std": selector_dist.detach().std() if selector_dist is not None else torch.zeros([], device=source.device),
                 })
         else:
             stats["selector_target_enabled"] = torch.as_tensor(0.0, device=source.device)
