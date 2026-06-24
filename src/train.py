@@ -5,7 +5,16 @@ from omegaconf.base import ContainerMetadata
 from torch.serialization import add_safe_globals
 import typing
 
-add_safe_globals([ListConfig, ContainerMetadata])
+from monai.data.meta_tensor import MetaTensor
+add_safe_globals([ListConfig, ContainerMetadata, MetaTensor])
+
+# PyTorch 2.6+ defaults weights_only=True which breaks MONAI checkpoints.
+# Patch torch.load to use weights_only=False for local trusted checkpoints.
+_orig_torch_load = torch.load
+def _patched_torch_load(*args, **kwargs):
+    kwargs.setdefault('weights_only', False)
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _patched_torch_load
 #################################################################
 
 from typing import List, Optional, Tuple

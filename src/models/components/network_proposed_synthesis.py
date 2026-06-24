@@ -432,6 +432,8 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         mind_neigh_size=9,
         mind_patch_size=7,
         qk_input_mode='image',            # 'image' | 'edge' | 'image_edge'
+        alpha_mode='learned',             # 'learned' | 'ncc' — if 'ncc', Q/K skipped; NCC used directly
+        ncc_window=7,                     # patch window size for NCC computation (alpha_mode='ncc')
     ):
         super().__init__()
         _valid_pool = ['logsumexp', 'max', 'mean']
@@ -484,6 +486,12 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         self.mind_neigh_size = int(mind_neigh_size)
         self.mind_patch_size = int(mind_patch_size)
 
+        _valid_alpha = ['learned', 'ncc']
+        if alpha_mode not in _valid_alpha:
+            raise ValueError(f"alpha_mode={alpha_mode!r}, choose from {_valid_alpha}")
+        self.alpha_mode = alpha_mode
+        self.ncc_window = int(ncc_window)
+
         qk_in_ch = 2 if qk_input_mode == 'image_edge' else 1
         self.q_proj = nn.Conv2d(qk_in_ch, dim, 1)
         self.k_proj = nn.Conv2d(qk_in_ch, dim, 1)
@@ -508,54 +516,78 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         else:
             ref_base = ref_low
 
-        # ── Q/K projection ───────────────────────────────────────────────────
+        # ── NCC-based deterministic alpha (bypasses learned Q/K) ─────────────
         src_edge = None
         ref_edge = None
-        if self.qk_input_mode == 'image':
-            q_in = src_low                                                      # [B,1,h,w]
-            k_in = ref_base.reshape(B * K, 1, h, w)                            # [B*K,1,h,w]
-        elif self.qk_input_mode == 'edge':
-            src_edge = _grad_mag_full_then_down(source, (h, w))                # [B,1,h,w]
-            ref_edge = _grad_mag_full_then_down(ref_stack, (h, w))             # [B,K,h,w]
-            q_in = src_edge
-            k_in = ref_edge.reshape(B * K, 1, h, w)
-        else:  # 'image_edge'
-            src_edge = _grad_mag_full_then_down(source, (h, w))                # [B,1,h,w]
-            ref_edge = _grad_mag_full_then_down(ref_stack, (h, w))             # [B,K,h,w]
-            q_in = torch.cat([src_low, src_edge], dim=1)                       # [B,2,h,w]
-            k_in = torch.cat([ref_base.reshape(B * K, 1, h, w),
-                               ref_edge.reshape(B * K, 1, h, w)], dim=1)      # [B*K,2,h,w]
-        q = self.q_proj(q_in)                                                   # [B,C,h,w]
-        k = self.k_proj(k_in).view(B, K, self.dim, h, w)                       # [B,K,C,h,w]
-
-        if self.use_qk_norm:
-            q = F.normalize(q, dim=1, eps=1e-8)
-            k = F.normalize(k, dim=2, eps=1e-8)
-            if self.fixed_temperature:
-                temperature = self.temperature_buffer.to(device=q.device, dtype=q.dtype)
+        _alpha_from_ncc = False
+        if self.alpha_mode == 'ncc':
+            _alpha_from_ncc = True
+            nw = self.ncc_window
+            if self.use_qk_norm:
+                if self.fixed_temperature:
+                    temperature = self.temperature_buffer.to(device=src_low.device, dtype=src_low.dtype)
+                else:
+                    temperature = self.log_temperature.exp().clamp(0.1, 50.0)
             else:
-                temperature = self.log_temperature.exp().clamp(0.1, 50.0)
-        else:
-            temperature = torch.as_tensor(1.0 / math.sqrt(self.dim), device=q.device, dtype=q.dtype)
+                temperature = torch.as_tensor(1.0, device=src_low.device, dtype=src_low.dtype)
+            src_unfold = F.unfold(src_low, kernel_size=nw, padding=nw // 2)       # [B, nw^2, h*w]
+            ref_unfold = F.unfold(
+                ref_base.reshape(B * K, 1, h, w), kernel_size=nw, padding=nw // 2
+            )                                                                       # [B*K, nw^2, h*w]
+            src_n = F.normalize(src_unfold, dim=1)                                 # [B, nw^2, h*w]
+            ref_n = F.normalize(ref_unfold, dim=1).reshape(B, K, nw * nw, h * w)  # [B,K,nw^2,h*w]
+            ncc_map = (src_n.unsqueeze(1) * ref_n).sum(dim=2).reshape(B, K, h, w) # [B,K,h,w]
+            score_slice = ncc_map * temperature
+            alpha = torch.softmax(score_slice, dim=1)
+            q_in = src_low
+            k_in = ref_base.reshape(B * K, 1, h, w)
+            q = torch.zeros(B, self.dim, h, w, device=src_low.device)
+            k = torch.zeros(B, K, self.dim, h, w, device=src_low.device)
+            temperature_val = temperature.detach() if torch.is_tensor(temperature) else torch.as_tensor(float(temperature))
 
-        # ── per-patch per-slice score via local window ────────────────────────
-        # k_unfold: [B, K, C, win2, h, w]
-        k_unfold = self._unfold_same(k.reshape(B * K, self.dim, h, w), win)
-        k_unfold = k_unfold.view(B, K, self.dim, win2, h, w)
+        # ── Q/K projection + learned alpha (skipped in ncc mode) ────────────
+        if not _alpha_from_ncc:
+            if self.qk_input_mode == 'image':
+                q_in = src_low                                                      # [B,1,h,w]
+                k_in = ref_base.reshape(B * K, 1, h, w)                            # [B*K,1,h,w]
+            elif self.qk_input_mode == 'edge':
+                src_edge = _grad_mag_full_then_down(source, (h, w))                # [B,1,h,w]
+                ref_edge = _grad_mag_full_then_down(ref_stack, (h, w))             # [B,K,h,w]
+                q_in = src_edge
+                k_in = ref_edge.reshape(B * K, 1, h, w)
+            else:  # 'image_edge'
+                src_edge = _grad_mag_full_then_down(source, (h, w))                # [B,1,h,w]
+                ref_edge = _grad_mag_full_then_down(ref_stack, (h, w))             # [B,K,h,w]
+                q_in = torch.cat([src_low, src_edge], dim=1)                       # [B,2,h,w]
+                k_in = torch.cat([ref_base.reshape(B * K, 1, h, w),
+                                   ref_edge.reshape(B * K, 1, h, w)], dim=1)      # [B*K,2,h,w]
+            q = self.q_proj(q_in)                                                   # [B,C,h,w]
+            k = self.k_proj(k_in).view(B, K, self.dim, h, w)                       # [B,K,C,h,w]
 
-        # score_kw: [B, K, win2, h, w]
-        score_kw = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) * temperature
+            if self.use_qk_norm:
+                q = F.normalize(q, dim=1, eps=1e-8)
+                k = F.normalize(k, dim=2, eps=1e-8)
+                if self.fixed_temperature:
+                    temperature = self.temperature_buffer.to(device=q.device, dtype=q.dtype)
+                else:
+                    temperature = self.log_temperature.exp().clamp(0.1, 50.0)
+            else:
+                temperature = torch.as_tensor(1.0 / math.sqrt(self.dim), device=q.device, dtype=q.dtype)
 
-        # Pool spatial window → per-patch per-slice score: [B, K, h, w]
-        if self.slice_score_pool == 'logsumexp':
-            score_slice = torch.logsumexp(score_kw / self.spatial_tau, dim=2) * self.spatial_tau
-        elif self.slice_score_pool == 'max':
-            score_slice = score_kw.max(dim=2).values
-        else:  # mean
-            score_slice = score_kw.mean(dim=2)
+            # ── per-patch per-slice score via local window ────────────────────
+            k_unfold = self._unfold_same(k.reshape(B * K, self.dim, h, w), win)
+            k_unfold = k_unfold.view(B, K, self.dim, win2, h, w)
+            score_kw = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) * temperature
 
-        # ── K-direction softmax: per-patch slice weights ──────────────────────
-        alpha = torch.softmax(score_slice, dim=1)  # [B, K, h, w]
+            if self.slice_score_pool == 'logsumexp':
+                score_slice = torch.logsumexp(score_kw / self.spatial_tau, dim=2) * self.spatial_tau
+            elif self.slice_score_pool == 'max':
+                score_slice = score_kw.max(dim=2).values
+            else:  # mean
+                score_slice = score_kw.mean(dim=2)
+
+            alpha = torch.softmax(score_slice, dim=1)  # [B, K, h, w]
+            temperature_val = temperature.detach()
 
         # ── Debug: forced-alpha override (diagnostic only, not for training) ──
         force_mode   = getattr(self, "debug_force_alpha_mode", None)
@@ -974,6 +1006,8 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_patch_selector_target_tau = kwargs.get('ref_patch_selector_target_tau', 0.2)
             self.ref_patch_selector_target_detach = kwargs.get('ref_patch_selector_target_detach', True)
             self.ref_patch_qk_input_mode = kwargs.get('ref_patch_qk_input_mode', 'image')
+            self.ref_patch_alpha_mode = kwargs.get('ref_patch_alpha_mode', 'learned')
+            self.ref_patch_ncc_window = kwargs.get('ref_patch_ncc_window', 7)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -1078,6 +1112,8 @@ class ProposedSynthesisModule(nn.Module):
                     selector_target_tau=self.ref_patch_selector_target_tau,
                     selector_target_detach=self.ref_patch_selector_target_detach,
                     qk_input_mode=self.ref_patch_qk_input_mode,
+                    alpha_mode=self.ref_patch_alpha_mode,
+                    ncc_window=self.ref_patch_ncc_window,
                 )
 
         self._last_ref_condition_stats: dict = {}
