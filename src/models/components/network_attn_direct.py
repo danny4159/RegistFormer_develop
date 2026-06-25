@@ -196,6 +196,10 @@ class AttnDirectGenerator(nn.Module):
         selector_target_detach=True,
         # V feature dim (RefFeatureExtractor output channels)
         v_feat_dim=32,
+        # Feature-level beta: use RefEncoder cosine similarity instead of Q/K dot product
+        # Fixes uniform-beta local minimum — RefEncoder 3x3 CNN has spatial diversity
+        use_feat_beta=True,
+        feat_beta_tau=0.1,
         **kwargs,
     ):
         super().__init__()
@@ -204,6 +208,8 @@ class AttnDirectGenerator(nn.Module):
         self.downsample = downsample
         self.v_feat_dim = v_feat_dim
         self.window = window
+        self.use_feat_beta = use_feat_beta
+        self.feat_beta_tau = feat_beta_tau
 
         selector_target_mode = 'ncc' if 'ncc' in attn_mode else 'none'
 
@@ -270,6 +276,7 @@ class AttnDirectGenerator(nn.Module):
         if not encode_only:
             self._last_ref_condition_stats = stats
             self._last_ref_condition_aux_losses = aux_losses
+            self._last_use_feat_beta = self.use_feat_beta
 
         alpha_beta = extra.get('alpha_beta')   # [B, K, win2, h, w] or None
         alpha = extra.get('alpha')             # [B, K, h, w]
@@ -282,7 +289,7 @@ class AttnDirectGenerator(nn.Module):
         v_feat = v_feat_flat.view(B, K, C_v, h, w)            # [B, K, C, h, w]
 
         # ── Weighted feature: S3 spatial+slice attention over V ───────────────
-        if alpha_beta is not None:
+        if alpha_beta is not None or (self.use_feat_beta and alpha is not None):
             # Unfold V features: [B*K, C, h, w] → [B*K, C*win2, h, w]
             v_unfold_flat = _unfold_same(
                 v_feat.reshape(B * K, C_v, h, w), win
@@ -291,8 +298,40 @@ class AttnDirectGenerator(nn.Module):
                 B, K, C_v, win2, h, w
             )                                                  # [B, K, C, win2, h, w]
 
-            # alpha_beta [B,K,win2,h,w] → unsqueeze C dim → [B,K,1,win2,h,w]
-            ab = alpha_beta.unsqueeze(2)                       # [B, K, 1, win2, h, w]
+            if self.use_feat_beta and alpha is not None:
+                # Feature cosine similarity beta — fixes uniform-beta local minimum.
+                # Q/K trained on smooth T1/T2 pixels can't distinguish win² positions.
+                # RefEncoder 3x3 CNN produces spatially diverse features that CAN
+                # distinguish neighboring positions even in smooth MRI regions.
+                src_low = F.interpolate(
+                    src, size=(h, w), mode='bilinear', align_corners=False
+                )
+                src_feat = self.ref_encoder(src_low)           # [B, C_v, h, w]
+                src_feat_n = F.normalize(src_feat, dim=1)      # [B, C_v, h, w]
+                # Normalize over C_v dim for each win position
+                v_unfold_n = F.normalize(v_unfold, dim=2)      # [B, K, C_v, win2, h, w]
+                src_exp = src_feat_n.unsqueeze(1).unsqueeze(3) # [B, 1, C_v, 1, h, w]
+                feat_score = (src_exp * v_unfold_n).sum(dim=2) # [B, K, win2, h, w]
+                feat_beta = F.softmax(feat_score / self.feat_beta_tau, dim=2)
+                ab = (alpha.unsqueeze(2) * feat_beta).unsqueeze(2)  # [B, K, 1, win2, h, w]
+
+                if not encode_only:
+                    with torch.no_grad():
+                        fb = feat_beta.detach()
+                        fb_ent = -(fb * fb.clamp_min(1e-8).log()).sum(dim=2)  # [B,K,h,w]
+                        fb_eff_k = fb_ent.exp().mean()
+                        fb_max = fb.max(dim=2).values.mean()
+                        center_idx = win2 // 2
+                        fb_center = fb[:, :, center_idx, :, :].mean()
+                    if self._last_ref_condition_stats is None:
+                        self._last_ref_condition_stats = {}
+                    self._last_ref_condition_stats['beta_spatial_eff_k'] = fb_eff_k
+                    self._last_ref_condition_stats['beta_max'] = fb_max
+                    self._last_ref_condition_stats['beta_center_weight'] = fb_center
+            else:
+                # alpha_beta from conditioner Q/K
+                ab = alpha_beta.unsqueeze(2)                   # [B, K, 1, win2, h, w]
+
             weighted_feat = (ab * v_unfold).sum(dim=(1, 3))   # [B, C, h, w]
         elif alpha is not None:
             # Fallback: K-direction only (no spatial window)
