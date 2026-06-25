@@ -1,3 +1,4 @@
+import logging
 import math
 import numpy as np
 
@@ -106,9 +107,35 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         self.criterionL1 = torch.nn.L1Loss() if params.lambda_l1 != 0 else None
 
 
-        # PatchNCE specific initializations
-        # self.nce_layers = [0,2,4,6] # range: 0~6
-        # self.flip_equivariance = params.flip_equivariance
+        # accumulators for per-epoch uniformity stats (reset each epoch)
+        self._val_slice_eff_k_acc = []
+        self._val_beta_eff_k_acc = []
+
+    def validation_step(self, batch, batch_idx):
+        result = super().validation_step(batch, batch_idx)
+        stats = getattr(self.netG_A, '_last_ref_condition_stats', None)
+        if stats:
+            v = stats.get('slice_eff_k')
+            if v is not None:
+                self._val_slice_eff_k_acc.append(float(v))
+            v = stats.get('s3/beta_spatial_eff_k')
+            if v is not None:
+                self._val_beta_eff_k_acc.append(float(v))
+        return result
+
+    def on_validation_epoch_end(self):
+        super().on_validation_epoch_end()
+        _log = logging.getLogger('__main__')
+        if self._val_slice_eff_k_acc:
+            mean_slice = sum(self._val_slice_eff_k_acc) / len(self._val_slice_eff_k_acc)
+            self.log("val/slice_eff_k", mean_slice, prog_bar=False)
+            _log.info(f"val/slice_eff_k: {mean_slice:.4f}")
+            self._val_slice_eff_k_acc = []
+        if self._val_beta_eff_k_acc:
+            mean_beta = sum(self._val_beta_eff_k_acc) / len(self._val_beta_eff_k_acc)
+            self.log("val/beta_spatial_eff_k", mean_beta, prog_bar=False)
+            _log.info(f"val/beta_spatial_eff_k: {mean_beta:.4f}")
+            self._val_beta_eff_k_acc = []
 
     @staticmethod
     def _softmin_contextual(cx_list, shift_penalties=None, tau=0.3):
@@ -481,6 +508,21 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             loss_target = slice_reg_valid * aux["slice_target_kl"] * lambda_target
             self.log("loss_G/slice_target_kl", loss_target.detach(), prog_bar=False)
             loss_G = loss_G + loss_target
+
+        # ── S3 beta entropy / smoothness regularization ───────────────────────
+        lambda_beta_ent = float(getattr(self.params, "lambda_beta_entropy", 0.0))
+        if lambda_beta_ent > 0 and "beta_entropy_raw" in aux:
+            target_beta_eff_k = float(getattr(self.params, "beta_entropy_target_eff_k", 3.0))
+            target_beta_entropy = math.log(max(target_beta_eff_k, 1.0))
+            loss_beta_ent = ((aux["beta_entropy_raw"] - target_beta_entropy) ** 2) * lambda_beta_ent
+            self.log("loss_G/beta_entropy", loss_beta_ent.detach(), prog_bar=False)
+            loss_G = loss_G + loss_beta_ent
+
+        lambda_beta_tv = float(getattr(self.params, "lambda_beta_smoothness", 0.0))
+        if lambda_beta_tv > 0 and "beta_smoothness" in aux:
+            loss_beta_tv = aux["beta_smoothness"] * lambda_beta_tv
+            self.log("loss_G/beta_smoothness", loss_beta_tv.detach(), prog_bar=False)
+            loss_G = loss_G + loss_beta_tv
 
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G

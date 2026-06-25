@@ -630,6 +630,7 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         # ── weighted ref ──────────────────────────────────────────────────────
         center_ref = ref_low[:, center_idx:center_idx + 1]  # [B,1,h,w]
 
+        _beta_stats = None
         if self.use_spatial_value_fusion:
             # Stage 3: weighted sum over both K slices AND local spatial window
             ref_base_unfold = self._unfold_same(
@@ -639,6 +640,21 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
             beta = torch.softmax(score_kw / self.spatial_tau, dim=2)     # [B,K,win2,h,w]
             alpha_beta = alpha.unsqueeze(2) * beta                        # [B,K,win2,h,w]
             weighted_ref = (alpha_beta * ref_base_unfold).sum(dim=(1, 2)).unsqueeze(1)  # [B,1,h,w]
+
+            with torch.no_grad():
+                center_pos = win2 // 2
+                beta_det = beta.detach()  # [B,K,win2,h,w]
+                beta_flat = beta_det.mean(dim=1)  # avg over K: [B,win2,h,w]
+                beta_ent = -(beta_flat * beta_flat.clamp_min(1e-8).log()).sum(dim=1)  # [B,h,w]
+                beta_eff_k = torch.exp(beta_ent)
+                beta_center_w = beta_flat[:, center_pos]  # [B,h,w]
+                _beta_stats = {
+                    "s3/beta_center_weight": beta_center_w.mean(),
+                    "s3/beta_spatial_eff_k": beta_eff_k.mean(),
+                    "s3/beta_entropy_norm": (beta_ent / max(math.log(win2), 1e-8)).mean(),
+                    "s3/beta_max": beta_flat.max(dim=1).values.mean(),
+                    "s3/spatial_tau": torch.as_tensor(self.spatial_tau, device=beta.device),
+                }
         else:
             # Stage 1/2: same-position value, only K-direction fusion
             weighted_ref = (alpha * ref_base).sum(dim=1, keepdim=True)   # [B,1,h,w]
@@ -701,6 +717,20 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         else:
             aux_losses["slice_entropy_raw"] = torch.zeros([], device=source.device)
             aux_losses["slice_smoothness"] = torch.zeros([], device=source.device)
+
+        # ── S3 beta regularization (differentiable) ───────────────────────────
+        if self.use_spatial_value_fusion:
+            # beta: [B,K,win2,h,w] — push toward non-uniform (low entropy over win2)
+            # entropy over spatial dim: [B,K,h,w]
+            beta_ent_raw = -(beta * beta.clamp_min(1e-8).log()).sum(dim=2)  # [B,K,h,w]
+            aux_losses["beta_entropy_raw"] = beta_ent_raw.mean()
+            # TV smoothness of beta on spatial h,w dims (encourage consistent spatial attention)
+            beta_dy = (beta[:, :, :, 1:, :] - beta[:, :, :, :-1, :]).abs().mean()
+            beta_dx = (beta[:, :, :, :, 1:] - beta[:, :, :, :, :-1]).abs().mean()
+            aux_losses["beta_smoothness"] = beta_dx + beta_dy
+        else:
+            aux_losses["beta_entropy_raw"] = torch.zeros([], device=source.device)
+            aux_losses["beta_smoothness"] = torch.zeros([], device=source.device)
 
         if K > 1:
             aux_losses["alpha_mean_per_slice"] = alpha.mean(dim=(0, 2, 3))    # [K]
@@ -865,6 +895,18 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
             "diag/uniform_vs_center_weighted": _sens_uni,
             "diag/current_vs_center_weighted": _sens_cur,
         })
+
+        # ── S3 spatial beta stats ─────────────────────────────────────────────
+        if _beta_stats is not None:
+            stats.update(_beta_stats)
+        else:
+            stats.update({
+                "s3/beta_center_weight": torch.zeros([], device=style.device),
+                "s3/beta_spatial_eff_k": torch.zeros([], device=style.device),
+                "s3/beta_entropy_norm": torch.zeros([], device=style.device),
+                "s3/beta_max": torch.zeros([], device=style.device),
+                "s3/spatial_tau": torch.zeros([], device=style.device),
+            })
 
         return style, stats, aux_losses
 

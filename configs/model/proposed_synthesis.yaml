@@ -111,6 +111,11 @@ params: # Other params
   slice_entropy_target_eff_k: 2.0   # target effective slice count (entropy = log(2) ≈ 0.693)
   lambda_slice_target: 0.0          # KL(target_alpha || alpha) loss weight (0=off)
 
+  # S3 spatial beta regularization (only active when ref_patch_use_spatial_value_fusion=true)
+  lambda_beta_entropy: 0.0          # MSE loss: (mean_beta_entropy - log(target_beta_eff_k))^2
+  lambda_beta_smoothness: 0.0       # TV loss on beta spatial attention map
+  beta_entropy_target_eff_k: 3.0    # target effective spatial positions (out of win2=9 for W=3)
+
   reverse: ${data.reverse} # A->B if False, B->A if True
   use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
