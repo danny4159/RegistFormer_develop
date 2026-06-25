@@ -303,26 +303,30 @@ class AttnDirectGenerator(nn.Module):
                 # Q/K trained on smooth T1/T2 pixels can't distinguish win² positions.
                 # RefEncoder 3x3 CNN produces spatially diverse features that CAN
                 # distinguish neighboring positions even in smooth MRI regions.
+                #
+                # feat_beta is computed with no_grad + detached features to avoid
+                # storing large backward activations (saves ~500 MB peak memory).
+                # alpha and v_unfold still carry gradients: encoder trains through
+                # weighted_feat, and slice selection trains through alpha.
                 src_low = F.interpolate(
                     src, size=(h, w), mode='bilinear', align_corners=False
                 )
                 src_feat = self.ref_encoder(src_low)           # [B, C_v, h, w]
-                src_feat_n = F.normalize(src_feat, dim=1)      # [B, C_v, h, w]
-                # Normalize over C_v dim for each win position
-                v_unfold_n = F.normalize(v_unfold, dim=2)      # [B, K, C_v, win2, h, w]
-                src_exp = src_feat_n.unsqueeze(1).unsqueeze(3) # [B, 1, C_v, 1, h, w]
-                feat_score = (src_exp * v_unfold_n).sum(dim=2) # [B, K, win2, h, w]
-                feat_beta = F.softmax(feat_score / self.feat_beta_tau, dim=2)
+                with torch.no_grad():
+                    src_feat_n = F.normalize(src_feat.detach(), dim=1)
+                    v_unfold_n = F.normalize(v_unfold.detach(), dim=2)  # [B,K,Cv,win2,h,w]
+                    src_exp = src_feat_n.unsqueeze(1).unsqueeze(3)      # [B,1,Cv,1,h,w]
+                    feat_score = (src_exp * v_unfold_n).sum(dim=2)      # [B,K,win2,h,w]
+                    feat_beta = F.softmax(feat_score / self.feat_beta_tau, dim=2)
                 ab = (alpha.unsqueeze(2) * feat_beta).unsqueeze(2)  # [B, K, 1, win2, h, w]
 
                 if not encode_only:
                     with torch.no_grad():
-                        fb = feat_beta.detach()
-                        fb_ent = -(fb * fb.clamp_min(1e-8).log()).sum(dim=2)  # [B,K,h,w]
+                        fb_ent = -(feat_beta * feat_beta.clamp_min(1e-8).log()).sum(dim=2)
                         fb_eff_k = fb_ent.exp().mean()
-                        fb_max = fb.max(dim=2).values.mean()
+                        fb_max = feat_beta.max(dim=2).values.mean()
                         center_idx = win2 // 2
-                        fb_center = fb[:, :, center_idx, :, :].mean()
+                        fb_center = feat_beta[:, :, center_idx, :, :].mean()
                     if self._last_ref_condition_stats is None:
                         self._last_ref_condition_stats = {}
                     self._last_ref_condition_stats['beta_spatial_eff_k'] = fb_eff_k
