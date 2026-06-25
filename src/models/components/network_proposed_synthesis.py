@@ -937,7 +937,17 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
                 "s3/spatial_tau": torch.zeros([], device=style.device),
             })
 
-        extra = {'alpha': alpha, 'weighted_ref': weighted_ref}
+        # Expose beta/alpha_beta for AttnDirectGenerator QKV (feature-level V)
+        _beta_export = beta if self.use_spatial_value_fusion else None
+        _alpha_beta_export = alpha_beta if self.use_spatial_value_fusion else None
+        extra = {
+            'alpha': alpha,
+            'weighted_ref': weighted_ref,
+            'beta': _beta_export,               # [B,K,win2,h,w] or None
+            'alpha_beta': _alpha_beta_export,   # [B,K,win2,h,w] or None
+            'ref_base': ref_base,               # [B,K,h,w] (used for V unfold)
+            'win': win,
+        }
         return style, stats, aux_losses, extra
 
 
