@@ -308,12 +308,14 @@ class AttnDirectGenerator(nn.Module):
                 # storing large backward activations (saves ~500 MB peak memory).
                 # alpha and v_unfold still carry gradients: encoder trains through
                 # weighted_feat, and slice selection trains through alpha.
-                src_low = F.interpolate(
-                    src, size=(h, w), mode='bilinear', align_corners=False
-                )
-                src_feat = self.ref_encoder(src_low)           # [B, C_v, h, w]
                 with torch.no_grad():
-                    src_feat_n = F.normalize(src_feat.detach(), dim=1)
+                    # src_feat has no downstream gradient path (feat_beta is detached),
+                    # so compute entirely inside no_grad to avoid storing activations.
+                    src_low = F.interpolate(
+                        src, size=(h, w), mode='bilinear', align_corners=False
+                    )
+                    src_feat = self.ref_encoder(src_low)        # [B, C_v, h, w]
+                    src_feat_n = F.normalize(src_feat, dim=1)
                     v_unfold_n = F.normalize(v_unfold.detach(), dim=2)  # [B,K,Cv,win2,h,w]
                     src_exp = src_feat_n.unsqueeze(1).unsqueeze(3)      # [B,1,Cv,1,h,w]
                     feat_score = (src_exp * v_unfold_n).sum(dim=2)      # [B,K,win2,h,w]
