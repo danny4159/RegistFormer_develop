@@ -110,6 +110,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # accumulators for per-epoch uniformity stats (reset each epoch)
         self._val_slice_eff_k_acc = []
         self._val_beta_eff_k_acc = []
+        self._val_alpha_center_w_acc = []
+        self._val_beta_center_w_acc = []
 
     def validation_step(self, batch, batch_idx):
         result = super().validation_step(batch, batch_idx)
@@ -121,6 +123,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             v = stats.get('s3/beta_spatial_eff_k')
             if v is not None:
                 self._val_beta_eff_k_acc.append(float(v))
+            v = stats.get('center_slice_weight')
+            if v is not None:
+                self._val_alpha_center_w_acc.append(float(v))
+            v = stats.get('s3/beta_center_weight')
+            if v is not None:
+                self._val_beta_center_w_acc.append(float(v))
         return result
 
     def on_validation_epoch_end(self):
@@ -136,6 +144,16 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             self.log("val/beta_spatial_eff_k", mean_beta, prog_bar=False)
             _log.info(f"val/beta_spatial_eff_k: {mean_beta:.4f}")
             self._val_beta_eff_k_acc = []
+        if self._val_alpha_center_w_acc:
+            mean_acw = sum(self._val_alpha_center_w_acc) / len(self._val_alpha_center_w_acc)
+            self.log("val/alpha_center_weight", mean_acw, prog_bar=False)
+            _log.info(f"val/alpha_center_weight: {mean_acw:.4f}")
+            self._val_alpha_center_w_acc = []
+        if self._val_beta_center_w_acc:
+            mean_bcw = sum(self._val_beta_center_w_acc) / len(self._val_beta_center_w_acc)
+            self.log("val/beta_center_weight", mean_bcw, prog_bar=False)
+            _log.info(f"val/beta_center_weight: {mean_bcw:.4f}")
+            self._val_beta_center_w_acc = []
 
     @staticmethod
     def _softmin_contextual(cx_list, shift_penalties=None, tau=0.3):
