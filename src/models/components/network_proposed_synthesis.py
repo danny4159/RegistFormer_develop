@@ -440,7 +440,7 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         _valid_conf = ['entropy', 'max']
         if confidence_mode not in _valid_conf:
             raise ValueError(f"confidence_mode={confidence_mode!r} invalid. Choose from {_valid_conf}")
-        _valid_sel = ['none', 'edge', 'mind']
+        _valid_sel = ['none', 'edge', 'mind', 'ncc']
         if selector_target_mode not in _valid_sel:
             raise ValueError(f"selector_target_mode={selector_target_mode!r}, choose from {_valid_sel}")
         _valid_qk = ['image', 'edge', 'image_edge']
@@ -604,6 +604,30 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
                     ref_desc = ref_desc_flat.reshape(B_orig, K, C_m, Hm, Wm)  # [B,K,C,H',W']
                     dist_full = (ref_desc - src_desc.unsqueeze(1)).abs().mean(dim=2)  # [B,K,H',W']
                     selector_dist = F.interpolate(dist_full, size=(h, w), mode='bilinear', align_corners=False)
+
+                elif self.selector_target_mode == 'ncc':
+                    # Local NCC between source and each ref slice (cross-modality tolerant)
+                    # NCC computed per pixel over a local patch (same win as QK window)
+                    _eps_ncc = 1e-6
+                    _win = self.window
+                    _win2 = _win * _win
+                    # Unfold source and ref into local patches: [B*K, win2, h, w]
+                    src_rep = src_low.expand(B * K, -1, -1, -1)  # [B*K,1,h,w]
+                    ref_flat = ref_low.reshape(B * K, 1, h, w)    # [B*K,1,h,w]
+                    src_unf = self._unfold_same(src_rep, _win).view(B * K, _win2, h, w)  # [B*K,win2,h,w]
+                    ref_unf = self._unfold_same(ref_flat, _win).view(B * K, _win2, h, w)
+                    # Mean-center each patch
+                    src_mu = src_unf.mean(dim=1, keepdim=True)
+                    ref_mu = ref_unf.mean(dim=1, keepdim=True)
+                    src_c = src_unf - src_mu
+                    ref_c = ref_unf - ref_mu
+                    # NCC = dot(src_c, ref_c) / (||src_c|| * ||ref_c|| + eps)
+                    ncc = (src_c * ref_c).sum(dim=1) / (
+                        src_c.norm(dim=1) * ref_c.norm(dim=1) + _eps_ncc
+                    )  # [B*K, h, w]
+                    ncc = ncc.view(B, K, h, w).clamp(-1.0, 1.0)
+                    # High NCC → small dist; dist = 1 - NCC
+                    selector_dist = 1.0 - ncc  # [B, K, h, w]
 
                 target_alpha = torch.softmax(
                     -selector_dist / max(self.selector_target_tau, 1e-6), dim=1
