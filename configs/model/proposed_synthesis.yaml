@@ -53,10 +53,11 @@ netG_A:
   ref_patch_use_spatial_value_fusion: false # Stage 3: value also from local spatial window
   ref_patch_use_feature_injection: false    # Stage 3: decoder feature injection (not yet implemented)
   ref_patch_fixed_temperature: false        # true: temperature frozen (buffer), false: learnable
-  ref_patch_selector_target_mode: 'none'   # 'none' | 'edge' | 'mind' — teacher target for alpha
+  ref_patch_selector_target_mode: 'none'   # 'none' | 'edge' | 'mind' | 'ncc' — teacher target for alpha
   ref_patch_selector_target_tau: 0.2       # softmax temperature for target_alpha
   ref_patch_selector_target_detach: true   # true: target_alpha is stop-gradient
   ref_patch_qk_input_mode: 'image'         # 'image' | 'edge' | 'image_edge' — EdgeQK feature
+  ref_patch_shared_qk: false               # true: k_proj = q_proj (shared weights, same embedding space)
   # init_type: 'kaiming'
 
 netD_A:

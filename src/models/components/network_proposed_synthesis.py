@@ -424,7 +424,7 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         use_spatial_value_fusion=False,   # Stage 3: value also from local window
         use_feature_injection=False,      # Stage 3: decoder feature concat (not yet implemented)
         fixed_temperature=False,          # True: temperature is frozen (buffer), False: learnable
-        selector_target_mode='none',      # 'none' | 'edge' | 'mind'
+        selector_target_mode='none',      # 'none' | 'edge' | 'mind' | 'ncc'
         selector_target_tau=0.2,
         selector_target_detach=True,
         mind_sigma=2.0,
@@ -432,6 +432,7 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
         mind_neigh_size=9,
         mind_patch_size=7,
         qk_input_mode='image',            # 'image' | 'edge' | 'image_edge'
+        shared_qk=False,                  # True: k_proj = q_proj (shared weights, intra-modal focus)
     ):
         super().__init__()
         _valid_pool = ['logsumexp', 'max', 'mean']
@@ -486,7 +487,11 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
 
         qk_in_ch = 2 if qk_input_mode == 'image_edge' else 1
         self.q_proj = nn.Conv2d(qk_in_ch, dim, 1)
-        self.k_proj = nn.Conv2d(qk_in_ch, dim, 1)
+        self.shared_qk = bool(shared_qk)
+        if self.shared_qk:
+            self.k_proj = self.q_proj   # shared weights: same embedding space for Q and K
+        else:
+            self.k_proj = nn.Conv2d(qk_in_ch, dim, 1)
 
     def _unfold_same(self, x, win):
         return F.unfold(x, kernel_size=win, padding=win // 2)
@@ -1040,6 +1045,7 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_patch_selector_target_tau = kwargs.get('ref_patch_selector_target_tau', 0.2)
             self.ref_patch_selector_target_detach = kwargs.get('ref_patch_selector_target_detach', True)
             self.ref_patch_qk_input_mode = kwargs.get('ref_patch_qk_input_mode', 'image')
+            self.ref_patch_shared_qk = kwargs.get('ref_patch_shared_qk', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -1144,6 +1150,7 @@ class ProposedSynthesisModule(nn.Module):
                     selector_target_tau=self.ref_patch_selector_target_tau,
                     selector_target_detach=self.ref_patch_selector_target_detach,
                     qk_input_mode=self.ref_patch_qk_input_mode,
+                    shared_qk=self.ref_patch_shared_qk,
                 )
 
         self._last_ref_condition_stats: dict = {}
