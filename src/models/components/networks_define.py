@@ -12,6 +12,7 @@ from src.models.components.network_spade import SPADEGenerator, ConvEncoder
 from src.models.components.network_adainGen import AdaINGen
 from src.models.components.network_dam import DAModule
 from src.models.components.network_proposed_synthesis import ProposedSynthesisModule
+from src.models.components.network_attn_direct import AttnDirectGenerator
 from src.models.components.network_resnet_generator import ResnetGenerator
 from src.models.components.network_patch_sample_F import PatchSampleF
 from src.models.components.network_G_resnet import G_Resnet
@@ -22,8 +23,14 @@ from src.models.components.network_lapIRN import Miccai2020_LDR_laplacian_unit_d
 from src.models.components.network_transMorph import TransMorph
 from src.models.components.network_resvit import ResViT
 
-from monai.networks.nets import AutoencoderKL, DiffusionModelUNet, PatchDiscriminator
-from monai.apps.generation.maisi.networks.autoencoderkl_maisi import AutoencoderKlMaisi
+try:
+    from monai.networks.nets import AutoencoderKL, DiffusionModelUNet, PatchDiscriminator
+    from monai.apps.generation.maisi.networks.autoencoderkl_maisi import AutoencoderKlMaisi
+except ImportError:
+    AutoencoderKL = None
+    DiffusionModelUNet = None
+    PatchDiscriminator = None
+    AutoencoderKlMaisi = None
 
 # from src.models.components.networks_spade_danny import SPADEGenerator, ConvEncoder
 
@@ -299,6 +306,8 @@ def define_G(**kwargs):
         net = DAModule(**kwargs)
     elif netG_type == 'proposed_synthesis':
         net = ProposedSynthesisModule(**kwargs)
+    elif netG_type == 'attn_direct':
+        net = AttnDirectGenerator(**kwargs)
     elif netG_type == 'resnet_generator':
         net = ResnetGenerator(**kwargs)
     elif netG_type == 'resnet_cat':

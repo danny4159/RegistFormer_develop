@@ -937,7 +937,8 @@ class PatchwiseSliceFusionConditioner25D(nn.Module):
                 "s3/spatial_tau": torch.zeros([], device=style.device),
             })
 
-        return style, stats, aux_losses
+        extra = {'alpha': alpha, 'weighted_ref': weighted_ref}
+        return style, stats, aux_losses, extra
 
 
 class SliceConvFusionConditioner25D(nn.Module):
@@ -1046,6 +1047,8 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_patch_selector_target_detach = kwargs.get('ref_patch_selector_target_detach', True)
             self.ref_patch_qk_input_mode = kwargs.get('ref_patch_qk_input_mode', 'image')
             self.ref_patch_shared_qk = kwargs.get('ref_patch_shared_qk', False)
+            self.ref_patch_debug_force_alpha = kwargs.get('ref_patch_debug_force_alpha', None)
+            self.ref_patch_debug_null_ref = kwargs.get('ref_patch_debug_null_ref', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -1152,6 +1155,8 @@ class ProposedSynthesisModule(nn.Module):
                     qk_input_mode=self.ref_patch_qk_input_mode,
                     shared_qk=self.ref_patch_shared_qk,
                 )
+                if self.ref_patch_debug_force_alpha is not None:
+                    self.ref_conditioner_25d.debug_force_alpha_mode = self.ref_patch_debug_force_alpha
 
         self._last_ref_condition_stats: dict = {}
         self._last_ref_condition_aux_losses: dict = {}
@@ -1286,8 +1291,12 @@ class ProposedSynthesisModule(nn.Module):
                 return F.interpolate(base_ref, size=(h, w), mode='nearest'), None
 
             ref_stack = self._get_ref_stack(ref_all)                 # [B,K,H,W]
+            if getattr(self, 'ref_patch_debug_null_ref', False):
+                ref_stack = torch.zeros_like(ref_stack)
             out = self.ref_conditioner_25d(source=source, ref_stack=ref_stack, out_size=(h, w))
-            if len(out) == 3:
+            if len(out) == 4:
+                cond_style, stats, aux_losses, _ = out   # _ = extra tensors (alpha, weighted_ref)
+            elif len(out) == 3:
                 cond_style, stats, aux_losses = out
             else:
                 cond_style, stats = out

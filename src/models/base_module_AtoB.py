@@ -1,8 +1,11 @@
 from typing import Any, Optional
 
+import logging
 import random
 
 import torch
+
+_log = logging.getLogger(__name__)
 import torch.nn.functional as F
 from lightning import LightningModule
 from src.metrics.gradient_correlation import GradientCorrelationMetric
@@ -86,7 +89,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
     def forward(self, a: torch.Tensor, b: torch.Tensor, c: Optional[torch.Tensor] = None):
         
         # Case1. Refernece guided generation
-        if type(self.netG_A).__name__ in ["RegistFormer", "ProposedSynthesisModule"]:
+        if type(self.netG_A).__name__ in ["RegistFormer", "ProposedSynthesisModule", "AttnDirectGenerator"]:
             if c is not None:
                 merged_input = torch.cat((a, b, c), dim=1)
             else:         
@@ -452,6 +455,8 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.log("val/psnr_B", psnr_B.detach(), sync_dist=True)
             self.log("val/lpips_B", lpips_B.detach(), sync_dist=True)
             self.log("val/sharpness_B", sharpness_B.detach(), sync_dist=True)
+            _log.info(f"val/ssim_B: {ssim_B:.4f}")
+            _log.info(f"val/psnr_B: {psnr_B:.4f}")
 
             if self.has_multiple_outputs:
                 ssim_C = self.val_ssim_C.compute().mean()
@@ -647,6 +652,8 @@ class BaseModule_AtoB(LightningModule):  # single direction
             self.log("test/psnr_B", psnr_B.detach(), sync_dist=True)
             self.log("test/lpips_B", lpips_B.detach(), sync_dist=True)
             self.log("test/sharpness_B", sharpness_B.detach(), sync_dist=True)
+            _log.info(f"test/ssim_B: {ssim_B:.4f}")
+            _log.info(f"test/psnr_B: {psnr_B:.4f}")
             ssim_B_std = torch.std(torch.tensor([metric.item() for metric in self.test_ssim_B.similarity], device=self.device))
             psnr_B_std = torch.std(torch.tensor(self.psnr_values_B, device=self.device))
             lpips_B_std = torch.std(torch.tensor(self.lpips_values_B, device=self.device))
