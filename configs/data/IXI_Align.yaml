@@ -7,12 +7,12 @@
 
 ## Core setting (Important)
 _target_: src.data.SynthRAD_MR_CT_Pelvis_datamodule.SynthRAD_MR_CT_Pelvis_DataModule
-name: IXI_Align_T2_T1_PD
+name: IXI_Align_T1_T2_PD
 type: nifti
 data_dir: ${paths.root_dir}/data/IXI
-data_group_1: "T2"
-data_group_2: "T1"
-data_group_3: "T1_moved" # '_moved' is misalign simulated set
+data_group_1: "T1"
+data_group_2: "T2"
+data_group_3: "T2_moved_3mm" # '_moved' is misalign simulated set
 data_group_4: null # PD
 data_group_5: null # PD_moved
 data_group_6: null # MRA (for triple outputs)

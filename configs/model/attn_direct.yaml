@@ -46,6 +46,10 @@ netG_A:
   feat_beta_tau: 0.1          # temperature; lower = sharper spatial selection
   use_separate_src_encoder: false  # v6: separate SrcEncoder to avoid shared-encoder alignment
   use_pos_bias: false              # v6: learnable win² position bias for offset preference
+  use_stride_encoder: false        # v7: stride conv on full-res input instead of bilinear pre-downsample
+  use_multiscale_stride: false     # v7-ms: attend at DS=2 and DS=4, sum weighted feats
+  use_stride_conditioner: false    # v7-sc: stride conv for conditioner Q/K input (slice selection)
+  ref_encoder_type: stride         # v8: 'stride' (v7), '2d', '2d3d', '3d' (unified attention)
   use_25d_style: ${data.use_25d_style}  # unused by AttnDirect but kept for compat
 
 netD_A:

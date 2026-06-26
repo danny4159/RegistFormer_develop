@@ -110,6 +110,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # accumulators for per-epoch uniformity stats (reset each epoch)
         self._val_slice_eff_k_acc = []
         self._val_beta_eff_k_acc = []
+        self._val_beta_eff_k_brain_acc = []  # brain-region only (no background bias)
+        self._val_unified_attn_eff_k_acc = []  # v8 unified 75-way attention
         self._val_alpha_center_w_acc = []
         self._val_beta_center_w_acc = []
 
@@ -123,6 +125,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             v = stats.get('s3/beta_spatial_eff_k')
             if v is not None:
                 self._val_beta_eff_k_acc.append(float(v))
+            v = stats.get('beta_eff_k_brain')  # brain-region feat_beta eff_k (no background bias)
+            if v is not None:
+                self._val_beta_eff_k_brain_acc.append(float(v))
+            v = stats.get('unified_attn_eff_k')  # v8 unified 75-way attention selectivity
+            if v is not None:
+                self._val_unified_attn_eff_k_acc.append(float(v))
             v = stats.get('center_slice_weight')
             if v is not None:
                 self._val_alpha_center_w_acc.append(float(v))
@@ -144,6 +152,16 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             self.log("val/beta_spatial_eff_k", mean_beta, prog_bar=False)
             _log.info(f"val/beta_spatial_eff_k: {mean_beta:.4f}")
             self._val_beta_eff_k_acc = []
+        if self._val_beta_eff_k_brain_acc:
+            mean_brain = sum(self._val_beta_eff_k_brain_acc) / len(self._val_beta_eff_k_brain_acc)
+            self.log("val/beta_eff_k_brain", mean_brain, prog_bar=False)
+            _log.info(f"val/beta_eff_k_brain: {mean_brain:.4f}  ← brain-only (no background bias)")
+            self._val_beta_eff_k_brain_acc = []
+        if self._val_unified_attn_eff_k_acc:
+            mean_unified = sum(self._val_unified_attn_eff_k_acc) / len(self._val_unified_attn_eff_k_acc)
+            self.log("val/unified_attn_eff_k", mean_unified, prog_bar=False)
+            _log.info(f"val/unified_attn_eff_k: {mean_unified:.4f}  ← v8 75-way attention selectivity")
+            self._val_unified_attn_eff_k_acc = []
         if self._val_alpha_center_w_acc:
             mean_acw = sum(self._val_alpha_center_w_acc) / len(self._val_alpha_center_w_acc)
             self.log("val/alpha_center_weight", mean_acw, prog_bar=False)
