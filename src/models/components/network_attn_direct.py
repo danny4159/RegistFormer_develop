@@ -549,8 +549,11 @@ class AttnDirectGenerator(nn.Module):
         src_exp = src_feat_n.unsqueeze(1).unsqueeze(3)  # [B,1,C,1,h,w]
         attn_score = (src_exp * ref_unfold_n.detach()).sum(dim=2)  # [B,K,win2,h,w]
 
-        # Softmax over K and win2 dimensions (75-way attention)
-        attn = F.softmax(attn_score / tau, dim=(1, 2))  # [B,K,win2,h,w]
+        # Softmax over K and win2 dimensions (75-way attention).
+        attn = F.softmax(
+            (attn_score / tau).reshape(B, K * win2, h, w),
+            dim=1,
+        ).view(B, K, win2, h, w)
 
         # Weighted sum
         ab = attn.unsqueeze(2)  # [B,K,1,win2,h,w]
@@ -673,8 +676,7 @@ class AttnDirectGenerator(nn.Module):
                 ref_feat = ref_3d.permute(0, 2, 1, 3, 4)  # [B, K, C, h, w]
             elif self.ref_encoder_type == '3d':
                 # Ref3DEncoder: [B, K, H, W] → [B, 1, K, H, W] → Conv3D → [B, K, C, h, w]
-                ref_for_3d = ref_stack.unsqueeze(1)  # [B, 1, K, H, W]
-                ref_feat = self.ref_encoder(ref_for_3d)  # [B, K, C, h, w]
+                ref_feat = self.ref_encoder(ref_stack)  # [B, K, C, h, w]
             else:
                 # Fallback: stride encoder (shouldn't reach here if use_unified_attention is set correctly)
                 ref_flat = ref_stack.reshape(B * K, 1, H, W)
