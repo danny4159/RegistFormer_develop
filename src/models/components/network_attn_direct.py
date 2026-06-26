@@ -200,6 +200,13 @@ class AttnDirectGenerator(nn.Module):
         # Fixes uniform-beta local minimum — RefEncoder 3x3 CNN has spatial diversity
         use_feat_beta=True,
         feat_beta_tau=0.1,
+        # v6 fixes for uniform-beta (shared encoder alignment problem):
+        #   use_separate_src_encoder: separate SrcEncoder so src/ref feature spaces
+        #     can specialize independently instead of aligning → cosine_sim stays meaningful
+        #   use_pos_bias: learnable win² position bias added to feat_score, forcing
+        #     the model to prefer specific offsets even if cosine_sim is near-uniform
+        use_separate_src_encoder=False,
+        use_pos_bias=False,
         **kwargs,
     ):
         super().__init__()
@@ -210,6 +217,8 @@ class AttnDirectGenerator(nn.Module):
         self.window = window
         self.use_feat_beta = use_feat_beta
         self.feat_beta_tau = feat_beta_tau
+        self.use_separate_src_encoder = use_separate_src_encoder
+        self.use_pos_bias = use_pos_bias
 
         selector_target_mode = 'ncc' if 'ncc' in attn_mode else 'none'
 
@@ -237,6 +246,15 @@ class AttnDirectGenerator(nn.Module):
 
         # V: learned feature extractor — multi-layer 3x3 conv ensures spatial diversity
         self.ref_encoder = RefFeatureExtractor(in_ch=1, feat_dim=v_feat_dim)
+        # Separate src encoder: avoids src/ref feature-space alignment that makes
+        # cosine_sim uniform. src_encoder learns "what to query", ref_encoder learns "what to provide".
+        if use_separate_src_encoder:
+            self.src_encoder = RefFeatureExtractor(in_ch=1, feat_dim=v_feat_dim)
+        # Learnable position bias over win² shifts — forces model to prefer specific offsets
+        # even when cosine_sim is near-uniform (fallback for encoder alignment issue).
+        if use_pos_bias:
+            win2 = window * window
+            self.pos_bias = nn.Parameter(torch.zeros(1, 1, win2, 1, 1))
 
         # UNet input: src [B,1,H,W] + weighted_feat_upsampled [B,v_feat_dim,H,W]
         unet_input_nc = input_nc + v_feat_dim
@@ -299,27 +317,33 @@ class AttnDirectGenerator(nn.Module):
             )                                                  # [B, K, C, win2, h, w]
 
             if self.use_feat_beta and alpha is not None:
-                # Feature cosine similarity beta — fixes uniform-beta local minimum.
-                # Q/K trained on smooth T1/T2 pixels can't distinguish win² positions.
-                # RefEncoder 3x3 CNN produces spatially diverse features that CAN
-                # distinguish neighboring positions even in smooth MRI regions.
-                #
-                # feat_beta is computed with no_grad + detached features to avoid
-                # storing large backward activations (saves ~500 MB peak memory).
-                # alpha and v_unfold still carry gradients: encoder trains through
-                # weighted_feat, and slice selection trains through alpha.
+                # Feature cosine similarity beta.
+                # v6 variant: optionally use separate src_encoder (no shared-encoder alignment)
+                # and/or learnable pos_bias (forces non-uniform offset preference).
+                src_low = F.interpolate(
+                    src, size=(h, w), mode='bilinear', align_corners=False
+                )
+                if self.use_separate_src_encoder:
+                    # SrcEncoder gets gradient: learns to query ref features meaningfully.
+                    # Activation cost: ~[B,Cv,h,w] = 1×32×64×64 ≈ 0.5 MB — acceptable.
+                    src_feat = self.src_encoder(src_low)        # [B, C_v, h, w]
+                else:
+                    with torch.no_grad():
+                        src_feat = self.ref_encoder(src_low)    # [B, C_v, h, w]
+
                 with torch.no_grad():
-                    # src_feat has no downstream gradient path (feat_beta is detached),
-                    # so compute entirely inside no_grad to avoid storing activations.
-                    src_low = F.interpolate(
-                        src, size=(h, w), mode='bilinear', align_corners=False
-                    )
-                    src_feat = self.ref_encoder(src_low)        # [B, C_v, h, w]
-                    src_feat_n = F.normalize(src_feat, dim=1)
                     v_unfold_n = F.normalize(v_unfold.detach(), dim=2)  # [B,K,Cv,win2,h,w]
-                    src_exp = src_feat_n.unsqueeze(1).unsqueeze(3)      # [B,1,Cv,1,h,w]
-                    feat_score = (src_exp * v_unfold_n).sum(dim=2)      # [B,K,win2,h,w]
-                    feat_beta = F.softmax(feat_score / self.feat_beta_tau, dim=2)
+
+                src_feat_n = F.normalize(src_feat, dim=1)
+                src_exp = src_feat_n.unsqueeze(1).unsqueeze(3)          # [B,1,Cv,1,h,w]
+                feat_score = (src_exp * v_unfold_n.detach()).sum(dim=2) # [B,K,win2,h,w]
+
+                if self.use_pos_bias:
+                    # pos_bias [1,1,win2,1,1] broadcast over [B,K,win2,h,w].
+                    # Gradient: loss → weighted_feat → ab → feat_beta → pos_bias.
+                    feat_score = feat_score + self.pos_bias
+
+                feat_beta = F.softmax(feat_score / self.feat_beta_tau, dim=2)
                 ab = (alpha.unsqueeze(2) * feat_beta).unsqueeze(2)  # [B, K, 1, win2, h, w]
 
                 if not encode_only:

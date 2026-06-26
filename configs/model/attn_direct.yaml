@@ -44,6 +44,8 @@ netG_A:
   v_feat_dim: 32              # V projection dim (only used in qkv/qkv_ncc modes)
   use_feat_beta: true         # RefEncoder cosine similarity for beta (fixes uniform-beta)
   feat_beta_tau: 0.1          # temperature; lower = sharper spatial selection
+  use_separate_src_encoder: false  # v6: separate SrcEncoder to avoid shared-encoder alignment
+  use_pos_bias: false              # v6: learnable win² position bias for offset preference
   use_25d_style: ${data.use_25d_style}  # unused by AttnDirect but kept for compat
 
 netD_A:
