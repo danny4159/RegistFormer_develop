@@ -110,7 +110,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
 
     def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2,
                  blend_mode='none', use_rel_bias=False, use_multihead=False, use_direct_attn=False,
-                 use_qk_norm=False, init_temperature=10.0, use_uniform_attn=False, use_qk_conv3=False):
+                 use_qk_norm=False, init_temperature=10.0, use_uniform_attn=False, use_qk_conv3=False,
+                 style_ch=1):
         super().__init__()
         assert window % 2 == 1, f"window must be odd, got {window}"
         self.dim = dim
@@ -140,6 +141,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             self.log_temperature = nn.Parameter(torch.tensor(math.log(float(init_temperature))))
         self.use_uniform_attn = bool(use_uniform_attn)
         self.use_qk_conv3 = bool(use_qk_conv3)
+        self.style_ch = int(style_ch)
 
         # Manhattan distance for each position in the local window
         r = window // 2
@@ -163,6 +165,13 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         else:
             self.q_proj = nn.Conv2d(1, dim, 1)
             self.k_proj = nn.Conv2d(1, dim, 1)
+        # 수정1: multi-channel style aggregation (style_ch > 1)
+        if self.style_ch > 1:
+            self.ref_feat = nn.Sequential(
+                nn.Conv2d(1, self.style_ch, 3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+            )
+            self.style_compress = nn.Conv2d(self.style_ch, 1, 1)
         if not self.use_direct_attn:
             self.v_proj = nn.Conv2d(1, dim, 1)
             self.out_proj = nn.Sequential(
@@ -259,11 +268,16 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         attn_mean = attn_for_log.mean(dim=1)
 
         if self.use_direct_attn:
-            # Direct: attention weights → raw ref_base values directly
-            # No V_proj / out_proj. Attention must learn to select slices/windows.
-            ref_base_unfold = self._unfold_same(ref_base.reshape(B * K, 1, h, w), win).view(B, K, win2, h, w)
-            weighted_ref = (attn_mean * ref_base_unfold).sum(dim=(1, 2)).unsqueeze(1)  # [B,1,h,w]
-            # Fixed anchor: center_ref_low + alpha=0.5
+            if self.style_ch > 1:
+                # 수정1: multi-channel aggregation in feature space → compress to 1ch
+                ref_feat = self.ref_feat(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.style_ch, h, w)
+                ref_feat_unfold = self._unfold_same(ref_feat.reshape(B * K, self.style_ch, h, w), win)
+                ref_feat_unfold = ref_feat_unfold.view(B, K, self.style_ch, win2, h, w)
+                weighted = (attn_mean.unsqueeze(2) * ref_feat_unfold).sum(dim=(1, 3))  # [B, style_ch, h, w]
+                weighted_ref = self.style_compress(weighted)  # [B, 1, h, w]
+            else:
+                ref_base_unfold = self._unfold_same(ref_base.reshape(B * K, 1, h, w), win).view(B, K, win2, h, w)
+                weighted_ref = (attn_mean * ref_base_unfold).sum(dim=(1, 2)).unsqueeze(1)  # [B,1,h,w]
             attn_style = weighted_ref
             blend_anchor = center_ref_low
             blend_alpha = self.direct_alpha
@@ -396,6 +410,9 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_condition_downsample = kwargs.get('ref_condition_downsample', 16)
             self.ref_condition_uniform_attn = kwargs.get('ref_condition_uniform_attn', False)
             self.ref_condition_qk_conv3 = kwargs.get('ref_condition_qk_conv3', False)
+            self.ref_condition_style_ch = kwargs.get('ref_condition_style_ch', 1)
+            self.ref_condition_hierarchical = kwargs.get('ref_condition_hierarchical', False)
+            self.ref_condition_downsample_fine = kwargs.get('ref_condition_downsample_fine', 4)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -472,7 +489,23 @@ class ProposedSynthesisModule(nn.Module):
                     init_temperature=self.ref_condition_init_temperature,
                     use_uniform_attn=self.ref_condition_uniform_attn,
                     use_qk_conv3=self.ref_condition_qk_conv3,
+                    style_ch=self.ref_condition_style_ch,
                 )
+                # 수정2: fine conditioner for hierarchical injection (decoder layers)
+                if self.ref_condition_hierarchical:
+                    self.ref_conditioner_25d_fine = LocalWindowAttentionConditioner25D(
+                        dim=_cd, window=self.ref_condition_window, coarse=False,
+                        residual_scale=0.1, center_slice_bias=_cb,
+                        blend_mode=self.ref_condition_blend,
+                        use_rel_bias=self.ref_condition_rel_bias,
+                        use_multihead=self.ref_condition_multihead,
+                        use_direct_attn=self.ref_condition_direct,
+                        use_qk_norm=self.ref_condition_qk_norm,
+                        init_temperature=self.ref_condition_init_temperature,
+                        use_uniform_attn=False,
+                        use_qk_conv3=self.ref_condition_qk_conv3,
+                        style_ch=self.ref_condition_style_ch,
+                    )
 
         self._last_ref_condition_stats: dict = {}
 
@@ -609,6 +642,15 @@ class ProposedSynthesisModule(nn.Module):
             )
             if not encode_only:
                 self._last_ref_condition_stats = stats
+            # 수정2: hierarchical — fine conditioner at DS_fine for decoder layers
+            if self.ref_condition_hierarchical and hasattr(self, 'ref_conditioner_25d_fine'):
+                ds_f = self.ref_condition_downsample_fine
+                H, W = source.shape[-2:]
+                h_f, w_f = max(1, H // ds_f), max(1, W // ds_f)
+                fine_style, _ = self.ref_conditioner_25d_fine(
+                    source=source, ref_stack=ref_stack, out_size=(h_f, w_f)
+                )
+                return cond_style, fine_style  # (coarse_style, fine_style)
             return cond_style, None
 
         # ── 2D path ────────────────────────────────────────────────────────
@@ -641,18 +683,34 @@ class ProposedSynthesisModule(nn.Module):
             )
 
         feats = []
-        feat0 = self.conv0(x, style_guidance_1, aux_style=aux_style)
-        feat1 = self.conv11(feat0, style_guidance_1, aux_style=aux_style)
-        feat1 = self.conv12(feat1, style_guidance_1, aux_style=aux_style)
-        feat2 = self.conv21(feat1, style_guidance_1, aux_style=aux_style)
-        feat2 = self.conv22(feat2, style_guidance_1, aux_style=aux_style)
-        feat3 = self.conv31(feat2, style_guidance_1, aux_style=aux_style)
-        feat3 = self.conv32(feat3, style_guidance_1, aux_style=aux_style)
-        feat4 = self.conv41(feat3 + feat2, style_guidance_1, aux_style=aux_style)
-        feat4 = self.conv42(feat4, style_guidance_1, aux_style=aux_style)
-        feat5 = self.conv51(feat4 + feat1, style_guidance_1, aux_style=aux_style)
-        feat5 = self.conv52(feat5, style_guidance_1, aux_style=aux_style)
-        feat6 = self.conv6(feat5 + feat0, style_guidance_1, aux_style=aux_style)
+        if self.ref_condition_hierarchical and aux_style is not None:
+            # 수정2: encoder/bottleneck → coarse style, decoder → fine style
+            cs, fs = style_guidance_1, aux_style
+            feat0 = self.conv0(x, cs)
+            feat1 = self.conv11(feat0, cs)
+            feat1 = self.conv12(feat1, cs)
+            feat2 = self.conv21(feat1, cs)
+            feat2 = self.conv22(feat2, cs)
+            feat3 = self.conv31(feat2, cs)
+            feat3 = self.conv32(feat3, cs)
+            feat4 = self.conv41(feat3 + feat2, fs)
+            feat4 = self.conv42(feat4, fs)
+            feat5 = self.conv51(feat4 + feat1, fs)
+            feat5 = self.conv52(feat5, fs)
+            feat6 = self.conv6(feat5 + feat0, fs)
+        else:
+            feat0 = self.conv0(x, style_guidance_1, aux_style=aux_style)
+            feat1 = self.conv11(feat0, style_guidance_1, aux_style=aux_style)
+            feat1 = self.conv12(feat1, style_guidance_1, aux_style=aux_style)
+            feat2 = self.conv21(feat1, style_guidance_1, aux_style=aux_style)
+            feat2 = self.conv22(feat2, style_guidance_1, aux_style=aux_style)
+            feat3 = self.conv31(feat2, style_guidance_1, aux_style=aux_style)
+            feat3 = self.conv32(feat3, style_guidance_1, aux_style=aux_style)
+            feat4 = self.conv41(feat3 + feat2, style_guidance_1, aux_style=aux_style)
+            feat4 = self.conv42(feat4, style_guidance_1, aux_style=aux_style)
+            feat5 = self.conv51(feat4 + feat1, style_guidance_1, aux_style=aux_style)
+            feat5 = self.conv52(feat5, style_guidance_1, aux_style=aux_style)
+            feat6 = self.conv6(feat5 + feat0, style_guidance_1, aux_style=aux_style)
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 처리
         if self.use_separate_style_layers and self.use_triple_outputs:
