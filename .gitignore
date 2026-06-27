@@ -176,3 +176,4 @@ Mambaforge-Linux-x86_64.sh
 # Python package management
 uv.lock
 pyproject.toml
+*.csv
