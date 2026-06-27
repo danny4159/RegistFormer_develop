@@ -110,7 +110,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
 
     def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2,
                  blend_mode='none', use_rel_bias=False, use_multihead=False, use_direct_attn=False,
-                 use_qk_norm=False, init_temperature=10.0):
+                 use_qk_norm=False, init_temperature=10.0, use_uniform_attn=False, use_qk_conv3=False):
         super().__init__()
         assert window % 2 == 1, f"window must be odd, got {window}"
         self.dim = dim
@@ -138,6 +138,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         self.use_qk_norm = bool(use_qk_norm)
         if self.use_qk_norm:
             self.log_temperature = nn.Parameter(torch.tensor(math.log(float(init_temperature))))
+        self.use_uniform_attn = bool(use_uniform_attn)
+        self.use_qk_conv3 = bool(use_qk_conv3)
 
         # Manhattan distance for each position in the local window
         r = window // 2
@@ -147,8 +149,20 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             torch.tensor(dist, dtype=torch.float32).view(1, 1, window * window, 1, 1),
         )
 
-        self.q_proj = nn.Conv2d(1, dim, 1)
-        self.k_proj = nn.Conv2d(1, dim, 1)
+        if self.use_qk_conv3:
+            self.q_proj = nn.Sequential(
+                nn.Conv2d(1, dim, 3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(dim, dim, 3, padding=1),
+            )
+            self.k_proj = nn.Sequential(
+                nn.Conv2d(1, dim, 3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(dim, dim, 3, padding=1),
+            )
+        else:
+            self.q_proj = nn.Conv2d(1, dim, 1)
+            self.k_proj = nn.Conv2d(1, dim, 1)
         if not self.use_direct_attn:
             self.v_proj = nn.Conv2d(1, dim, 1)
             self.out_proj = nn.Sequential(
@@ -231,6 +245,14 @@ class LocalWindowAttentionConditioner25D(nn.Module):
 
         center_ref_low = ref_low[:, center_idx:center_idx + 1]
         center_base = ref_base[:, center_idx:center_idx + 1]
+
+        # Uniform attention baseline: bypass learned attention with 1/(K*win²) weights
+        if self.use_uniform_attn:
+            attn_for_log = torch.ones_like(attn_for_log) / (K * win2)
+            if not self.use_multihead:
+                attn = attn_for_log.squeeze(1)
+            else:
+                attn_h = attn_for_log
 
         # ── style generation ─────────────────────────────────────────────
         # attn_mean: [B,K,win2,h,w], averaged over heads
@@ -372,6 +394,8 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_condition_qk_norm = kwargs.get('ref_condition_qk_norm', False)
             self.ref_condition_init_temperature = kwargs.get('ref_condition_init_temperature', 10.0)
             self.ref_condition_downsample = kwargs.get('ref_condition_downsample', 16)
+            self.ref_condition_uniform_attn = kwargs.get('ref_condition_uniform_attn', False)
+            self.ref_condition_qk_conv3 = kwargs.get('ref_condition_qk_conv3', False)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -446,6 +470,8 @@ class ProposedSynthesisModule(nn.Module):
                     use_direct_attn=self.ref_condition_direct,
                     use_qk_norm=self.ref_condition_qk_norm,
                     init_temperature=self.ref_condition_init_temperature,
+                    use_uniform_attn=self.ref_condition_uniform_attn,
+                    use_qk_conv3=self.ref_condition_qk_conv3,
                 )
 
         self._last_ref_condition_stats: dict = {}
