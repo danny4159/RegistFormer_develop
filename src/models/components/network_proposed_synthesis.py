@@ -111,12 +111,15 @@ class LocalWindowAttentionConditioner25D(nn.Module):
     def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2,
                  blend_mode='none', use_rel_bias=False, use_multihead=False, use_direct_attn=False,
                  use_qk_norm=False, init_temperature=10.0, use_uniform_attn=False, use_qk_conv3=False,
-                 style_ch=1):
+                 ref_downsample_mode='bilinear', direct_alpha=0.5):
         super().__init__()
         assert window % 2 == 1, f"window must be odd, got {window}"
+        assert ref_downsample_mode in ('bilinear', 'nearest', 'conv_stride2'), \
+            f"ref_downsample_mode must be bilinear/nearest/conv_stride2, got {ref_downsample_mode}"
         self.dim = dim
         self.window = window
         self.coarse = coarse
+        self.ref_downsample_mode = ref_downsample_mode
         self.residual_scale = residual_scale
         self.center_slice_bias = center_slice_bias
         _valid_blend = ['none', 'center_base', 'center_ref_low']
@@ -133,7 +136,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         self.head_dim = dim // self.num_heads
         # direct: attention weights directly mix raw ref values; no V_proj/out_proj shortcut
         self.use_direct_attn = bool(use_direct_attn)
-        self.direct_alpha = 0.5   # center_ref_low anchor, alpha fixed
+        self.direct_alpha = float(direct_alpha)  # style = center_ref + alpha*(weighted_ref - center_ref)
         # qk_norm: cosine similarity attention + learnable temperature
         # prevents Q,K → 0 collapse; small init temperature amplifies tiny cosine differences
         self.use_qk_norm = bool(use_qk_norm)
@@ -141,7 +144,6 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             self.log_temperature = nn.Parameter(torch.tensor(math.log(float(init_temperature))))
         self.use_uniform_attn = bool(use_uniform_attn)
         self.use_qk_conv3 = bool(use_qk_conv3)
-        self.style_ch = int(style_ch)
 
         # Manhattan distance for each position in the local window
         r = window // 2
@@ -150,6 +152,14 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             "spatial_rel_dist",
             torch.tensor(dist, dtype=torch.float32).view(1, 1, window * window, 1, 1),
         )
+
+        # ref encoder: learned conv+stride2 downsampling (2× stride2 = ÷4, for DS=4)
+        if self.ref_downsample_mode == 'conv_stride2':
+            self.ref_encoder = nn.Sequential(
+                nn.Conv2d(1, max(8, dim // 2), 3, stride=2, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(max(8, dim // 2), 1, 3, stride=2, padding=1),
+            )
 
         if self.use_qk_conv3:
             self.q_proj = nn.Sequential(
@@ -165,13 +175,6 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         else:
             self.q_proj = nn.Conv2d(1, dim, 1)
             self.k_proj = nn.Conv2d(1, dim, 1)
-        # 수정1: multi-channel style aggregation (style_ch > 1)
-        if self.style_ch > 1:
-            self.ref_feat = nn.Sequential(
-                nn.Conv2d(1, self.style_ch, 3, padding=1),
-                nn.LeakyReLU(0.2, inplace=True),
-            )
-            self.style_compress = nn.Conv2d(self.style_ch, 1, 1)
         if not self.use_direct_attn:
             self.v_proj = nn.Conv2d(1, dim, 1)
             self.out_proj = nn.Sequential(
@@ -194,7 +197,15 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         pad = win // 2
 
         src_low = F.interpolate(source, size=(h, w), mode='bilinear', align_corners=False)
-        ref_low = F.interpolate(ref_stack, size=(h, w), mode='bilinear', align_corners=False)  # [B,K,h,w]
+        if self.ref_downsample_mode == 'conv_stride2':
+            ref_low = F.interpolate(
+                self.ref_encoder(ref_stack.reshape(B * K, 1, *ref_stack.shape[-2:])),
+                size=(h, w), mode='bilinear', align_corners=False,
+            ).view(B, K, h, w)
+        elif self.ref_downsample_mode == 'nearest':
+            ref_low = F.interpolate(ref_stack, size=(h, w), mode='nearest')
+        else:
+            ref_low = F.interpolate(ref_stack, size=(h, w), mode='bilinear', align_corners=False)
 
         if self.coarse:
             region_size = (max(1, h // 2), max(1, w // 2))
@@ -268,16 +279,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         attn_mean = attn_for_log.mean(dim=1)
 
         if self.use_direct_attn:
-            if self.style_ch > 1:
-                # 수정1: multi-channel aggregation in feature space → compress to 1ch
-                ref_feat = self.ref_feat(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.style_ch, h, w)
-                ref_feat_unfold = self._unfold_same(ref_feat.reshape(B * K, self.style_ch, h, w), win)
-                ref_feat_unfold = ref_feat_unfold.view(B, K, self.style_ch, win2, h, w)
-                weighted = (attn_mean.unsqueeze(2) * ref_feat_unfold).sum(dim=(1, 3))  # [B, style_ch, h, w]
-                weighted_ref = self.style_compress(weighted)  # [B, 1, h, w]
-            else:
-                ref_base_unfold = self._unfold_same(ref_base.reshape(B * K, 1, h, w), win).view(B, K, win2, h, w)
-                weighted_ref = (attn_mean * ref_base_unfold).sum(dim=(1, 2)).unsqueeze(1)  # [B,1,h,w]
+            ref_base_unfold = self._unfold_same(ref_base.reshape(B * K, 1, h, w), win).view(B, K, win2, h, w)
+            weighted_ref = (attn_mean * ref_base_unfold).sum(dim=(1, 2)).unsqueeze(1)  # [B,1,h,w]
             attn_style = weighted_ref
             blend_anchor = center_ref_low
             blend_alpha = self.direct_alpha
@@ -410,9 +413,8 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_condition_downsample = kwargs.get('ref_condition_downsample', 16)
             self.ref_condition_uniform_attn = kwargs.get('ref_condition_uniform_attn', False)
             self.ref_condition_qk_conv3 = kwargs.get('ref_condition_qk_conv3', False)
-            self.ref_condition_style_ch = kwargs.get('ref_condition_style_ch', 1)
-            self.ref_condition_hierarchical = kwargs.get('ref_condition_hierarchical', False)
-            self.ref_condition_downsample_fine = kwargs.get('ref_condition_downsample_fine', 4)
+            self.ref_condition_ref_downsample_mode = kwargs.get('ref_condition_ref_downsample_mode', 'bilinear')
+            self.ref_condition_direct_alpha = kwargs.get('ref_condition_direct_alpha', 0.5)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
@@ -423,8 +425,8 @@ class ProposedSynthesisModule(nn.Module):
                 f"Unknown ref_condition_mode={self.ref_condition_mode!r}. "
                 f"Choose from {_valid_ref_condition_modes}"
             )
-        if self.ref_condition_window not in [1, 3, 5]:
-            raise ValueError(f"ref_condition_window must be 1, 3 or 5, got {self.ref_condition_window}")
+        if self.ref_condition_window % 2 == 0:
+            raise ValueError(f"ref_condition_window must be odd, got {self.ref_condition_window}")
 
         if self.is_3d and self.ref_condition_mode != 'original':
             raise NotImplementedError("ref_condition_mode C_coarse_attn은 2D 전용입니다.")
@@ -489,23 +491,9 @@ class ProposedSynthesisModule(nn.Module):
                     init_temperature=self.ref_condition_init_temperature,
                     use_uniform_attn=self.ref_condition_uniform_attn,
                     use_qk_conv3=self.ref_condition_qk_conv3,
-                    style_ch=self.ref_condition_style_ch,
+                    ref_downsample_mode=self.ref_condition_ref_downsample_mode,
+                    direct_alpha=self.ref_condition_direct_alpha,
                 )
-                # 수정2: fine conditioner for hierarchical injection (decoder layers)
-                if self.ref_condition_hierarchical:
-                    self.ref_conditioner_25d_fine = LocalWindowAttentionConditioner25D(
-                        dim=_cd, window=self.ref_condition_window, coarse=False,
-                        residual_scale=0.1, center_slice_bias=_cb,
-                        blend_mode=self.ref_condition_blend,
-                        use_rel_bias=self.ref_condition_rel_bias,
-                        use_multihead=self.ref_condition_multihead,
-                        use_direct_attn=self.ref_condition_direct,
-                        use_qk_norm=self.ref_condition_qk_norm,
-                        init_temperature=self.ref_condition_init_temperature,
-                        use_uniform_attn=False,
-                        use_qk_conv3=self.ref_condition_qk_conv3,
-                        style_ch=self.ref_condition_style_ch,
-                    )
 
         self._last_ref_condition_stats: dict = {}
 
@@ -621,12 +609,10 @@ class ProposedSynthesisModule(nn.Module):
         return ref_all[:, :1]
 
     def _make_ref_condition(self, source, ref_all, encode_only=False):
-        """Returns (base_style, aux_style), both [B,1,h,w].
+        """Returns style [B,1,h,w].
 
-        original        : z_agg(2.5D) / nearest-downsampled(2D) ref as style
-        C_coarse_attn   : local-window attention conditioner replaces style
-                          (coarse=True: region-pooled K,V | coarse=False: full-res)
-        aux_style is always None (kept for forward signature compatibility).
+        original      : z_agg(2.5D) / nearest-downsampled(2D) ref as style
+        C_coarse_attn : local-window attention conditioner replaces style
         """
         h, w = self._style_size(source)
 
@@ -634,7 +620,7 @@ class ProposedSynthesisModule(nn.Module):
         if self.use_25d_style and self.ref_stack_size >= 1:
             if self.ref_condition_mode == 'original':
                 base_ref = self._aggregate_ref_stack(ref_all)        # [B,1,H,W] via z_agg
-                return F.interpolate(base_ref, size=(h, w), mode='nearest'), None
+                return F.interpolate(base_ref, size=(h, w), mode='nearest')
 
             ref_stack = self._get_ref_stack(ref_all)                 # [B,K,H,W]
             cond_style, stats = self.ref_conditioner_25d(
@@ -642,28 +628,19 @@ class ProposedSynthesisModule(nn.Module):
             )
             if not encode_only:
                 self._last_ref_condition_stats = stats
-            # 수정2: hierarchical — fine conditioner at DS_fine for decoder layers
-            if self.ref_condition_hierarchical and hasattr(self, 'ref_conditioner_25d_fine'):
-                ds_f = self.ref_condition_downsample_fine
-                H, W = source.shape[-2:]
-                h_f, w_f = max(1, H // ds_f), max(1, W // ds_f)
-                fine_style, _ = self.ref_conditioner_25d_fine(
-                    source=source, ref_stack=ref_stack, out_size=(h_f, w_f)
-                )
-                return cond_style, fine_style  # (coarse_style, fine_style)
-            return cond_style, None
+            return cond_style
 
         # ── 2D path ────────────────────────────────────────────────────────
         ref_map = self._get_ref_stack(ref_all)                       # [B,1,H,W]
         if self.ref_condition_mode == 'original':
-            return F.interpolate(ref_map, size=(h, w), mode='nearest'), None
+            return F.interpolate(ref_map, size=(h, w), mode='nearest')
 
         cond_style, stats = self.ref_conditioner_2d(
             source=source, ref=ref_map, out_size=(h, w)
         )
         if not encode_only:
             self._last_ref_condition_stats = stats
-        return cond_style, None
+        return cond_style
 
     def forward(self, merged_input, layers=[], encode_only=False):
 
@@ -676,41 +653,24 @@ class ProposedSynthesisModule(nn.Module):
             ref = ref.permute(0, 1, 4, 2, 3)
             style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
             style_guidance_1 = style_guidance_1.permute(0, 1, 3, 4, 2)
-            aux_style = None
         else:
-            style_guidance_1, aux_style = self._make_ref_condition(
+            style_guidance_1 = self._make_ref_condition(
                 source=x, ref_all=ref_all, encode_only=encode_only
             )
 
         feats = []
-        if self.ref_condition_hierarchical and aux_style is not None:
-            # 수정2: encoder/bottleneck → coarse style, decoder → fine style
-            cs, fs = style_guidance_1, aux_style
-            feat0 = self.conv0(x, cs)
-            feat1 = self.conv11(feat0, cs)
-            feat1 = self.conv12(feat1, cs)
-            feat2 = self.conv21(feat1, cs)
-            feat2 = self.conv22(feat2, cs)
-            feat3 = self.conv31(feat2, cs)
-            feat3 = self.conv32(feat3, cs)
-            feat4 = self.conv41(feat3 + feat2, fs)
-            feat4 = self.conv42(feat4, fs)
-            feat5 = self.conv51(feat4 + feat1, fs)
-            feat5 = self.conv52(feat5, fs)
-            feat6 = self.conv6(feat5 + feat0, fs)
-        else:
-            feat0 = self.conv0(x, style_guidance_1, aux_style=aux_style)
-            feat1 = self.conv11(feat0, style_guidance_1, aux_style=aux_style)
-            feat1 = self.conv12(feat1, style_guidance_1, aux_style=aux_style)
-            feat2 = self.conv21(feat1, style_guidance_1, aux_style=aux_style)
-            feat2 = self.conv22(feat2, style_guidance_1, aux_style=aux_style)
-            feat3 = self.conv31(feat2, style_guidance_1, aux_style=aux_style)
-            feat3 = self.conv32(feat3, style_guidance_1, aux_style=aux_style)
-            feat4 = self.conv41(feat3 + feat2, style_guidance_1, aux_style=aux_style)
-            feat4 = self.conv42(feat4, style_guidance_1, aux_style=aux_style)
-            feat5 = self.conv51(feat4 + feat1, style_guidance_1, aux_style=aux_style)
-            feat5 = self.conv52(feat5, style_guidance_1, aux_style=aux_style)
-            feat6 = self.conv6(feat5 + feat0, style_guidance_1, aux_style=aux_style)
+        feat0 = self.conv0(x, style_guidance_1)
+        feat1 = self.conv11(feat0, style_guidance_1)
+        feat1 = self.conv12(feat1, style_guidance_1)
+        feat2 = self.conv21(feat1, style_guidance_1)
+        feat2 = self.conv22(feat2, style_guidance_1)
+        feat3 = self.conv31(feat2, style_guidance_1)
+        feat3 = self.conv32(feat3, style_guidance_1)
+        feat4 = self.conv41(feat3 + feat2, style_guidance_1)
+        feat4 = self.conv42(feat4, style_guidance_1)
+        feat5 = self.conv51(feat4 + feat1, style_guidance_1)
+        feat5 = self.conv52(feat5, style_guidance_1)
+        feat6 = self.conv6(feat5 + feat0, style_guidance_1)
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 처리
         if self.use_separate_style_layers and self.use_triple_outputs:
@@ -894,7 +854,7 @@ class StyleConv(nn.Module):
                 self.noise_strength_2 = nn.Parameter(torch.zeros(1), requires_grad=True)
                 self.noise_strength_3 = nn.Parameter(torch.zeros(1), requires_grad=True)
 
-    def forward(self, x, style, aux_style=None):
+    def forward(self, x, style):
 
         if self.downsample:
             original_size = x.size()
@@ -1008,14 +968,6 @@ class StyleConv(nn.Module):
             x_pre = x
             x = x * gamma + beta
 
-            # D. coarse attention residual branch
-            if aux_style is not None:
-                aux_style_interp = F.interpolate(aux_style, size=x.size()[2:], mode=mode)
-                aux_actv = self.mlp_shared(aux_style_interp)
-                aux_beta = self.mlp_beta(aux_actv)
-                aux_alpha = 0.2
-                x = x + aux_alpha * aux_beta
-
             if getattr(self, '_log_style_modulation', False):
                 with torch.no_grad():
                     eps = 1e-8
@@ -1029,15 +981,6 @@ class StyleConv(nn.Module):
                         'style_in_std': style.std().detach(),
                         'style_in_spatial_std': style.std(dim=(-2, -1)).mean().detach(),
                     }
-                    if aux_style is not None:
-                        dbg.update({
-                            'aux_style_std': aux_style.std().detach(),
-                            'aux_beta_abs': aux_beta.abs().mean().detach(),
-                            'aux_beta_spatial_std': aux_beta.std(dim=(-2, -1)).mean().detach(),
-                            'aux_applied_over_x_pre': (
-                                (aux_alpha * aux_beta).abs().mean() / (x_pre.abs().mean() + eps)
-                            ).detach(),
-                        })
                     self.last_style_debug = dbg
 
         # activation (LeakyReLU)

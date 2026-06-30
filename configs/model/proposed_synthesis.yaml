@@ -42,11 +42,10 @@ netG_A:
   ref_condition_qk_norm: false    # true: cosine similarity QK + learnable temperature (prevents Q,K→0 collapse)
   ref_condition_qk_conv3: false   # true: 3×3 conv for Q/K (local context); false: 1×1 conv (default)
   ref_condition_uniform_attn: false  # true: bypass learned attn with 1/(K*win²) uniform weights (ablation baseline)
-  ref_condition_style_ch: 1      # 수정1: V aggregation channels (1=raw pixel default, >1=multi-ch feature)
-  ref_condition_hierarchical: false  # 수정2: true=encoder uses coarse DS style, decoder uses fine DS style
-  ref_condition_downsample_fine: 4   # DS for fine conditioner when hierarchical=true
   ref_condition_init_temperature: 10.0  # initial temperature for QK softmax (higher=sharper; 3.0=soft, 10.0=default, 30.0=sharp)
   ref_condition_downsample: 16     # style map downsample factor: 16 (1/16) | 8 | 4 | 2 | 1
+  ref_condition_ref_downsample_mode: 'bilinear'  # ref downsampling: bilinear | nearest | conv_stride2
+  ref_condition_direct_alpha: 0.5  # style = center_ref + alpha*(weighted_ref - center_ref); 0=center only, 1=full attention
   # init_type: 'kaiming'
 
 netD_A:
