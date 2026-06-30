@@ -41,7 +41,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         use_25d_style: bool = False,
         ref_stack_size: int = 3,
         slice_axis: int = 2,
-        apply_rigid_registration: bool = False,
+        apply_linear_registration: bool = False,
+        apply_non_linear_registration: bool = False,
         registration_targets: list = None,
         **kwargs: Any
     ):
@@ -76,7 +77,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         self.use_25d_style = use_25d_style
         self.ref_stack_size = ref_stack_size
         self.slice_axis = slice_axis
-        self.apply_rigid_registration = apply_rigid_registration
+        self.apply_linear_registration = apply_linear_registration
+        self.apply_non_linear_registration = apply_non_linear_registration
         self.registration_targets = registration_targets
 
         self.data_train: Optional[Dataset] = None
@@ -107,7 +109,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             use_25d_style=self.use_25d_style,
             ref_stack_size=self.ref_stack_size,
             slice_axis=self.slice_axis,
-            apply_rigid_registration=self.apply_rigid_registration,
+            apply_linear_registration=self.apply_linear_registration,
+            apply_non_linear_registration=self.apply_non_linear_registration,
             registration_targets=self.registration_targets,
         )  # Use flip and crop augmentation for training data
         self.data_val = dataset_SynthRAD(
@@ -129,7 +132,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             use_25d_style=self.use_25d_style,
             ref_stack_size=self.ref_stack_size,
             slice_axis=self.slice_axis,
-            apply_rigid_registration=self.apply_rigid_registration,
+            apply_linear_registration=self.apply_linear_registration,
+            apply_non_linear_registration=self.apply_non_linear_registration,
             registration_targets=self.registration_targets,
         )
         self.data_test = dataset_SynthRAD(
@@ -151,7 +155,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             use_25d_style=self.use_25d_style,
             ref_stack_size=self.ref_stack_size,
             slice_axis=self.slice_axis,
-            apply_rigid_registration=self.apply_rigid_registration,
+            apply_linear_registration=self.apply_linear_registration,
+            apply_non_linear_registration=self.apply_non_linear_registration,
             registration_targets=self.registration_targets,
         )
 

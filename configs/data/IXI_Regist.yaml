@@ -29,7 +29,7 @@ use_misalign_simul: False
 use_sliding_inference: False
 use_multiple_outputs: False
 norm_ZeroToOne: False        # Data is already normalized to [-1, 1]
-apply_rigid_registration: False  # True: rigid pre-align group_2(T1_moved) → group_1(T1) before network registration
+apply_linear_registration: False  # True: rigid pre-align group_2(T1_moved) → group_1(T1) before network registration
 registration_targets: [2]        # group_2(T1_moved) is rigidly registered to group_1(T1)
 
 ## Dataset File Name (Ver4, 80-slice, 3D)

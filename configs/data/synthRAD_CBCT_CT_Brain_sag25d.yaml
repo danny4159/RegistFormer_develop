@@ -34,5 +34,5 @@ norm_ZeroToOne: False
 use_25d_style: True
 ref_stack_size: 3
 slice_axis: 0
-apply_rigid_registration: False
+apply_linear_registration: False
 registration_targets: null

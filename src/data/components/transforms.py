@@ -20,6 +20,60 @@ import math
 from tqdm import tqdm
 
 
+_CONVEXADAM_SRC = '/SSD2_8TB/Daniel/23_convexadam/convexAdam/src'
+
+
+def _register_3d_nonlinear(fixed_np: np.ndarray, moving_np: np.ndarray, device: str = 'cpu') -> np.ndarray:
+    """Non-linear 3D registration of moving → fixed using ConvexAdam (MIND-SSC).
+
+    Args:
+        fixed_np:  (H, W, D) float32 array, [-1, 1] normalized
+        moving_np: (H, W, D) float32 array, [-1, 1] normalized
+        device:    'cpu' or 'cuda:N'
+    Returns:
+        warped moving volume (H, W, D) float32, same range as input
+    """
+    import sys
+    if _CONVEXADAM_SRC not in sys.path:
+        sys.path.insert(0, _CONVEXADAM_SRC)
+    from convexAdam.convex_adam_MIND import convex_adam_pt
+    from convexAdam.apply_convex import apply_convex
+
+    # ConvexAdam expects [0,1]-normalized tensors
+    def _to_01(arr):
+        lo, hi = arr.min(), arr.max()
+        return (arr - lo) / (hi - lo + 1e-8)
+
+    fixed_t  = torch.from_numpy(_to_01(fixed_np)).float()
+    moving_t = torch.from_numpy(_to_01(moving_np)).float()
+
+    torch_device = torch.device(device)
+    disp = convex_adam_pt(
+        img_fixed=fixed_t,
+        img_moving=moving_t,
+        mind_r=1,
+        mind_d=2,
+        lambda_weight=1.25,
+        grid_sp=6,
+        disp_hw=4,
+        selected_niter=80,
+        selected_smooth=0,
+        grid_sp_adam=2,
+        ic=True,
+        use_mask=False,
+        dtype=torch.float32,
+        verbose=False,
+        device=torch_device,
+    )
+
+    # apply_convex works on [0,1] moving; result is in [0,1]
+    warped_01 = apply_convex(disp=disp, moving=moving_t.numpy())
+
+    # re-map back to [-1, 1] to match the existing pipeline convention
+    lo, hi = moving_np.min(), moving_np.max()
+    return (warped_01 * (hi - lo + 1e-8) + lo).astype(np.float32)
+
+
 def _register_3d_rigid(fixed_np: np.ndarray, moving_np: np.ndarray, z_pad: int = 20) -> np.ndarray:
     """Rigid 3D registration of moving → fixed using SimpleITK.
 
@@ -248,7 +302,8 @@ class dataset_SynthRAD(Dataset):
         use_25d_style: bool = False,
         ref_stack_size: int = 3,
         slice_axis: int = 2,
-        apply_rigid_registration: bool = False,
+        apply_linear_registration: bool = False,
+        apply_non_linear_registration: bool = False,
         registration_targets: list = None,
         *args,
         **kwargs,
@@ -270,7 +325,8 @@ class dataset_SynthRAD(Dataset):
         self.use_25d_style = use_25d_style
         self.ref_stack_size = ref_stack_size
         self.slice_axis = _normalize_slice_axis(slice_axis)
-        self.apply_rigid_registration = apply_rigid_registration
+        self.apply_linear_registration = apply_linear_registration
+        self.apply_non_linear_registration = apply_non_linear_registration
         self.registration_targets = registration_targets or []
 
         os.environ["HDF5_USE_FILE_LOCKING"] = "TRUE"
@@ -311,17 +367,16 @@ class dataset_SynthRAD(Dataset):
                 ]
             )
 
-        # 3D rigid registration cache: registration_targets에 명시된 group → group_1 기준으로 정합
-        # group_2('B')도 registration_targets에 포함되면 캐싱 지원
+        # Registration cache: registration_targets에 명시된 group → group_1 기준으로 정합
+        # Linear(rigid) → NonLinear(ConvexAdam) 순서로 적용 (각각 독립 활성화 가능)
         _group_map = {
             2: ('B', self.data_group_2), 3: ('C', self.data_group_3),
             4: ('D', self.data_group_4), 5: ('E', self.data_group_5),
             6: ('F', self.data_group_6), 7: ('G', self.data_group_7),
         }
         self.reg_cache = {}
-        self._rigid_cached_groups = set()  # which group numbers are in reg_cache
-        if self.apply_rigid_registration and self.registration_targets:
-            # target 번호 중 해당 group이 실제로 정의된 것만 사용
+        self._rigid_cached_groups = set()  # which group keys are in reg_cache
+        if (self.apply_linear_registration or self.apply_non_linear_registration) and self.registration_targets:
             moving_group_map = {
                 cache_key: group
                 for t in self.registration_targets
@@ -330,17 +385,40 @@ class dataset_SynthRAD(Dataset):
                 if group is not None
             }
             if moving_group_map:
-                log.info(f"[RigidReg] Running 3D rigid registration for {len(self.patient_keys)} patients "
-                         f"(targets: {self.registration_targets}, active: {list(moving_group_map.values())}) ...")
                 with h5py.File(self.data_dir, 'r') as file:
-                    for patient_key in tqdm(self.patient_keys, desc="[RigidReg]"):
-                        fixed_vol = file[self.data_group_1][patient_key][...]
+                    fixed_vols = {pk: file[self.data_group_1][pk][...] for pk in self.patient_keys}
+                    raw_moving_vols = {
+                        pk: {ck: file[grp][pk][...] for ck, grp in moving_group_map.items()}
+                        for pk in self.patient_keys
+                    }
+
+                if self.apply_linear_registration:
+                    log.info(f"[LinearReg] Running 3D rigid registration for {len(self.patient_keys)} patients ...")
+                    for patient_key in tqdm(self.patient_keys, desc="[LinearReg]"):
                         self.reg_cache[patient_key] = {}
-                        for cache_key, group in moving_group_map.items():
-                            moving_vol = file[group][patient_key][...]
-                            self.reg_cache[patient_key][cache_key] = _register_3d_rigid(fixed_vol, moving_vol)
-                self._rigid_cached_groups = set(moving_group_map.keys())  # e.g. {'B', 'C'}
-                log.info("[RigidReg] Done.")
+                        for cache_key in moving_group_map:
+                            self.reg_cache[patient_key][cache_key] = _register_3d_rigid(
+                                fixed_vols[patient_key], raw_moving_vols[patient_key][cache_key]
+                            )
+                    log.info("[LinearReg] Done.")
+                else:
+                    # NonLinear only: start from raw volumes
+                    for patient_key in self.patient_keys:
+                        self.reg_cache[patient_key] = {
+                            ck: raw_moving_vols[patient_key][ck] for ck in moving_group_map
+                        }
+
+                if self.apply_non_linear_registration:
+                    log.info(f"[NonLinearReg] Running ConvexAdam registration for {len(self.patient_keys)} patients ...")
+                    for patient_key in tqdm(self.patient_keys, desc="[NonLinearReg]"):
+                        for cache_key in moving_group_map:
+                            moving_for_nl = self.reg_cache[patient_key][cache_key]
+                            self.reg_cache[patient_key][cache_key] = _register_3d_nonlinear(
+                                fixed_vols[patient_key], moving_for_nl
+                            )
+                    log.info("[NonLinearReg] Done.")
+
+                self._rigid_cached_groups = set(moving_group_map.keys())
 
     def _extract_slice(self, volume, slice_idx):
         return np.take(volume, indices=slice_idx, axis=self.slice_axis)
