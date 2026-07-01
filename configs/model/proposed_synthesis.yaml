@@ -89,7 +89,7 @@ params: # Other params
   # lambda_cycle_a: 1
   # lambda_cycle_b: 1
   # lambda_sc: 0.1
-  lambda_nce: 1.5
+  lambda_nce: 0
   lambda_mind: 0
   lambda_l1: 0
   lambda_perceptual: 0  # VGG feature L2 perceptual loss (same 2.5D softmin form as contextual)
@@ -111,7 +111,7 @@ params: # Other params
   use_25d_style: ${data.use_25d_style}
   ref_stack_size: ${data.ref_stack_size}
   ctx_center_only: false     # true: 2.5D에서도 center slice만으로 ctx loss 계산 (2D equivalent)
-  ctx_agg_mode: 'softmin'    # 'softmin': center-biased soft-min (default) | 'mean': simple mean over all slices
+  ctx_agg_mode: 'mean'    # 'softmin': center-biased soft-min (default) | 'mean': simple mean over all slices
   ctx_softmin_tau: 0.3       # soft-min temperature (작을수록 hard-min에 가까움) — softmin 전용
   ctx_shift_penalty: 0.05    # center slice preference bias per neighbor step — softmin 전용
   log_ref_condition: true     # true: ref_condition/* 통계 로그 (A~D 실험용)
