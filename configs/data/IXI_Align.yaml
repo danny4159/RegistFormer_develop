@@ -30,7 +30,8 @@ use_misalign_simul: True
 use_25d_style: True
 ref_stack_size: 3
 apply_linear_registration: False   # True: SimpleITK rigid registration 후 캐싱
-apply_non_linear_registration: False  # True: ConvexAdam(MIND-SSC) non-linear registration 후 캐싱 (linear 결과를 moving으로 사용)
+apply_non_linear_registration: False  # True: non-linear registration 후 캐싱 (linear 결과를 moving으로 사용)
+non_linear_registration_method: 'convexadam'  # 'convexadam' | 'anatomix'
 registration_targets: [3, 5, 7]  # group_1 기준 fixed, 여기 명시된 group만 moving으로 등록 (정의 안된 group은 자동 스킵)
 
 ## Dataset File Name

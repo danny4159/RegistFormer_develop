@@ -12,7 +12,11 @@ import copy
 # import xformers.ops as xops
 
 from src.losses.contextual_loss import VGG_Model, ResNet_Model
-from monai.networks.nets import ResNetFeatures
+try:
+    from monai.networks.nets import ResNetFeatures
+except ImportError:
+    # MONAI 1.1+ removed ResNetFeatures, use torchvision instead
+    ResNetFeatures = None
 
 class RegistFormer(nn.Module):
     def __init__(self, **kwargs):
@@ -59,7 +63,9 @@ class RegistFormer(nn.Module):
         ############################# Autoencoder KL Maisi #############################
         if self.params.use_autoencoder:
             if self.params.use_resnet:
-                self.netK_A = ResNetFeatures(model_name="resnet18", 
+                if ResNetFeatures is None:
+                    raise ImportError("ResNetFeatures is not available in MONAI 1.1+. Please use MONAI 0.9.x or disable use_resnet.")
+                self.netK_A = ResNetFeatures(model_name="resnet18",
                                              pretrained=True,
                                              spatial_dims=3,
                                              in_channels=1,)

@@ -22,8 +22,14 @@ from src.models.components.network_lapIRN import Miccai2020_LDR_laplacian_unit_d
 from src.models.components.network_transMorph import TransMorph
 from src.models.components.network_resvit import ResViT
 
-from monai.networks.nets import AutoencoderKL, DiffusionModelUNet, PatchDiscriminator
-from monai.apps.generation.maisi.networks.autoencoderkl_maisi import AutoencoderKlMaisi
+try:
+    from monai.networks.nets import AutoencoderKL, DiffusionModelUNet, PatchDiscriminator
+    from monai.apps.generation.maisi.networks.autoencoderkl_maisi import AutoencoderKlMaisi
+except ImportError:
+    AutoencoderKL = None
+    DiffusionModelUNet = None
+    PatchDiscriminator = None
+    AutoencoderKlMaisi = None
 
 # from src.models.components.networks_spade_danny import SPADEGenerator, ConvEncoder
 

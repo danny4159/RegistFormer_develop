@@ -229,7 +229,7 @@ class ImageLoggingCallback(Callback):
         self.img_grid = []
         self.err_grid = []
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx: int = 0):
         
         if len(batch[0].size()) == 5: # 3D Image
             self.val_batch_idx = [0, 1, 2, 3, 4]
@@ -284,7 +284,7 @@ class ImageLoggingCallback(Callback):
         self.img_grid = []
         self.err_grid = [] 
 
-    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx: int = 0):
         if len(batch[0].size()) == 5: # 3D Image
             self.val_batch_idx = [0, 1, 2, 3, 4]
             
@@ -795,7 +795,7 @@ class ImageSavingCallback(Callback):
                     key for key in first_group.keys()
                 ]
 
-    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx: int = 0):
         if len(batch[0].size()) == 5:
             res = pl_module.model_step(batch, is_3d=True)
         elif len(batch[0].size()) == 4:

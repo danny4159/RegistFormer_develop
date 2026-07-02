@@ -150,13 +150,13 @@ dmypy.json
 configs/local/default.yaml
 /data/
 /logs*/
+/results/
 /dummy/
-/scripts/dummy/
+/scripts/
 .env
 !/data/**/*.gitkeep
 !/logs*/**/*.gitkeep
 !/dummy/**/*.gitkeep
-!/scripts/dummy/**/*.gitkeep
 
 # Aim logging
 .aim
@@ -172,8 +172,12 @@ Mambaforge-Linux-x86_64.sh
 
 # Folder
 /notebooks/
+/launch_logs/
+/results/
+
+# Shell scripts
+*.sh
 
 # Python package management
 uv.lock
 pyproject.toml
-*.csv

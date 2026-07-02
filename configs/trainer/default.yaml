@@ -8,7 +8,7 @@ max_epochs: 100
 accelerator: auto # automatically choose between CPU, GPU, TPU
 devices: 1
 
-strategy: ddp_find_unused_parameters_true # Only one gpu
+strategy: ddp # Only one gpu
 # strategy: # TODO: only for sumin env (more than one gpu)
 #   _target_: lightning.pytorch.strategies.DDPStrategy
 #   find_unused_parameters: true
@@ -23,6 +23,9 @@ precision: 32 #bf16-mixed
 
 # perform a validation loop every N training epochs
 check_val_every_n_epoch: 1
+
+# disable test stage (skip testing)
+limit_test_batches: 0
 
 # set True to to ensure deterministic results
 # makes training slower but gives more reproducibility than just setting seeds

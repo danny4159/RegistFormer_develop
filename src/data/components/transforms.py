@@ -23,55 +23,35 @@ from tqdm import tqdm
 _CONVEXADAM_SRC = '/SSD2_8TB/Daniel/23_convexadam/convexAdam/src'
 
 
-def _register_3d_nonlinear(fixed_np: np.ndarray, moving_np: np.ndarray, device: str = 'cpu') -> np.ndarray:
-    """Non-linear 3D registration of moving → fixed using ConvexAdam (MIND-SSC).
+def _register_3d_nonlinear(
+    fixed_np: np.ndarray,
+    moving_np: np.ndarray,
+    method: str = 'convexadam',
+    anatomix_ckpt_path: str = None,
+    device: str = 'cpu',
+) -> np.ndarray:
+    """Non-linear 3D registration of moving → fixed.
 
     Args:
         fixed_np:  (H, W, D) float32 array, [-1, 1] normalized
         moving_np: (H, W, D) float32 array, [-1, 1] normalized
+        method: 'convexadam' (default) or 'anatomix'
+        anatomix_ckpt_path: Path to anatomix checkpoint (only for anatomix method)
         device:    'cpu' or 'cuda:N'
     Returns:
         warped moving volume (H, W, D) float32, same range as input
     """
-    import sys
-    if _CONVEXADAM_SRC not in sys.path:
-        sys.path.insert(0, _CONVEXADAM_SRC)
-    from convexAdam.convex_adam_MIND import convex_adam_pt
-    from convexAdam.apply_convex import apply_convex
+    from src.data.components.non_linear_registration import register_nonlinear
 
-    # ConvexAdam expects [0,1]-normalized tensors
-    def _to_01(arr):
-        lo, hi = arr.min(), arr.max()
-        return (arr - lo) / (hi - lo + 1e-8)
-
-    fixed_t  = torch.from_numpy(_to_01(fixed_np)).float()
-    moving_t = torch.from_numpy(_to_01(moving_np)).float()
-
-    torch_device = torch.device(device)
-    disp = convex_adam_pt(
-        img_fixed=fixed_t,
-        img_moving=moving_t,
-        mind_r=1,
-        mind_d=2,
-        lambda_weight=1.25,
-        grid_sp=6,
-        disp_hw=4,
-        selected_niter=80,
-        selected_smooth=0,
-        grid_sp_adam=2,
-        ic=True,
-        use_mask=False,
-        dtype=torch.float32,
-        verbose=False,
-        device=torch_device,
+    warped_01_or_neg1_to_1 = register_nonlinear(
+        fixed_np, moving_np, method=method, anatomix_ckpt_path=anatomix_ckpt_path
     )
 
-    # apply_convex works on [0,1] moving; result is in [0,1]
-    warped_01 = apply_convex(disp=disp, moving=moving_t.numpy())
-
-    # re-map back to [-1, 1] to match the existing pipeline convention
-    lo, hi = moving_np.min(), moving_np.max()
-    return (warped_01 * (hi - lo + 1e-8) + lo).astype(np.float32)
+    # Ensure output is in [-1, 1] range
+    if warped_01_or_neg1_to_1.min() >= -1.5:  # Already in [-1, 1]
+        return warped_01_or_neg1_to_1.astype(np.float32)
+    else:
+        raise ValueError(f"Unexpected output range: [{warped_01_or_neg1_to_1.min()}, {warped_01_or_neg1_to_1.max()}]")
 
 
 def _register_3d_rigid(fixed_np: np.ndarray, moving_np: np.ndarray, z_pad: int = 20) -> np.ndarray:
@@ -304,6 +284,8 @@ class dataset_SynthRAD(Dataset):
         slice_axis: int = 2,
         apply_linear_registration: bool = False,
         apply_non_linear_registration: bool = False,
+        non_linear_registration_method: str = 'convexadam',
+        anatomix_ckpt_path: str = None,
         registration_targets: list = None,
         *args,
         **kwargs,
@@ -327,6 +309,8 @@ class dataset_SynthRAD(Dataset):
         self.slice_axis = _normalize_slice_axis(slice_axis)
         self.apply_linear_registration = apply_linear_registration
         self.apply_non_linear_registration = apply_non_linear_registration
+        self.non_linear_registration_method = non_linear_registration_method
+        self.anatomix_ckpt_path = anatomix_ckpt_path
         self.registration_targets = registration_targets or []
 
         os.environ["HDF5_USE_FILE_LOCKING"] = "TRUE"
@@ -409,12 +393,14 @@ class dataset_SynthRAD(Dataset):
                         }
 
                 if self.apply_non_linear_registration:
-                    log.info(f"[NonLinearReg] Running ConvexAdam registration for {len(self.patient_keys)} patients ...")
+                    log.info(f"[NonLinearReg] Running {self.non_linear_registration_method.upper()} registration for {len(self.patient_keys)} patients ...")
                     for patient_key in tqdm(self.patient_keys, desc="[NonLinearReg]"):
                         for cache_key in moving_group_map:
                             moving_for_nl = self.reg_cache[patient_key][cache_key]
                             self.reg_cache[patient_key][cache_key] = _register_3d_nonlinear(
-                                fixed_vols[patient_key], moving_for_nl
+                                fixed_vols[patient_key], moving_for_nl,
+                                method=self.non_linear_registration_method,
+                                anatomix_ckpt_path=self.anatomix_ckpt_path,
                             )
                     log.info("[NonLinearReg] Done.")
 

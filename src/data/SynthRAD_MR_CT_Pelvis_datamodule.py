@@ -43,6 +43,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         slice_axis: int = 2,
         apply_linear_registration: bool = False,
         apply_non_linear_registration: bool = False,
+        non_linear_registration_method: str = 'convexadam',
+        anatomix_ckpt_path: str = None,
         registration_targets: list = None,
         **kwargs: Any
     ):
@@ -111,6 +113,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             slice_axis=self.slice_axis,
             apply_linear_registration=self.apply_linear_registration,
             apply_non_linear_registration=self.apply_non_linear_registration,
+            non_linear_registration_method=self.non_linear_registration_method,
+            anatomix_ckpt_path=self.anatomix_ckpt_path,
             registration_targets=self.registration_targets,
         )  # Use flip and crop augmentation for training data
         self.data_val = dataset_SynthRAD(
@@ -134,6 +138,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             slice_axis=self.slice_axis,
             apply_linear_registration=self.apply_linear_registration,
             apply_non_linear_registration=self.apply_non_linear_registration,
+            non_linear_registration_method=self.non_linear_registration_method,
+            anatomix_ckpt_path=self.anatomix_ckpt_path,
             registration_targets=self.registration_targets,
         )
         self.data_test = dataset_SynthRAD(
@@ -157,6 +163,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             slice_axis=self.slice_axis,
             apply_linear_registration=self.apply_linear_registration,
             apply_non_linear_registration=self.apply_non_linear_registration,
+            non_linear_registration_method=self.non_linear_registration_method,
+            anatomix_ckpt_path=self.anatomix_ckpt_path,
             registration_targets=self.registration_targets,
         )
 

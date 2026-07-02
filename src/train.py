@@ -2,10 +2,22 @@
 import torch
 from omegaconf.listconfig import ListConfig
 from omegaconf.base import ContainerMetadata
-from torch.serialization import add_safe_globals
 import typing
 
-add_safe_globals([ListConfig, ContainerMetadata])
+try:
+    from torch.serialization import add_safe_globals
+    from monai.data.meta_tensor import MetaTensor
+    add_safe_globals([ListConfig, ContainerMetadata, MetaTensor])
+except (ImportError, AttributeError):
+    pass
+
+# PyTorch 2.6+ defaults weights_only=True which breaks MONAI checkpoints.
+# Patch torch.load to use weights_only=False for local trusted checkpoints.
+_orig_torch_load = torch.load
+def _patched_torch_load(*args, **kwargs):
+    kwargs.setdefault('weights_only', False)
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _patched_torch_load
 #################################################################
 
 from typing import List, Optional, Tuple
@@ -139,9 +151,9 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
         # trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
         # Ver2. For new pytorch
         if ckpt_path is not None:
-            with torch.serialization.safe_globals({ListConfig, ContainerMetadata}):
-                checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-            # checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            # with torch.serialization.safe_globals({ListConfig, ContainerMetadata}):  # PyTorch 2.1.0+ only
+            #     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             model.load_state_dict(checkpoint["state_dict"], strict=False)
         trainer.test(model=model, datamodule=datamodule, ckpt_path=None)
 
