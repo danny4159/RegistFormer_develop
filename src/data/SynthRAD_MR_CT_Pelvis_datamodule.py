@@ -81,6 +81,8 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         self.slice_axis = slice_axis
         self.apply_linear_registration = apply_linear_registration
         self.apply_non_linear_registration = apply_non_linear_registration
+        self.non_linear_registration_method = non_linear_registration_method
+        self.anatomix_ckpt_path = anatomix_ckpt_path
         self.registration_targets = registration_targets
 
         self.data_train: Optional[Dataset] = None
