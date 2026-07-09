@@ -229,6 +229,36 @@ class ImageLoggingCallback(Callback):
         self.img_grid = []
         self.err_grid = []
 
+    @staticmethod
+    def _select_depth_indices(volume: torch.Tensor):
+        depth = volume.size(4)
+        raw_indices = [depth // 4, depth // 2, (3 * depth) // 4]
+        indices = []
+        for idx in raw_indices:
+            idx = min(max(idx, 0), depth - 1)
+            if idx not in indices:
+                indices.append(idx)
+        return indices
+
+    def _log_3d_registration_slices(self, pl_module, batch):
+        evaluation_img, moving_img, fixed_img, warped_img = pl_module.model_step(batch, is_3d=True)
+        for d_index in self._select_depth_indices(evaluation_img):
+            self.saving_to_grid([
+                evaluation_img[:, :, :, :, d_index].squeeze(-1),
+                moving_img[:, :, :, :, d_index].squeeze(-1),
+                fixed_img[:, :, :, :, d_index].squeeze(-1),
+                warped_img[:, :, :, :, d_index].squeeze(-1),
+            ])
+
+    def _log_3d_generation_slices(self, pl_module, batch):
+        real_a, real_b, fake_b, *_ = pl_module.model_step(batch)
+        for d_index in self._select_depth_indices(real_a):
+            self.saving_to_grid([
+                real_a[:, :, :, :, d_index].squeeze(-1),
+                real_b[:, :, :, :, d_index].squeeze(-1),
+                fake_b[:, :, :, :, d_index].squeeze(-1),
+            ])
+
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx: int = 0):
         
         if len(batch[0].size()) == 5: # 3D Image
@@ -240,20 +270,9 @@ class ImageLoggingCallback(Callback):
         ):  
             
             if len(batch[0].size()) == 5 and pl_module.params.is_registration == True: # 3D Image Registration
-                d_index = 30  # 5번째 D 차원의 30번째 데이터 선택
-                evaluation_img, moving_img, fixed_img, warped_img = pl_module.model_step(batch, is_3d=True)
-                evaluation_img = evaluation_img[:, :, :, :, d_index].squeeze(-1)
-                moving_img = moving_img[:, :, :, :, d_index].squeeze(-1)
-                fixed_img = fixed_img[:, :, :, :, d_index].squeeze(-1)
-                warped_img = warped_img[:, :, :, :, d_index].squeeze(-1)
-                self.saving_to_grid([evaluation_img, moving_img, fixed_img, warped_img])
+                self._log_3d_registration_slices(pl_module, batch)
             elif len(batch[0].size()) == 5 and pl_module.params.is_registration == False:  # 3D Image Generation
-                d_index = 4
-                real_a, real_b, fake_b, *_ = pl_module.model_step(batch)
-                real_a = real_a[:, :, :, :, d_index].squeeze(-1)
-                real_b = real_b[:, :, :, :, d_index].squeeze(-1)
-                fake_b = fake_b[:, :, :, :, d_index].squeeze(-1)
-                self.saving_to_grid([real_a, real_b, fake_b])
+                self._log_3d_generation_slices(pl_module, batch)
             elif len(batch[0].size()) == 4: # 2D
                 res = pl_module.model_step(batch)
                 self.saving_to_grid(res)
@@ -293,20 +312,9 @@ class ImageLoggingCallback(Callback):
         ):  # log every indexes for slice number in test set
             
             if len(batch[0].size()) == 5 and pl_module.params.is_registration == True: # 3D Image
-                d_index = 30  # 5번째 D 차원의 30번째 데이터 선택
-                evaluation_img, moving_img, fixed_img, warped_img = pl_module.model_step(batch, is_3d=True)
-                evaluation_img = evaluation_img[:, :, :, :, d_index].squeeze(-1)
-                moving_img = moving_img[:, :, :, :, d_index].squeeze(-1)
-                fixed_img = fixed_img[:, :, :, :, d_index].squeeze(-1)
-                warped_img = warped_img[:, :, :, :, d_index].squeeze(-1)
-                self.saving_to_grid([evaluation_img, moving_img, fixed_img, warped_img])
+                self._log_3d_registration_slices(pl_module, batch)
             elif len(batch[0].size()) == 5 and pl_module.params.is_registration == False:  # 3D Image Generation
-                d_index = 4
-                real_a, real_b, fake_b, *_ = pl_module.model_step(batch)
-                real_a = real_a[:, :, :, :, d_index].squeeze(-1)
-                real_b = real_b[:, :, :, :, d_index].squeeze(-1)
-                fake_b = fake_b[:, :, :, :, d_index].squeeze(-1)
-                self.saving_to_grid([real_a, real_b, fake_b])
+                self._log_3d_generation_slices(pl_module, batch)
             elif len(batch[0].size()) == 4:
                 res = pl_module.model_step(batch)
                 self.saving_to_grid(res)
@@ -334,6 +342,7 @@ class ImageSavingCallback(Callback):
                  data_dir: str = None,
                  data_type:str = None,
                  norm_ZeroToOne: bool = False,
+                 slice_axis: int = 2,
                  ):
         """_summary_
         Image saving callback : Save images in nii format for each subject
@@ -347,11 +356,79 @@ class ImageSavingCallback(Callback):
         self.data_dir = data_dir
         self.data_type = data_type
         self.norm_ZeroToOne = norm_ZeroToOne
+        self.slice_axis = slice_axis
         # print("test_file: ", test_file)
         # print("flag_normalize: ", self.flag_normalize)
 
     def normalize_np(self, arr):
         return arr if self.norm_ZeroToOne else (arr + 1) / 2
+
+    def _background_fill_value(self):
+        return 0 if self.flag_normalize else -1
+
+    @staticmethod
+    def _center_crop_or_pad_2d(arr, target_hw, fill_value=0):
+        target_h, target_w = target_hw
+        h, w = arr.shape
+
+        if h > target_h:
+            start_h = (h - target_h) // 2
+            arr = arr[start_h:start_h + target_h, :]
+        elif h < target_h:
+            pad_top = (target_h - h) // 2
+            pad_bottom = target_h - h - pad_top
+            arr = np.pad(arr, ((pad_top, pad_bottom), (0, 0)), constant_values=fill_value)
+
+        h, w = arr.shape
+        if w > target_w:
+            start_w = (w - target_w) // 2
+            arr = arr[:, start_w:start_w + target_w]
+        elif w < target_w:
+            pad_left = (target_w - w) // 2
+            pad_right = target_w - w - pad_left
+            arr = np.pad(arr, ((0, 0), (pad_left, pad_right)), constant_values=fill_value)
+
+        return arr
+
+    @staticmethod
+    def _center_crop_or_pad_3d(arr, target_shape, fill_value=0):
+        out = arr
+        for axis, target_len in enumerate(target_shape):
+            cur_len = out.shape[axis]
+            if cur_len > target_len:
+                start = (cur_len - target_len) // 2
+                slices = [slice(None)] * out.ndim
+                slices[axis] = slice(start, start + target_len)
+                out = out[tuple(slices)]
+            elif cur_len < target_len:
+                pad_before = (target_len - cur_len) // 2
+                pad_after = target_len - cur_len - pad_before
+                pad_width = [(0, 0)] * out.ndim
+                pad_width[axis] = (pad_before, pad_after)
+                out = np.pad(out, pad_width, constant_values=fill_value)
+        return out
+
+    def _plane_shape_from_volume_shape(self, volume_shape):
+        if self.slice_axis == 0:
+            return (volume_shape[1], volume_shape[2])
+        if self.slice_axis == 1:
+            return (volume_shape[0], volume_shape[2])
+        return (volume_shape[0], volume_shape[1])
+
+    def _stack_slices_to_volume(self, slices, volume_shape):
+        plane_shape = self._plane_shape_from_volume_shape(volume_shape)
+        restored_slices = [
+            self._center_crop_or_pad_2d(arr, plane_shape, fill_value=self._background_fill_value())
+            for arr in slices
+        ]
+        return np.stack(restored_slices, axis=self.slice_axis)
+
+    def _prepare_volume_for_save(self, arr, volume_shape):
+        return self._center_crop_or_pad_3d(
+            arr,
+            volume_shape,
+            fill_value=self._background_fill_value(),
+        )
     
     @staticmethod
     def change_torch_numpy(a, b, c, d, e=None, f=None):
@@ -406,15 +483,6 @@ class ImageSavingCallback(Callback):
         #     np.transpose(d, axes=(1, 0, 2))[:, ::-1],
         # )
 
-        # flip rows and columns (행과 열 반전) -> Align with original image
-        a, b, c, d, e = (
-            a[::-1, ::-1, :],
-            b[::-1, ::-1, :],
-            c[::-1, ::-1, :],
-            d[::-1, ::-1, :] if d is not None else None,
-            e[::-1, ::-1, :] if e is not None else None,
-        )
-
         # Create Nifti1Image for each
         a_nii, b_nii, c_nii, d_nii, e_nii = (
             nib.Nifti1Image(a, np.eye(4)),
@@ -454,17 +522,6 @@ class ImageSavingCallback(Callback):
         return
     
     @staticmethod
-    def save_nii_registration(a_nii, b_nii, c_nii, d_nii, subject_number, folder_path):
-        nib.save(a_nii, os.path.join(folder_path, f"evaluation_img_{subject_number}.nii.gz"))
-        nib.save(b_nii, os.path.join(folder_path, f"moving_img_{subject_number}.nii.gz"))
-        nib.save(c_nii, os.path.join(folder_path, f"fixed_img_{subject_number}.nii.gz"))
-        if d_nii is not None:
-            nib.save(
-                d_nii, os.path.join(folder_path, f"warped_img_{subject_number}.nii.gz")
-            )
-        return
-
-    @staticmethod
     def save_tif(a, b, a2, b2, preds_a, preds_b, subject_number, folder_path):
         a_tif = Image.fromarray(a)
         b_tif = Image.fromarray(b)
@@ -502,16 +559,17 @@ class ImageSavingCallback(Callback):
             if b_moved_np is not None:
                 self.img_b_moved.append(b_moved_np)
 
-            if len(self.img_a) == self.subject_slice_num[0]:
-                a_nii = np.stack(self.img_a, -1)
-                b_nii = np.stack(self.img_b, -1)
-                preds_a_nii = np.stack(self.img_preds_a, -1)
+            if self.subject_slice_num and len(self.img_a) == self.subject_slice_num[0]:
+                volume_shape = self.subject_shapes[0]
+                a_nii = self._stack_slices_to_volume(self.img_a, volume_shape)
+                b_nii = self._stack_slices_to_volume(self.img_b, volume_shape)
+                preds_a_nii = self._stack_slices_to_volume(self.img_preds_a, volume_shape)
                 if preds_b is not None:
-                    preds_b_nii = np.stack(self.img_preds_b, -1)
+                    preds_b_nii = self._stack_slices_to_volume(self.img_preds_b, volume_shape)
                 else:
                     preds_b_nii = a_nii * 0  # Placeholder if preds_b is None
                 if preds_c is not None:
-                    preds_c_nii = np.stack(self.img_preds_c, -1)
+                    preds_c_nii = self._stack_slices_to_volume(self.img_preds_c, volume_shape)
                 else:
                     preds_c_nii = a_nii * 0
                 b_moved_nii = np.stack(self.img_b_moved, -1) if self.img_b_moved else None
@@ -531,7 +589,7 @@ class ImageSavingCallback(Callback):
                     preds_a_nii,
                     preds_b_nii if preds_b is not None else None,
                     preds_c_nii if preds_c is not None else None,
-                    subject_number=self.dataset_list[0], # 환자이름으로저장
+                    subject_number=self.dataset_list[0] if self.dataset_list else self.subject_number, # 환자이름으로저장
                     folder_path=self.save_folder_name,
                     f_nii=b_moved_nii,
                 )
@@ -545,31 +603,42 @@ class ImageSavingCallback(Callback):
                 if preds_c is not None:
                     self.img_preds_c = []
                 self.img_b_moved = []
-                self.dataset_list.pop(0)
-                self.subject_slice_num.pop(0)
+                if self.dataset_list:
+                    self.dataset_list.pop(0)
+                if self.subject_slice_num:
+                    self.subject_slice_num.pop(0)
+                if self.subject_shapes:
+                    self.subject_shapes.pop(0)
+                self.subject_number += 1
 
             if self.subject_number > self.subject_number_length:
                 log.info(f"Saving test images up to {self.subject_number_length}")
                 return
             
         elif a.ndim == 3: # 3D image            
-            preds_b = a * 0 if preds_b is None else preds_b
-            preds_c = a * 0 if preds_c is None else preds_c
+            volume_shape = self.subject_shapes[0]
+            a = self._prepare_volume_for_save(a, volume_shape)
+            b = self._prepare_volume_for_save(b, volume_shape)
+            preds_a = self._prepare_volume_for_save(preds_a, volume_shape)
+            preds_b = self._prepare_volume_for_save(a * 0 if preds_b is None else preds_b, volume_shape)
+            preds_c = self._prepare_volume_for_save(a * 0 if preds_c is None else preds_c, volume_shape)
             a_nii, b_nii, preds_a_nii, preds_b_nii, preds_c_nii = self.change_numpy_nii(
                 a, b, preds_a, preds_b, preds_c,
                 flag_normalize=self.flag_normalize
             )
             
             # save nii image to (.nii) file
-            self.save_nii_registration(
+            self.save_nii(
                 a_nii,
                 b_nii,
                 preds_a_nii,
                 preds_b_nii if preds_b is not None else None,
+                preds_c_nii if preds_c is not None else None,
                 subject_number=self.dataset_list[0], # 환자이름으로저장
                 folder_path=self.save_folder_name,
             )
             self.dataset_list.pop(0)
+            self.subject_shapes.pop(0)
 
     @staticmethod
     def change_torch_numpy_multi(*tensors):
@@ -662,7 +731,7 @@ class ImageSavingCallback(Callback):
             self.img_preds_c.append(preds_c)
             self.img_preds_d.append(preds_d)
 
-            if len(self.img_a) == self.subject_slice_num[0]:
+            if self.subject_slice_num and len(self.img_a) == self.subject_slice_num[0]:
                 a_nii = np.stack(self.img_a, -1)
                 b_nii = np.stack(self.img_b, -1)
                 c_nii = np.stack(self.img_c, -1) if self.img_c and self.img_c[0] is not None else None
@@ -689,7 +758,7 @@ class ImageSavingCallback(Callback):
                     b_ref_nii=b_ref_nii,
                     c_ref_nii=c_ref_nii,
                     d_ref_nii=d_ref_nii,
-                    subject_number=self.dataset_list[0],
+                    subject_number=self.dataset_list[0] if self.dataset_list else self.subject_number,
                     folder_path=self.save_folder_name,
                 )
 
@@ -703,8 +772,11 @@ class ImageSavingCallback(Callback):
                 self.img_preds_b = []
                 self.img_preds_c = []
                 self.img_preds_d = []
-                self.dataset_list.pop(0)
-                self.subject_slice_num.pop(0)
+                if self.dataset_list:
+                    self.dataset_list.pop(0)
+                if self.subject_slice_num:
+                    self.subject_slice_num.pop(0)
+                self.subject_number += 1
 
             if self.subject_number > self.subject_number_length:
                 log.info(f"Saving test images up to {self.subject_number_length}")
@@ -755,6 +827,10 @@ class ImageSavingCallback(Callback):
         folder_name = os.path.join(trainer.default_root_dir, "results")
         log.info(f"Saving test images to nifti files to {folder_name}")
 
+        datamodule = getattr(trainer, "datamodule", None)
+        if datamodule is not None and hasattr(datamodule, "slice_axis"):
+            self.slice_axis = datamodule.slice_axis
+
         if not os.path.exists(folder_name):
             os.makedirs(folder_name)
 
@@ -774,26 +850,33 @@ class ImageSavingCallback(Callback):
         self.img_preds_d = []
         self.i = 0
         self.subject_slice_num = []
+        self.subject_shapes = []
         self.subject_number = 1
 
         data_path = os.path.join(self.data_dir, "test", self.test_file)  # TODO: If you want to change test file, change it here.
 
-        if self.data_type == 'nifti':
-            with h5py.File(data_path, "r") as file:
-                first_group = file[list(file.keys())[0]]
-                self.dataset_list = [
-                    key for key in first_group.keys()
-                ]  # 데이터셋 이름을 리스트로 저장
-                self.subject_slice_num = [
-                    first_group[key].shape[2] for key in self.dataset_list
-                ]  # slice number를 리스트로 저장
+        try:
+            if self.data_type == 'nifti':
+                with h5py.File(data_path, "r") as file:
+                    first_group = file[list(file.keys())[0]]
+                    self.dataset_list = [
+                        key for key in first_group.keys()
+                    ]  # 데이터셋 이름을 리스트로 저장
+                    self.subject_slice_num = [
+                        first_group[key].shape[self.slice_axis] for key in self.dataset_list
+                    ]  # slice number를 리스트로 저장
+                    self.subject_shapes = [
+                        tuple(first_group[key].shape) for key in self.dataset_list
+                    ]
 
-        elif self.data_type == 'photo':
-            with h5py.File(data_path, "r") as file:
-                first_group = file[list(file.keys())[0]]
-                self.dataset_list = [
-                    key for key in first_group.keys()
-                ]
+            elif self.data_type == 'photo':
+                with h5py.File(data_path, "r") as file:
+                    first_group = file[list(file.keys())[0]]
+                    self.dataset_list = [
+                        key for key in first_group.keys()
+                    ]
+        except Exception as e:
+            log.warning(f"Failed to load dataset info: {e}. Will proceed without pre-loaded info.")
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx: int = 0):
         if len(batch[0].size()) == 5:

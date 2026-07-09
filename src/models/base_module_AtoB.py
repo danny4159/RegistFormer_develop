@@ -69,7 +69,7 @@ class BaseModule_AtoB(LightningModule):  # single direction
             # Following Pytorch lightning metric
             # PSNR, LPIPS: 'update', 'compute', and 'append' at each step, calculate 'mean and std' at the end of epoch
             # SSIM: initialize with reduction='none', 'update' at each step, 'compute' at the end of epoch, then calculate 'mean and std'
-            ssim = StructuralSimilarityIndexMeasure(reduction="none")
+            ssim = StructuralSimilarityIndexMeasure(reduction="none", data_range=2.0)
             psnr = PeakSignalNoiseRatio(data_range=2.0)
             lpips = LearnedPerceptualImagePatchSimilarity()
             sharpness = SharpnessMetric()

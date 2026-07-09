@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -81,14 +81,50 @@ class UnetPlusPlusSynthesisModule(BaseModule_AtoB):
     def forward(self, cbct_stack: torch.Tensor) -> torch.Tensor:
         return self.netG_A(cbct_stack)
 
+    @staticmethod
+    def _center_crop_hw(
+        tensor: torch.Tensor,
+        target_hw: Union[torch.Tensor, Tuple[int, int]],
+    ) -> torch.Tensor:
+        if isinstance(target_hw, torch.Tensor):
+            target_h = int(target_hw[0].item())
+            target_w = int(target_hw[1].item())
+        else:
+            target_h, target_w = target_hw
+
+        _, _, h, w = tensor.shape
+        start_h = max((h - target_h) // 2, 0)
+        start_w = max((w - target_w) // 2, 0)
+        return tensor[:, :, start_h:start_h + target_h, start_w:start_w + target_w]
+
+    def _restore_original_hw(
+        self,
+        center_cbct: torch.Tensor,
+        real_ct: torch.Tensor,
+        fake_ct: torch.Tensor,
+        original_hw: Optional[torch.Tensor],
+    ):
+        if original_hw is None:
+            return center_cbct, real_ct, fake_ct
+
+        center_cbct = self._center_crop_hw(center_cbct, original_hw[0] if original_hw.ndim == 2 else original_hw)
+        real_ct = self._center_crop_hw(real_ct, original_hw[0] if original_hw.ndim == 2 else original_hw)
+        fake_ct = self._center_crop_hw(fake_ct, original_hw[0] if original_hw.ndim == 2 else original_hw)
+        return center_cbct, real_ct, fake_ct
+
     def clamp_for_eval(self, tensor: torch.Tensor) -> torch.Tensor:
         if self.params.norm_ZeroToOne:
             return torch.clamp(tensor, 0.0, 1.0)
         return torch.clamp(tensor, -1.0, 1.0)
 
     def model_step(self, batch: Any, is_3d=False):
-        center_cbct, real_ct, cbct_stack = batch
+        if len(batch) == 4:
+            center_cbct, real_ct, cbct_stack, original_hw = batch
+        else:
+            center_cbct, real_ct, cbct_stack = batch
+            original_hw = None
         fake_ct = self.forward(cbct_stack)
+        center_cbct, real_ct, fake_ct = self._restore_original_hw(center_cbct, real_ct, fake_ct, original_hw)
         if not self.training:
             fake_ct = self.clamp_for_eval(fake_ct)
         return center_cbct, real_ct, fake_ct
@@ -107,8 +143,13 @@ class UnetPlusPlusSynthesisModule(BaseModule_AtoB):
         return tensor * mask + (1.0 - mask) * bg_value
 
     def shared_step(self, batch: Any, stage: str) -> torch.Tensor:
-        center_cbct, real_ct, cbct_stack = batch
+        if len(batch) == 4:
+            center_cbct, real_ct, cbct_stack, original_hw = batch
+        else:
+            center_cbct, real_ct, cbct_stack = batch
+            original_hw = None
         fake_ct = self.forward(cbct_stack)
+        center_cbct, real_ct, fake_ct = self._restore_original_hw(center_cbct, real_ct, fake_ct, original_hw)
         mask = self.build_body_mask(center_cbct, real_ct)
 
         loss_mae = self.masked_mae_loss(fake_ct, real_ct, mask)
