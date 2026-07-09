@@ -26,13 +26,13 @@ from pathlib import Path
 import time
 
 IN_H5  = Path(
-    "/SSD5_8TB/Daniel/Daniel_ssd2/RegistFormer/data/IXI/test/"
+    "/SSD2_8TB/Daniel/20_Registformer_Git_Real/RegistFormer/data/IXI/test/"
     "IXI_Testset_Ver4_T1_T2_PD_MRA_Registered_30Patient_MisalignSimul_"
     "Rotate5Translate5_NonLinearSig13_Mag650_CubicInterpolate_"
     "BackGroundOutFeather_SliceThicknessSimul_80Slice.h5"
 )
 OUT_H5 = Path(
-    "/SSD5_8TB/Daniel/Daniel_ssd2/RegistFormer/data/IXI/test/"
+    "/SSD2_8TB/Daniel/20_Registformer_Git_Real/RegistFormer/data/IXI/test/"
     "IXI_Testset_Ver4_T1_T2_PD_MRA_ArtifactSimul_to_moved_10Patient_80Slice.h5"
 )
 

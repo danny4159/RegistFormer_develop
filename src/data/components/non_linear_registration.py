@@ -80,6 +80,7 @@ def register_anatomix(fixed_np: np.ndarray, moving_np: np.ndarray, ckpt_path: st
             selected_niter=80,
             selected_smooth=0,
             ckpt_path=ckpt_path,
+            hf_variant='anatomix' if ckpt_path is None else None,
             grid_sp_adam=2,
             ic=True,
             result_path=str(tmpdir),
