@@ -160,10 +160,73 @@ def padding_height_width_depth(
         if pad_top != 0 or pad_left != 0 or pad_front != 0:
             padded = []
             for tensor in tensors:
-                padded.append(nnF.pad(tensor, (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back), value=pad_value))
+                # 4D tensors use [C, H, W, D], while torch.nn.functional.pad
+                # applies 6-value padding from the last dimension backward.
+                padded.append(
+                    nnF.pad(
+                        tensor,
+                        (pad_front, pad_back, pad_left, pad_right, pad_top, pad_bottom),
+                        value=pad_value,
+                    )
+                )
             tensors = padded
 
     return tuple(tensors)
+
+
+def pad_to_multiple_height_width_depth(
+    tensorA,
+    tensorB,
+    tensorC=None,
+    tensorD=None,
+    tensorE=None,
+    tensorF=None,
+    tensorG=None,
+    multiple=32,
+    pad_value=-1,
+):
+    tensors = [tensorA, tensorB, tensorC, tensorD, tensorE, tensorF, tensorG]
+    tensors = [tensor for tensor in tensors if tensor is not None]
+
+    if len(tensorA.shape) == 3:
+        _, h, w = tensorA.shape
+        expected_ndim = 3
+    elif len(tensorA.shape) == 4:
+        _, h, w, d = tensorA.shape
+        expected_ndim = 4
+    else:
+        raise ValueError("Input tensors must have 3 or 4 dimensions")
+
+    for idx, tensor in enumerate(tensors, start=1):
+        assert len(tensor.shape) == expected_ndim, f"Input tensor {idx} must have {expected_ndim} dimensions"
+
+    target_h = int(np.ceil(h / multiple) * multiple)
+    target_w = int(np.ceil(w / multiple) * multiple)
+
+    if expected_ndim == 4:
+        return padding_height_width_depth(
+            tensorA,
+            tensorB,
+            tensorC,
+            tensorD,
+            tensorE,
+            tensorF,
+            tensorG,
+            target_size=(target_h, target_w, d),
+            pad_value=pad_value,
+        )
+
+    return padding_height_width_depth(
+        tensorA,
+        tensorB,
+        tensorC,
+        tensorD,
+        tensorE,
+        tensorF,
+        tensorG,
+        target_size=(target_h, target_w),
+        pad_value=pad_value,
+    )
 
 
 def random_crop(
@@ -274,6 +337,7 @@ class dataset_SynthRAD(Dataset):
         data_group_7: Optional[str] = None,  # For triple outputs (MRA_moved)
         is_3d: bool = False,
         padding_size: Optional[Tuple[int, int]] = None,
+        pad_to_multiple: Optional[int] = None,
         flip_prob: float = 0.0,
         rot_prob: float = 0.0,
         crop_size: Optional[Tuple[int, int]] = None,
@@ -301,6 +365,7 @@ class dataset_SynthRAD(Dataset):
         self.data_group_7 = data_group_7
         self.is_3d = is_3d
         self.padding_size = padding_size
+        self.pad_to_multiple = pad_to_multiple
         self.crop_size = crop_size
         self.reverse = reverse
         self.norm_ZeroToOne = norm_ZeroToOne
@@ -533,6 +598,8 @@ class dataset_SynthRAD(Dataset):
         if self.data_group_7:
             G = data_dict["G"]
 
+        original_shape = tuple(A.shape[-3:]) if self.is_3d else tuple(A.shape[-2:])
+            
         if self.padding_size:
             if self.data_group_7:
                 A, B, C, D, E, F, G = padding_height_width_depth(A, B, C, D, E, F, G, target_size=self.padding_size)
@@ -546,6 +613,30 @@ class dataset_SynthRAD(Dataset):
                 A, B, C = padding_height_width_depth(A, B, C, target_size=self.padding_size)
             else:
                 A, B = padding_height_width_depth(A, B, target_size=self.padding_size)
+
+        if self.pad_to_multiple:
+            if self.data_group_7:
+                A, B, C, D, E, F, G = pad_to_multiple_height_width_depth(
+                    A, B, C, D, E, F, G, multiple=self.pad_to_multiple
+                )
+            elif self.data_group_6:
+                A, B, C, D, E, F = pad_to_multiple_height_width_depth(
+                    A, B, C, D, E, F, multiple=self.pad_to_multiple
+                )
+            elif self.data_group_5:
+                A, B, C, D, E = pad_to_multiple_height_width_depth(
+                    A, B, C, D, E, multiple=self.pad_to_multiple
+                )
+            elif self.data_group_4:
+                A, B, C, D = pad_to_multiple_height_width_depth(
+                    A, B, C, D, multiple=self.pad_to_multiple
+                )
+            elif self.data_group_3:
+                A, B, C = pad_to_multiple_height_width_depth(
+                    A, B, C, multiple=self.pad_to_multiple
+                )
+            else:
+                A, B = pad_to_multiple_height_width_depth(A, B, multiple=self.pad_to_multiple)
 
         data_dict["A"] = A
         data_dict["B"] = B
@@ -643,8 +734,12 @@ class dataset_SynthRAD(Dataset):
             elif self.data_group_4:
                 return A, B, C, D
             elif self.data_group_3:
+                if self.pad_to_multiple:
+                    return A, B, C, torch.tensor(original_shape, dtype=torch.int64)
                 return A, B, C
             else:
+                if self.is_3d and self.pad_to_multiple:
+                    return A, B, torch.tensor(original_shape, dtype=torch.int64)
                 return A, B
 
     def get_patient_slice_idx(self, idx):

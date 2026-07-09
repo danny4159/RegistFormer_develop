@@ -36,6 +36,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         flip_prob: float = 0.0,  # augmentation for training (flip)
         rot_prob: float = 0.0,  # augmentation for training (rot90)
         padding_size: Optional[Tuple[int, int]] = None,
+        pad_to_multiple: Optional[int] = None,
         crop_size: Optional[Tuple[int, int]] = None,
         norm_ZeroToOne: bool = False,
         use_25d_style: bool = False,
@@ -74,6 +75,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
         self.flip_prob = flip_prob
         self.rot_prob = rot_prob
         self.padding_size = padding_size
+        self.pad_to_multiple = pad_to_multiple
         self.crop_size = crop_size
         self.norm_ZeroToOne = norm_ZeroToOne
         self.use_25d_style = use_25d_style
@@ -105,6 +107,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             data_group_7=self.data_group_7,
             is_3d=self.is_3d,
             padding_size=self.padding_size,
+            pad_to_multiple=self.pad_to_multiple,
             flip_prob=self.flip_prob,
             rot_prob=self.rot_prob,
             crop_size=self.crop_size,
@@ -130,6 +133,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             data_group_7=self.data_group_7,
             is_3d=self.is_3d,
             padding_size=self.padding_size,
+            pad_to_multiple=self.pad_to_multiple,
             # flip_prob=0.0,
             # rot_prob=0.0,
             # crop_size=self.crop_size,
@@ -155,6 +159,7 @@ class SynthRAD_MR_CT_Pelvis_DataModule(LightningDataModule):
             data_group_7=self.data_group_7,
             is_3d=self.is_3d,
             padding_size=self.padding_size,
+            pad_to_multiple=self.pad_to_multiple,
             # flip_prob=0.0,
             # rot_prob=0.0,
             # crop_size=self.crop_size,
