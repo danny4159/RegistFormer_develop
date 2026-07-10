@@ -11,7 +11,11 @@ from src import utils
 
 import random
 from torchvision import models
-from src.models.base_module_AtoB_BtoA import BaseModule_AtoB_BtoA
+from src.models.base_module_AtoB_BtoA import (
+    BaseModule_AtoB_BtoA,
+    clip_to_valid_range,
+    norm_to_uint8,
+)
 from src.models.components.component_regpgan import *
 
 from reprlib import recursive_repr
@@ -57,6 +61,71 @@ class ResViTModule(BaseModule_AtoB_BtoA):
         self.criterionGAN = GANLoss(gan_type='lsgan')
         self.criterionL1 = torch.nn.L1Loss()
 
+
+    def _unpack_batch(self, batch):
+        """Normal batch: (real_a, real_b). When params.use_eval_ref is set
+        (data.data_group_3 carries the true, registered T2, used only for
+        metric computation, never for the training loss), batch instead is
+        (real_a, real_b, eval_ref)."""
+        if getattr(self.params, "use_eval_ref", False) and len(batch) == 3:
+            real_a, real_b, eval_ref = batch
+            return real_a, real_b, eval_ref
+        real_a, real_b = batch
+        return real_a, real_b, None
+
+    def model_step(self, batch: Any):
+        """Override: strip eval_ref (if present) before delegating to the
+        normal ResViT forward pass, so the training loss always uses real_b
+        (the actual training target, e.g. T2_proposed/T2_moved), never eval_ref."""
+        real_a, real_b, _eval_ref = self._unpack_batch(batch)
+        fake_b, fake_a = self.forward(real_a, real_b)
+        return real_a, real_b, fake_a, fake_b
+
+    def validation_step(self, batch: Any, batch_idx: int):
+        real_a, real_b, eval_ref = self._unpack_batch(batch)
+        fake_b, fake_a = self.forward(real_a, real_b)
+        metric_ref_b = eval_ref if eval_ref is not None else real_b
+
+        self.val_ssim_A.update(real_a, fake_a)
+        self.val_psnr_A.update(real_a, fake_a)
+        self.psnr_values_A.append(self.val_psnr_A.compute().item())
+        self.val_psnr_A.reset()
+        self.val_lpips_A.update(gray2rgb(clip_to_valid_range(real_a)), gray2rgb(clip_to_valid_range(fake_a)))
+        self.lpips_values_A.append(self.val_lpips_A.compute().item())
+        self.val_lpips_A.reset()
+        self.val_sharpness_A.update(norm_to_uint8(fake_a).float())
+
+        self.val_ssim_B.update(metric_ref_b, fake_b)
+        self.val_psnr_B.update(metric_ref_b, fake_b)
+        self.psnr_values_B.append(self.val_psnr_B.compute().item())
+        self.val_psnr_B.reset()
+        self.val_lpips_B.update(gray2rgb(clip_to_valid_range(metric_ref_b)), gray2rgb(clip_to_valid_range(fake_b)))
+        self.lpips_values_B.append(self.val_lpips_B.compute().item())
+        self.val_lpips_B.reset()
+        self.val_sharpness_B.update(norm_to_uint8(fake_b).float())
+
+    def test_step(self, batch: Any, batch_idx: int):
+        real_a, real_b, eval_ref = self._unpack_batch(batch)
+        fake_b, fake_a = self.forward(real_a, real_b)
+        metric_ref_b = eval_ref if eval_ref is not None else real_b
+
+        self.test_ssim_A.update(real_a, fake_a)
+        self.test_psnr_A.update(real_a, fake_a)
+        self.psnr_values_A.append(self.test_psnr_A.compute().item())
+        self.test_psnr_A.reset()
+        self.test_lpips_A.update(gray2rgb(clip_to_valid_range(real_a)), gray2rgb(clip_to_valid_range(fake_a)))
+        self.lpips_values_A.append(self.test_lpips_A.compute().item())
+        self.test_lpips_A.reset()
+        self.test_sharpness_A.update(norm_to_uint8(fake_a).float())
+
+        self.test_ssim_B.update(metric_ref_b, fake_b)
+        self.test_psnr_B.update(metric_ref_b, fake_b)
+        self.psnr_values_B.append(self.test_psnr_B.compute().item())
+        self.test_psnr_B.reset()
+        self.test_lpips_B.update(gray2rgb(clip_to_valid_range(metric_ref_b)), gray2rgb(clip_to_valid_range(fake_b)))
+        self.lpips_values_B.append(self.test_lpips_B.compute().item())
+        self.test_lpips_B.reset()
+        self.test_sharpness_B.update(norm_to_uint8(fake_b).float())
 
     def backward_G(self, real_a, real_b, fake_a, fake_b, lambda_l1):
         fake_ab = torch.cat((real_a, fake_b), 1) # [12, 1, 256, 256] + [12, 1, 256, 256]

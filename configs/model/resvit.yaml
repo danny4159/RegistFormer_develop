@@ -63,4 +63,5 @@ params: # Other params
   use_sliding_inference: ${data.use_sliding_inference}
   use_multiple_outputs: ${data.use_multiple_outputs} # Set True if data_group_3 is exist
   use_misalign_simul: ${data.use_misalign_simul}
+  use_eval_ref: ${data.data_group_3} # true T2 for metrics only (never used as training target), set data.data_group_3=T2
   inference_for_registration: False

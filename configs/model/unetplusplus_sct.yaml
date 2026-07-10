@@ -27,6 +27,8 @@ params:
   lambda_perc: 0.01
   perceptual_layers: [4, 9, 18]
   mask_threshold: -0.95
+  use_masked_loss: true
+  use_eval_ref: ${data.data_group_4} # true T2 for metrics only (never used as training target), set data.data_group_4=T2
   norm_ZeroToOne: ${data.norm_ZeroToOne}
   reverse: ${data.reverse}
   batch_size: ${data.batch_size}

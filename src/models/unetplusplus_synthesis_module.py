@@ -103,14 +103,39 @@ class UnetPlusPlusSynthesisModule(BaseModule_AtoB):
         real_ct: torch.Tensor,
         fake_ct: torch.Tensor,
         original_hw: Optional[torch.Tensor],
+        eval_ref: Optional[torch.Tensor] = None,
     ):
         if original_hw is None:
-            return center_cbct, real_ct, fake_ct
+            return center_cbct, real_ct, fake_ct, eval_ref
 
-        center_cbct = self._center_crop_hw(center_cbct, original_hw[0] if original_hw.ndim == 2 else original_hw)
-        real_ct = self._center_crop_hw(real_ct, original_hw[0] if original_hw.ndim == 2 else original_hw)
-        fake_ct = self._center_crop_hw(fake_ct, original_hw[0] if original_hw.ndim == 2 else original_hw)
-        return center_cbct, real_ct, fake_ct
+        target_hw = original_hw[0] if original_hw.ndim == 2 else original_hw
+        center_cbct = self._center_crop_hw(center_cbct, target_hw)
+        real_ct = self._center_crop_hw(real_ct, target_hw)
+        fake_ct = self._center_crop_hw(fake_ct, target_hw)
+        if eval_ref is not None:
+            eval_ref = self._center_crop_hw(eval_ref, target_hw)
+        return center_cbct, real_ct, fake_ct, eval_ref
+
+    def _unpack_batch(self, batch: Any):
+        """Standard batch: (center_cbct, real_ct, cbct_stack[, original_hw]).
+        When params.use_eval_ref is set (data.data_group_4 carries the true,
+        registered T2, used only for metric computation, never for the
+        training loss), batch instead is
+        (center_cbct, real_ct, cbct_stack, eval_ref[, original_hw])."""
+        if getattr(self.params, "use_eval_ref", False):
+            if len(batch) == 5:
+                center_cbct, real_ct, cbct_stack, eval_ref, original_hw = batch
+            else:
+                center_cbct, real_ct, cbct_stack, eval_ref = batch
+                original_hw = None
+        else:
+            eval_ref = None
+            if len(batch) == 4:
+                center_cbct, real_ct, cbct_stack, original_hw = batch
+            else:
+                center_cbct, real_ct, cbct_stack = batch
+                original_hw = None
+        return center_cbct, real_ct, cbct_stack, eval_ref, original_hw
 
     def clamp_for_eval(self, tensor: torch.Tensor) -> torch.Tensor:
         if self.params.norm_ZeroToOne:
@@ -118,16 +143,18 @@ class UnetPlusPlusSynthesisModule(BaseModule_AtoB):
         return torch.clamp(tensor, -1.0, 1.0)
 
     def model_step(self, batch: Any, is_3d=False):
-        if len(batch) == 4:
-            center_cbct, real_ct, cbct_stack, original_hw = batch
-        else:
-            center_cbct, real_ct, cbct_stack = batch
-            original_hw = None
+        """Returns (center_cbct, metric_reference, fake_ct). metric_reference is
+        the true registered T2 (params.use_eval_ref) when available, otherwise
+        it falls back to the training target (real_ct) as before."""
+        center_cbct, real_ct, cbct_stack, eval_ref, original_hw = self._unpack_batch(batch)
         fake_ct = self.forward(cbct_stack)
-        center_cbct, real_ct, fake_ct = self._restore_original_hw(center_cbct, real_ct, fake_ct, original_hw)
+        center_cbct, real_ct, fake_ct, eval_ref = self._restore_original_hw(
+            center_cbct, real_ct, fake_ct, original_hw, eval_ref
+        )
         if not self.training:
             fake_ct = self.clamp_for_eval(fake_ct)
-        return center_cbct, real_ct, fake_ct
+        metric_ref = eval_ref if eval_ref is not None else real_ct
+        return center_cbct, metric_ref, fake_ct
 
     def build_body_mask(self, center_cbct: torch.Tensor, real_ct: torch.Tensor) -> torch.Tensor:
         threshold = self.params.mask_threshold
@@ -143,23 +170,29 @@ class UnetPlusPlusSynthesisModule(BaseModule_AtoB):
         return tensor * mask + (1.0 - mask) * bg_value
 
     def shared_step(self, batch: Any, stage: str) -> torch.Tensor:
-        if len(batch) == 4:
-            center_cbct, real_ct, cbct_stack, original_hw = batch
-        else:
-            center_cbct, real_ct, cbct_stack = batch
-            original_hw = None
+        center_cbct, real_ct, cbct_stack, eval_ref, original_hw = self._unpack_batch(batch)
         fake_ct = self.forward(cbct_stack)
-        center_cbct, real_ct, fake_ct = self._restore_original_hw(center_cbct, real_ct, fake_ct, original_hw)
-        mask = self.build_body_mask(center_cbct, real_ct)
+        center_cbct, real_ct, fake_ct, eval_ref = self._restore_original_hw(
+            center_cbct, real_ct, fake_ct, original_hw, eval_ref
+        )
 
-        loss_mae = self.masked_mae_loss(fake_ct, real_ct, mask)
+        use_masked_loss = getattr(self.params, "use_masked_loss", True)
+        mask = self.build_body_mask(center_cbct, real_ct) if use_masked_loss else None
+
+        if use_masked_loss:
+            loss_mae = self.masked_mae_loss(fake_ct, real_ct, mask)
+        else:
+            loss_mae = F.l1_loss(fake_ct, real_ct)
         loss = self.params.lambda_mae * loss_mae
         self.log(f"{stage}/loss_mae", loss_mae.detach(), prog_bar=(stage == "train"), sync_dist=(stage != "train"))
 
         if self.criterionPerceptual is not None:
-            masked_fake = self.apply_mask_background(fake_ct, mask)
-            masked_real = self.apply_mask_background(real_ct, mask)
-            loss_perc = self.criterionPerceptual(masked_fake, masked_real)
+            if use_masked_loss:
+                fake_for_perc = self.apply_mask_background(fake_ct, mask)
+                real_for_perc = self.apply_mask_background(real_ct, mask)
+            else:
+                fake_for_perc, real_for_perc = fake_ct, real_ct
+            loss_perc = self.criterionPerceptual(fake_for_perc, real_for_perc)
             loss = loss + self.params.lambda_perc * loss_perc
             self.log(
                 f"{stage}/loss_perc",

@@ -380,6 +380,7 @@ class dataset_SynthRAD(Dataset):
 
         os.environ["HDF5_USE_FILE_LOCKING"] = "TRUE"
 
+        self._vol_cache = {}
         self.patient_keys = []
         self.aug_keys = ["A", "B"]
         if self.data_group_3:
@@ -474,14 +475,26 @@ class dataset_SynthRAD(Dataset):
     def _extract_slice(self, volume, slice_idx):
         return np.take(volume, indices=slice_idx, axis=self.slice_axis)
 
+    def _get_volume(self, file, group, patient_key):
+        """Read a full (H, W, D) volume once per (group, patient_key) and cache it
+        in this worker process, since the per-slice __getitem__ would otherwise
+        re-read the entire volume from disk for every single slice."""
+        cache_key = (group, patient_key)
+        vol = self._vol_cache.get(cache_key)
+        if vol is None:
+            vol = file[group][patient_key][...]
+            self._vol_cache[cache_key] = vol
+        return vol
+
     def _load_slice_stack(self, file, group, patient_key, slice_idx):
         """Load K neighboring slices centered at slice_idx; repeat at volume boundaries."""
-        total = file[group][patient_key].shape[self.slice_axis]
+        vol = self._get_volume(file, group, patient_key)
+        total = vol.shape[self.slice_axis]
         N = self.ref_stack_size // 2
         slices = []
         for k in range(-N, N + 1):
             s = min(max(slice_idx + k, 0), total - 1)
-            slices.append(self._extract_slice(file[group][patient_key][...], s))
+            slices.append(self._extract_slice(vol, s))
         return np.stack(slices, axis=0)  # [K, H, W]
 
     def _load_slice_stack_from_vol(self, vol, slice_idx):
@@ -522,8 +535,8 @@ class dataset_SynthRAD(Dataset):
             slice_idx = idx - self.cumulative_slice_counts[patient_idx]
             patient_key = self.patient_keys[patient_idx]
             with h5py.File(self.data_dir, "r") as file:
-                vol_A = file[self.data_group_1][patient_key][...]
-                vol_B = self.reg_cache[patient_key]['B'] if 'B' in self._rigid_cached_groups else file[self.data_group_2][patient_key][...]
+                vol_A = self._get_volume(file, self.data_group_1, patient_key)
+                vol_B = self.reg_cache[patient_key]['B'] if 'B' in self._rigid_cached_groups else self._get_volume(file, self.data_group_2, patient_key)
                 A = self._extract_slice(vol_A, slice_idx)
                 B = self._extract_slice(vol_B, slice_idx)
                 if self.data_group_3:
@@ -533,10 +546,10 @@ class dataset_SynthRAD(Dataset):
                     elif self.use_25d_style:
                         C = self._load_slice_stack(file, self.data_group_3, patient_key, slice_idx)
                     else:
-                        C = self._extract_slice(file[self.data_group_3][patient_key][...], slice_idx)
+                        C = self._extract_slice(self._get_volume(file, self.data_group_3, patient_key), slice_idx)
                 if self.data_group_4:
                     # group_4 is GT (even) → always single slice
-                    D = self._extract_slice(file[self.data_group_4][patient_key][...], slice_idx)
+                    D = self._extract_slice(self._get_volume(file, self.data_group_4, patient_key), slice_idx)
                 if self.data_group_5:
                     # group_5 is moved ref (odd) → K-stack when use_25d_style
                     if 'E' in self._rigid_cached_groups:
@@ -545,10 +558,10 @@ class dataset_SynthRAD(Dataset):
                     elif self.use_25d_style:
                         E = self._load_slice_stack(file, self.data_group_5, patient_key, slice_idx)
                     else:
-                        E = self._extract_slice(file[self.data_group_5][patient_key][...], slice_idx)
+                        E = self._extract_slice(self._get_volume(file, self.data_group_5, patient_key), slice_idx)
                 if self.data_group_6:
                     # group_6 is GT (even) → always single slice
-                    F = self._extract_slice(file[self.data_group_6][patient_key][...], slice_idx)
+                    F = self._extract_slice(self._get_volume(file, self.data_group_6, patient_key), slice_idx)
                 if self.data_group_7:
                     # group_7 is moved ref (odd) → K-stack when use_25d_style
                     if 'G' in self._rigid_cached_groups:
@@ -557,7 +570,7 @@ class dataset_SynthRAD(Dataset):
                     elif self.use_25d_style:
                         G = self._load_slice_stack(file, self.data_group_7, patient_key, slice_idx)
                     else:
-                        G = self._extract_slice(file[self.data_group_7][patient_key][...], slice_idx)
+                        G = self._extract_slice(self._get_volume(file, self.data_group_7, patient_key), slice_idx)
 
         A = torch.from_numpy(A).unsqueeze(0).float()
         B = torch.from_numpy(B).unsqueeze(0).float()
