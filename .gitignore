@@ -182,10 +182,8 @@ Mambaforge-Linux-x86_64.sh
 uv.lock
 pyproject.toml
 
-# docs: keep only .txt, ignore everything else (data exports, etc.)
-docs/**/*
-!docs/**/
-!docs/**/*.txt
+# docs: local notes/exports only, not committed
+docs/
 
 # jupyter notebook data exports (not source)
 jupyter_notebook/**/*.csv
