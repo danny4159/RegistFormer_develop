@@ -1,3 +1,13 @@
+"""MIGS (Moving-Image-Guided Synthesis) generator network.
+
+Paper <-> code term mapping used throughout this file:
+  fixed slice x^k                    -> fixed_slice
+  moving stack y_adj^k (K slices)    -> moving_stack / moving_inputs
+  synthesized output y_hat^k         -> synthesized_slice
+  Slice-Window Attention (SWA)       -> SliceWindowAttention
+  Contrast Guidance Map (CGM)        -> cgm
+  Moving-Image-Guided Convolution    -> MIGConv
+"""
 import math
 import torch
 import torch.nn as nn
@@ -25,10 +35,10 @@ def _safe_entropy(prob, dim, norm_base):
     return ent.mean() / max(math.log(norm_base), 1e-8)
 
 
-class LocalWindowAttentionConditioner2D(nn.Module):
-    """Local QKV attention conditioner for 2D reference conditioning.
-
-    source Q attends to same-resolution ref K,V within a local window.
+class LocalWindowAttention2DLegacy(nn.Module):
+    """Legacy 2D-only local-window attention conditioner (used only when
+    use_25d_style=False, i.e. a single reference slice with no moving stack).
+    Not the reported SWA path -- see SliceWindowAttention below for that.
     """
 
     def __init__(self, dim=16, window=3, residual_scale=0.1):
@@ -62,159 +72,167 @@ class LocalWindowAttentionConditioner2D(nn.Module):
         ctx = (attn.unsqueeze(1) * v_unfold).sum(dim=2)  # [B, d, h, w]
         return ctx, attn
 
-    def forward(self, source, ref, out_size):
-        src_low = F.interpolate(source, size=out_size, mode='bilinear', align_corners=False)
-        ref_low = F.interpolate(ref, size=out_size, mode='bilinear', align_corners=False)
-        ref_base = ref_low
+    def forward(self, fixed_slice, moving_ref, cgm_size):
+        fixed_slice_down = F.interpolate(fixed_slice, size=cgm_size, mode='bilinear', align_corners=False)
+        moving_ref_down = F.interpolate(moving_ref, size=cgm_size, mode='bilinear', align_corners=False)
+        moving_base = moving_ref_down
 
-        q = self.q_proj(src_low)
-        k = self.k_proj(ref_base)
-        v = self.v_proj(ref_base)
+        q = self.q_proj(fixed_slice_down)
+        k = self.k_proj(moving_base)
+        v = self.v_proj(moving_base)
 
         ctx, attn = self._local_attention(q, k, v)
         delta = self.out_proj(ctx)
-        style = ref_base + self.residual_scale * delta
+        cgm = moving_base + self.residual_scale * delta
 
         center_idx = (self.window * self.window) // 2
         entropy = -(attn * (attn + 1e-8).log()).sum(dim=1).mean()
         entropy_norm = entropy / math.log(self.window * self.window)
 
         stats = {
-            "base_std": ref_low.std().detach(),
-            "ref_base_std": ref_base.std().detach(),
-            "style_std": style.std().detach(),
-            "style_base_delta": ((style - ref_low).abs().mean() / (ref_low.abs().mean() + 1e-8)).detach(),
+            "base_std": moving_ref_down.std().detach(),
+            "ref_base_std": moving_base.std().detach(),
+            "style_std": cgm.std().detach(),
+            "style_base_delta": ((cgm - moving_ref_down).abs().mean() / (moving_ref_down.abs().mean() + 1e-8)).detach(),
             "attn_entropy": entropy_norm.detach(),
             "attn_max": attn.max(dim=1).values.mean().detach(),
             "attn_center_weight": attn[:, center_idx:center_idx + 1].mean().detach(),
         }
-        return style, stats
+        return cgm, stats
 
 
-class LocalWindowAttentionConditioner25D(nn.Module):
-    """Slice-window attention conditioner: source(2D) query vs ref_stack(K-slice) local window attention.
+class SliceWindowAttention(nn.Module):
+    """Slice-Window Attention (SWA), corresponding to Eqs. (1)-(3) in the paper.
 
-    Q/K are cosine-normalized (qk_norm) with a learnable softmax temperature. Attention weights
-    directly mix raw ref pixel values (direct_attn) into the style map, blended with the center
-    reference slice via direct_alpha.
+    The downsampled fixed slice provides the query. The K-slice moving stack
+    provides shared-projection keys; with use_raw_moving_values=True (the
+    reported setting), attention weights are applied directly to the raw
+    moving intensities (no learned value projection). A single softmax over
+    K * window_size^2 local candidates produces the single-channel Contrast
+    Guidance Map (CGM), blended with the center moving slice via cgm_blend_alpha.
     """
 
-    def __init__(self, dim=16, window=3, residual_scale=0.1, center_slice_bias=0.2,
-                 use_direct_attn=False, use_qk_norm=False, init_temperature=10.0,
-                 use_uniform_attn=False, direct_alpha=0.5, temperature_learnable=True):
+    def __init__(self, qk_channels=16, window_size=3, residual_scale=0.1, center_slice_bias=0.2,
+                 use_raw_moving_values=False, use_cosine_similarity=False, temperature_init=10.0,
+                 use_uniform_attention=False, cgm_blend_alpha=0.5, learnable_temperature=True):
         super().__init__()
-        assert window % 2 == 1, f"window must be odd, got {window}"
-        self.dim = dim
-        self.window = window
+        assert window_size % 2 == 1, f"window_size must be odd, got {window_size}"
+        self.dim = qk_channels
+        self.window = window_size
         self.residual_scale = residual_scale
         self.center_slice_bias = center_slice_bias
-        # direct: attention weights directly mix raw ref values; no V_proj/out_proj shortcut
-        self.use_direct_attn = bool(use_direct_attn)
-        self.direct_alpha = float(direct_alpha)  # style = center_ref + alpha*(weighted_ref - center_ref)
-        # qk_norm: cosine similarity attention + learnable temperature
-        # prevents Q,K → 0 collapse; small init temperature amplifies tiny cosine differences
-        self.use_qk_norm = bool(use_qk_norm)
-        self.temperature_learnable = bool(temperature_learnable)
+        # use_raw_moving_values: attention weights directly mix raw moving intensities;
+        # no learned V projection / output projection shortcut
+        self.use_direct_attn = bool(use_raw_moving_values)
+        self.direct_alpha = float(cgm_blend_alpha)  # cgm = center_moving + alpha*(weighted_moving - center_moving)
+        # use_cosine_similarity: cosine-normalized Q/K + learnable softmax temperature;
+        # prevents Q,K -> 0 collapse, small init temperature amplifies tiny cosine differences
+        self.use_qk_norm = bool(use_cosine_similarity)
+        self.temperature_learnable = bool(learnable_temperature)
         if self.use_qk_norm:
             self.log_temperature = nn.Parameter(
-                torch.tensor(math.log(float(init_temperature))),
+                torch.tensor(math.log(float(temperature_init))),
                 requires_grad=self.temperature_learnable,
             )
         # differentiable attention entropy from the last forward (for optional entropy regularization)
         self.last_attn_entropy = None
-        self.use_uniform_attn = bool(use_uniform_attn)
+        self.use_uniform_attn = bool(use_uniform_attention)
 
         # Manhattan distance for each position in the local window (used for diagnostic logging)
-        r = window // 2
+        r = window_size // 2
         dist = [abs(dy) + abs(dx) for dy in range(-r, r + 1) for dx in range(-r, r + 1)]
         self.register_buffer(
             "spatial_rel_dist",
-            torch.tensor(dist, dtype=torch.float32).view(1, 1, window * window, 1, 1),
+            torch.tensor(dist, dtype=torch.float32).view(1, 1, window_size * window_size, 1, 1),
         )
 
-        self.q_proj = nn.Conv2d(1, dim, 1)
-        self.k_proj = nn.Conv2d(1, dim, 1)
+        self.q_proj = nn.Conv2d(1, qk_channels, 1)
+        self.k_proj = nn.Conv2d(1, qk_channels, 1)
         if not self.use_direct_attn:
-            self.v_proj = nn.Conv2d(1, dim, 1)
+            self.v_proj = nn.Conv2d(1, qk_channels, 1)
             self.out_proj = nn.Sequential(
-                nn.Conv2d(dim, dim, 3, padding=1),
+                nn.Conv2d(qk_channels, qk_channels, 3, padding=1),
                 nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(dim, 1, 3, padding=1),
+                nn.Conv2d(qk_channels, 1, 3, padding=1),
             )
             _zero_init_last_conv(self.out_proj)
 
-    def _unfold_same(self, x, win):
+    def _extract_local_neighborhoods(self, x, win):
         """Unfold preserving spatial size (odd window, symmetric padding)."""
         return F.unfold(x, kernel_size=win, padding=win // 2)
 
-    def forward(self, source, ref_stack, out_size):
-        B, K, _, _ = ref_stack.shape
-        h, w = out_size
+    def forward(self, fixed_slice, moving_stack, cgm_size):
+        B, K, _, _ = moving_stack.shape
+        cgm_h, cgm_w = cgm_size
         center_idx = K // 2
         win = self.window
         win2 = win * win
 
-        src_low = F.interpolate(source, size=(h, w), mode='bilinear', align_corners=False)
-        ref_low = F.interpolate(ref_stack, size=(h, w), mode='bilinear', align_corners=False)
-        ref_base = ref_low
+        fixed_slice_down = F.interpolate(fixed_slice, size=(cgm_h, cgm_w), mode='bilinear', align_corners=False)
+        moving_stack_down = F.interpolate(moving_stack, size=(cgm_h, cgm_w), mode='bilinear', align_corners=False)
+        moving_base = moving_stack_down
 
-        q = self.q_proj(src_low)  # [B,dim,h,w]
-        k = self.k_proj(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.dim, h, w)
+        query = self.q_proj(fixed_slice_down)  # [B,dim,h,w]
+        keys = self.k_proj(moving_base.reshape(B * K, 1, cgm_h, cgm_w)).view(B, K, self.dim, cgm_h, cgm_w)
 
-        # QK normalization: cosine similarity, prevents Q,K → 0 collapse
+        # QK normalization: cosine similarity, prevents Q,K -> 0 collapse
         if self.use_qk_norm:
-            q = F.normalize(q, dim=1, eps=1e-8)  # unit norm per spatial position
-            k = F.normalize(k, dim=2, eps=1e-8)
+            query = F.normalize(query, dim=1, eps=1e-8)  # unit norm per spatial position
+            keys = F.normalize(keys, dim=2, eps=1e-8)
 
-        # k unfold for score computation (always needed)
-        k_unfold_flat = self._unfold_same(k.reshape(B * K, self.dim, h, w), win)
-        k_unfold = k_unfold_flat.view(B, K, self.dim, win2, h, w)
+        # local_keys: keys unfolded into the local window (always needed for score computation)
+        local_keys_flat = self._extract_local_neighborhoods(keys.reshape(B * K, self.dim, cgm_h, cgm_w), win)
+        local_keys = local_keys_flat.view(B, K, self.dim, win2, cgm_h, cgm_w)
 
-        # ── score computation ──────────────────────────────────────────────
+        # ── attention logits ──────────────────────────────────────────────
         if self.use_qk_norm:
             temperature = self.log_temperature.exp()
-            score_nobias = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) * temperature
+            logits_nobias = (query.unsqueeze(1).unsqueeze(3) * local_keys).sum(dim=2) * temperature
         else:
-            score_nobias = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) / math.sqrt(self.dim)
-        score = score_nobias.clone()
-        score[:, center_idx:center_idx + 1] += self.center_slice_bias
-        attn = torch.softmax(score.view(B, K * win2, h, w), dim=1).view(B, K, win2, h, w)
-        attn_for_log = attn.unsqueeze(1)  # [B,1,K,win2,h,w]
+            logits_nobias = (query.unsqueeze(1).unsqueeze(3) * local_keys).sum(dim=2) / math.sqrt(self.dim)
+        attention_logits = logits_nobias.clone()
+        attention_logits[:, center_idx:center_idx + 1] += self.center_slice_bias
+        attention_weights = torch.softmax(
+            attention_logits.view(B, K * win2, cgm_h, cgm_w), dim=1
+        ).view(B, K, win2, cgm_h, cgm_w)
+        attn_for_log = attention_weights.unsqueeze(1)  # [B,1,K,win2,h,w]
 
-        center_ref_low = ref_low[:, center_idx:center_idx + 1]
-        center_base = ref_base[:, center_idx:center_idx + 1]
+        center_moving_down = moving_stack_down[:, center_idx:center_idx + 1]
+        center_moving_base = moving_base[:, center_idx:center_idx + 1]
 
-        # Uniform attention baseline: bypass learned attention with 1/(K*win²) weights
+        # Uniform attention baseline: bypass learned attention with 1/(K*win^2) weights
         if self.use_uniform_attn:
             attn_for_log = torch.ones_like(attn_for_log) / (K * win2)
-            attn = attn_for_log.squeeze(1)
+            attention_weights = attn_for_log.squeeze(1)
 
-        # ── style generation ─────────────────────────────────────────────
+        # ── CGM (Contrast Guidance Map) generation ─────────────────────────
         # attn_mean: [B,K,win2,h,w] (single head, so this equals attn_for_log squeezed)
         attn_mean = attn_for_log.mean(dim=1)
 
         if self.use_direct_attn:
-            ref_base_unfold = self._unfold_same(ref_base.reshape(B * K, 1, h, w), win).view(B, K, win2, h, w)
-            weighted_ref = (attn_mean * ref_base_unfold).sum(dim=(1, 2)).unsqueeze(1)  # [B,1,h,w]
-            attn_style = weighted_ref
-            blend_anchor = center_ref_low
+            moving_value_candidates = self._extract_local_neighborhoods(
+                moving_base.reshape(B * K, 1, cgm_h, cgm_w), win
+            ).view(B, K, win2, cgm_h, cgm_w)
+            weighted_moving = (attn_mean * moving_value_candidates).sum(dim=(1, 2)).unsqueeze(1)  # [B,1,h,w]
+            attn_style = weighted_moving
+            blend_anchor = center_moving_down
             blend_alpha = self.direct_alpha
-            style = blend_anchor + blend_alpha * (attn_style - blend_anchor)
+            cgm = blend_anchor + blend_alpha * (attn_style - blend_anchor)
         else:
-            # V_proj → out_proj → delta, residual onto the center slice
-            v = self.v_proj(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.dim, h, w)
-            v_unfold = self._unfold_same(v.reshape(B * K, self.dim, h, w), win)
-            v_unfold = v_unfold.view(B, K, self.dim, win2, h, w)
-            ctx = (attn.unsqueeze(2) * v_unfold).sum(dim=1).sum(dim=2)
+            # V_proj -> out_proj -> delta, residual onto the center moving slice
+            v = self.v_proj(moving_base.reshape(B * K, 1, cgm_h, cgm_w)).view(B, K, self.dim, cgm_h, cgm_w)
+            v_unfold = self._extract_local_neighborhoods(v.reshape(B * K, self.dim, cgm_h, cgm_w), win)
+            v_unfold = v_unfold.view(B, K, self.dim, win2, cgm_h, cgm_w)
+            ctx = (attention_weights.unsqueeze(2) * v_unfold).sum(dim=1).sum(dim=2)
             delta = self.out_proj(ctx)
-            attn_style = center_base + self.residual_scale * delta
-            blend_anchor, blend_alpha, style = attn_style, 1.0, attn_style
+            attn_style = center_moving_base + self.residual_scale * delta
+            blend_anchor, blend_alpha, cgm = attn_style, 1.0, attn_style
 
-        # ── unified logging ───────────────────────────────────────────────
+        # ── unified diagnostic logging ──────────────────────────────────────
         slice_prob = attn_mean.sum(dim=2)                         # [B,K,h,w]
         spatial_center_prob = attn_mean[:, :, win2 // 2].sum(dim=1)  # [B,h,w]
 
-        attn_flat = attn_for_log.view(B, 1, K * win2, h, w)
+        attn_flat = attn_for_log.view(B, 1, K * win2, cgm_h, cgm_w)
         attn_entropy = _safe_entropy(attn_flat, dim=2, norm_base=K * win2)
         # keep a differentiable copy (mean normalized entropy) for optional entropy regularization
         self.last_attn_entropy = attn_entropy.mean()
@@ -232,26 +250,26 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             near_spatial_mask = (sp_dist <= 1).to(attn_mean.dtype)
             near_spatial_weight = (attn_mean * near_spatial_mask).sum(dim=(1, 2)).mean()
 
-        # QK diagnostics: if qk_score_std_nobias ≈ 0 → Q/K not contributing
+        # QK diagnostics: if qk_score_std_nobias ~ 0 -> Q/K not contributing
         with torch.no_grad():
-            qk_score_std_nobias = score_nobias.std().detach()
-            qk_score_std = score.std().detach()
-            q_abs = q.abs().mean().detach()
-            k_abs = k.abs().mean().detach()
+            qk_score_std_nobias = logits_nobias.std().detach()
+            qk_score_std = attention_logits.std().detach()
+            q_abs = query.abs().mean().detach()
+            k_abs = keys.abs().mean().detach()
             temperature_val = (self.log_temperature.exp().detach()
-                               if self.use_qk_norm else torch.zeros(1, device=style.device))
+                               if self.use_qk_norm else torch.zeros(1, device=cgm.device))
 
         stats = {
-            "base_std": ref_low.std().detach(),
-            "ref_base_std": ref_base.std().detach(),
-            "style_std": style.std().detach(),
-            "style_center_delta": ((style - center_ref_low).abs().mean() / (center_ref_low.abs().mean() + 1e-8)).detach(),
-            "style_base_delta": ((style - center_base).abs().mean() / (center_base.abs().mean() + 1e-8)).detach(),
-            "blend_to_attn_delta": ((style - attn_style).abs().mean() / (attn_style.abs().mean() + 1e-8)).detach(),
-            "blend_anchor_delta": ((style - blend_anchor).abs().mean() / (blend_anchor.abs().mean() + 1e-8)).detach(),
-            "blend_alpha": torch.as_tensor(blend_alpha, device=style.device).detach(),
-            "direct_attn_enabled": torch.as_tensor(float(self.use_direct_attn), device=style.device).detach(),
-            "qk_norm_enabled": torch.as_tensor(float(self.use_qk_norm), device=style.device).detach(),
+            "base_std": moving_stack_down.std().detach(),
+            "ref_base_std": moving_base.std().detach(),
+            "style_std": cgm.std().detach(),
+            "style_center_delta": ((cgm - center_moving_down).abs().mean() / (center_moving_down.abs().mean() + 1e-8)).detach(),
+            "style_base_delta": ((cgm - center_moving_base).abs().mean() / (center_moving_base.abs().mean() + 1e-8)).detach(),
+            "blend_to_attn_delta": ((cgm - attn_style).abs().mean() / (attn_style.abs().mean() + 1e-8)).detach(),
+            "blend_anchor_delta": ((cgm - blend_anchor).abs().mean() / (blend_anchor.abs().mean() + 1e-8)).detach(),
+            "blend_alpha": torch.as_tensor(blend_alpha, device=cgm.device).detach(),
+            "direct_attn_enabled": torch.as_tensor(float(self.use_direct_attn), device=cgm.device).detach(),
+            "qk_norm_enabled": torch.as_tensor(float(self.use_qk_norm), device=cgm.device).detach(),
             "qk_temperature": temperature_val.squeeze().detach(),
             "qk_score_std_nobias": qk_score_std_nobias,
             "qk_score_std": qk_score_std,
@@ -267,29 +285,30 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             "near_slice_weight": near_slice_weight.detach(),
             "near_spatial_weight": near_spatial_weight.detach(),
         }
-        return style, stats
+        return cgm, stats
 
 
-class LocalConvConditioner25D(nn.Module):
-    """Convolution-based reference conditioner — ABLATION baseline for slice-window attention.
+class ConvGuidanceAblation(nn.Module):
+    """Convolution-based guidance map — ABLATION baseline for Slice-Window Attention.
 
-    Same interface / output as LocalWindowAttentionConditioner25D (forward(source, ref_stack,
-    out_size) -> (style [B,1,h,w], stats)) so it drops into the exact same generator, but the
-    cross-slice fusion is a plain local convolution instead of data-dependent query-key attention.
+    Same interface / output as SliceWindowAttention (forward(fixed_slice, moving_stack,
+    cgm_size) -> (guidance_map [B,1,h,w], stats)) so it drops into the exact same
+    generator, but the cross-slice fusion is a plain local convolution instead of
+    data-dependent query-key attention.
 
     Design (fair ablation):
-      - Receives the SAME inputs as attention: downsampled source (T1 query) + K reference slices.
+      - Receives the SAME inputs as SWA: downsampled fixed slice (query) + K moving slices.
       - Concatenates them on the channel axis and applies a small local 3x3 conv stack, so the
-        style is produced by fixed learned filters rather than input-dependent attention weights.
-      - ref_stack_size=1  -> 2D conv   (source + 1 center reference slice; input 2ch)
-      - ref_stack_size=3  -> 2.5D conv (source + 3 reference slices;       input 4ch)
-      Everything downstream (StyleConv modulation, losses) is identical to the attention model.
+        guidance map is produced by fixed learned filters rather than input-dependent attention.
+      - ref_stack_size=1  -> 2D conv   (fixed + 1 center moving slice; input 2ch)
+      - ref_stack_size=3  -> 2.5D conv (fixed + 3 moving slices;       input 4ch)
+      Everything downstream (MIGConv modulation, losses) is identical to the SWA model.
     """
 
     def __init__(self, ref_stack_size=3, hidden=32, depth=3):
         super().__init__()
         self.ref_stack_size = ref_stack_size
-        in_ch = 1 + ref_stack_size  # source (1) + K reference slices
+        in_ch = 1 + ref_stack_size  # fixed slice (1) + K moving slices
         layers = [nn.Conv2d(in_ch, hidden, kernel_size=3, padding=1),
                   nn.LeakyReLU(0.2, inplace=True)]
         for _ in range(max(0, depth - 2)):
@@ -298,31 +317,37 @@ class LocalConvConditioner25D(nn.Module):
         layers += [nn.Conv2d(hidden, 1, kernel_size=3, padding=1)]
         self.net = nn.Sequential(*layers)
 
-    def _down(self, x, h, w):
+    def _downsample_for_guidance(self, x, h, w):
         return F.interpolate(x, size=(h, w), mode='bilinear', align_corners=False)
 
-    def forward(self, source, ref_stack, out_size):
-        h, w = out_size
-        src_low = self._down(source, h, w)      # [B,1,h,w]
-        ref_low = self._down(ref_stack, h, w)   # [B,K,h,w]
-        x = torch.cat([src_low, ref_low], dim=1)  # [B,1+K,h,w]
-        style = self.net(x)                       # [B,1,h,w]
+    def forward(self, fixed_slice, moving_stack, cgm_size):
+        h, w = cgm_size
+        fixed_slice_down = self._downsample_for_guidance(fixed_slice, h, w)      # [B,1,h,w]
+        moving_stack_down = self._downsample_for_guidance(moving_stack, h, w)   # [B,K,h,w]
+        x = torch.cat([fixed_slice_down, moving_stack_down], dim=1)  # [B,1+K,h,w]
+        guidance_map = self.net(x)                                    # [B,1,h,w]
 
-        K = ref_stack.shape[1]
-        center_ref_low = ref_low[:, K // 2:K // 2 + 1]
+        K = moving_stack.shape[1]
+        center_moving_down = moving_stack_down[:, K // 2:K // 2 + 1]
         stats = {
-            "base_std": ref_low.std().detach(),
-            "ref_base_std": ref_low.std().detach(),
-            "style_std": style.std().detach(),
-            "style_center_delta": ((style - center_ref_low).abs().mean()
-                                   / (center_ref_low.abs().mean() + 1e-8)).detach(),
-            "conv_conditioner_enabled": torch.as_tensor(1.0, device=style.device),
-            "ref_stack_size": torch.as_tensor(float(K), device=style.device),
+            "base_std": moving_stack_down.std().detach(),
+            "ref_base_std": moving_stack_down.std().detach(),
+            "style_std": guidance_map.std().detach(),
+            "style_center_delta": ((guidance_map - center_moving_down).abs().mean()
+                                   / (center_moving_down.abs().mean() + 1e-8)).detach(),
+            "conv_conditioner_enabled": torch.as_tensor(1.0, device=guidance_map.device),
+            "ref_stack_size": torch.as_tensor(float(K), device=guidance_map.device),
         }
-        return style, stats
+        return guidance_map, stats
 
 
-class ProposedSynthesisModule(nn.Module):
+class MIGSGenerator(nn.Module):
+    """MIGS synthesis network G.
+
+    Pipeline: fixed_slice + moving_stack -> SliceWindowAttention -> CGM
+              -> 12 MIGConv blocks (StyleConv U-Net) -> synthesized_slice.
+    """
+
     def __init__(self, **kwargs):
         super().__init__()
         try:
@@ -336,27 +361,40 @@ class ProposedSynthesisModule(nn.Module):
             self.noise_independent = kwargs.get('noise_independent', False)
             self.use_25d_style = kwargs.get('use_25d_style', False)
             self.ref_stack_size = kwargs.get('ref_stack_size', 3)
-            self.ref_condition_use_conv = kwargs.get('ref_condition_use_conv', False)
-            self.ref_condition_window = kwargs.get('ref_condition_window', 3)
-            self.ref_condition_dim = kwargs.get('ref_condition_dim', 16)
-            self.ref_condition_center_bias = kwargs.get('ref_condition_center_bias', 0.2)
-            self.ref_condition_direct = kwargs.get('ref_condition_direct', False)
-            self.ref_condition_qk_norm = kwargs.get('ref_condition_qk_norm', False)
-            self.ref_condition_init_temperature = kwargs.get('ref_condition_init_temperature', 10.0)
-            self.ref_condition_downsample = kwargs.get('ref_condition_downsample', 16)
-            self.ref_condition_uniform_attn = kwargs.get('ref_condition_uniform_attn', False)
-            self.ref_condition_direct_alpha = kwargs.get('ref_condition_direct_alpha', 0.5)
-            self.ref_condition_temperature_learnable = kwargs.get('ref_condition_temperature_learnable', True)
+
+            # guidance_mode: 'swa' (reported) | 'conv_ablation' | 'local_2d_legacy'(auto when
+            # use_25d_style=False). Falls back to the legacy boolean ref_condition_use_conv.
+            _legacy_use_conv = kwargs.get('ref_condition_use_conv', False)
+            self.guidance_mode = kwargs.get(
+                'guidance_mode', 'conv_ablation' if _legacy_use_conv else 'swa'
+            )
+
+            def _kw(new_key, old_key, default):
+                return kwargs.get(new_key, kwargs.get(old_key, default))
+
+            self.swa_window_size = _kw('swa_window_size', 'ref_condition_window', 3)
+            self.swa_qk_channels = _kw('swa_qk_channels', 'ref_condition_dim', 16)
+            self.swa_center_slice_bias = _kw('swa_center_slice_bias', 'ref_condition_center_bias', 0.2)
+            self.swa_use_raw_values = _kw('swa_use_raw_values', 'ref_condition_direct', False)
+            self.swa_use_cosine_similarity = _kw('swa_use_cosine_similarity', 'ref_condition_qk_norm', False)
+            self.swa_temperature_init = _kw('swa_temperature_init', 'ref_condition_init_temperature', 10.0)
+            self.swa_downsampling_factor = _kw('swa_downsampling_factor', 'ref_condition_downsample', 16)
+            self.swa_use_uniform_attention = _kw('swa_use_uniform_attention', 'ref_condition_uniform_attn', False)
+            self.cgm_blend_alpha = _kw('cgm_blend_alpha', 'ref_condition_direct_alpha', 0.5)
+            self.swa_learnable_temperature = _kw(
+                'swa_learnable_temperature', 'ref_condition_temperature_learnable', True
+            )
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
 
-        if self.ref_condition_window % 2 == 0:
-            raise ValueError(f"ref_condition_window must be odd, got {self.ref_condition_window}")
-        if self.is_3d and self.ref_condition_use_conv:
-            raise NotImplementedError("ref_condition_use_conv은 2D 전용입니다.")
-        if (self.use_multiple_outputs or self.use_triple_outputs) and self.ref_condition_use_conv:
-            raise NotImplementedError("ref_condition_use_conv은 단일 출력 모드에서만 지원됩니다.")
+        if self.swa_window_size % 2 == 0:
+            raise ValueError(f"swa_window_size must be odd, got {self.swa_window_size}")
+        _use_conv = self.guidance_mode == 'conv_ablation'
+        if self.is_3d and _use_conv:
+            raise NotImplementedError("guidance_mode='conv_ablation'은 2D 전용입니다.")
+        if (self.use_multiple_outputs or self.use_triple_outputs) and _use_conv:
+            raise NotImplementedError("guidance_mode='conv_ablation'은 단일 출력 모드에서만 지원됩니다.")
 
         Conv, _, _ = get_layer_by_dim(self.is_3d)
 
@@ -371,8 +409,9 @@ class ProposedSynthesisModule(nn.Module):
             ch = 1
             self.num_style_streams = 1
 
-        # 2.5D: compress ref stack [B, K, H, W] -> [B, 1, H, W] per style stream
-        # (used by the is_3d path and by multi/triple-output style aggregation)
+        # 2.5D: compress moving stack [B, K, H, W] -> [B, 1, H, W] per style stream
+        # (used by the is_3d path and by multi/triple-output guidance aggregation --
+        #  legacy compatibility paths, not used by the reported single-output 2.5D MIGS model)
         if self.use_25d_style:
             hidden = max(8, self.feat_ch // 8)
 
@@ -384,36 +423,38 @@ class ProposedSynthesisModule(nn.Module):
                 )
             self.z_aggs = nn.ModuleList([_make_z_agg() for _ in range(self.num_style_streams)])
 
-        # Attention / conv conditioners: only used for single-output 2D generation
+        # SWA / conv-ablation conditioners: only used for single-output 2D generation
         # (multi/triple-output and 3D always use the z_agg aggregation above)
         self.ref_conditioner_2d = None
         self.ref_conditioner_25d = None
         self.ref_conditioner_conv = None
         self._use_ref_conditioner = not (self.use_multiple_outputs or self.use_triple_outputs)
         if self._use_ref_conditioner:
-            if self.ref_condition_use_conv:
-                self.ref_conditioner_conv = LocalConvConditioner25D(
+            if _use_conv:
+                self.ref_conditioner_conv = ConvGuidanceAblation(
                     ref_stack_size=self.ref_stack_size, hidden=32, depth=3,
                 )
             else:
-                self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
-                    dim=self.ref_condition_dim, window=self.ref_condition_window, residual_scale=0.1,
+                self.ref_conditioner_2d = LocalWindowAttention2DLegacy(
+                    dim=self.swa_qk_channels, window=self.swa_window_size, residual_scale=0.1,
                 )
                 if self.use_25d_style and self.ref_stack_size >= 1:
-                    self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
-                        dim=self.ref_condition_dim, window=self.ref_condition_window, residual_scale=0.1,
-                        center_slice_bias=self.ref_condition_center_bias,
-                        use_direct_attn=self.ref_condition_direct,
-                        use_qk_norm=self.ref_condition_qk_norm,
-                        init_temperature=self.ref_condition_init_temperature,
-                        use_uniform_attn=self.ref_condition_uniform_attn,
-                        direct_alpha=self.ref_condition_direct_alpha,
-                        temperature_learnable=self.ref_condition_temperature_learnable,
+                    self.ref_conditioner_25d = SliceWindowAttention(
+                        qk_channels=self.swa_qk_channels, window_size=self.swa_window_size,
+                        residual_scale=0.1,
+                        center_slice_bias=self.swa_center_slice_bias,
+                        use_raw_moving_values=self.swa_use_raw_values,
+                        use_cosine_similarity=self.swa_use_cosine_similarity,
+                        temperature_init=self.swa_temperature_init,
+                        use_uniform_attention=self.swa_use_uniform_attention,
+                        cgm_blend_alpha=self.cgm_blend_alpha,
+                        learnable_temperature=self.swa_learnable_temperature,
                     )
 
         self._last_ref_condition_stats: dict = {}
         self._last_attn_entropy_for_loss = None  # differentiable, set on main forward for entropy reg
 
+        # Legacy unused module retained for checkpoint compatibility.
         self.guide_net = nn.Sequential(
             nn.Conv2d(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
@@ -422,235 +463,221 @@ class ProposedSynthesisModule(nn.Module):
             nn.Conv2d(int(self.feat_ch / 8), int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
         )
-        
-        # 일부분에만 style_denorm -> 21, 22, 31, 32에만 적용 #TODO: feat_ch에 ref ch만큼 배수로
-        self.conv0 = StyleConv(self.input_nc, self.feat_ch * ch, kernel_size=3,
+
+        # 12 MIGConv blocks (stem + 4 enc/dec stages + refinement), CGM-modulated throughout.
+        self.conv0 = MIGConv(self.input_nc, self.feat_ch * ch, kernel_size=3,
                                                  activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv11 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+        self.conv11 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 downsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv12 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+        self.conv12 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv21 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+        self.conv21 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 downsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv22 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+        self.conv22 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv31 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+        self.conv31 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv32 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+        self.conv32 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv41 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, #feat_ch *4는 변치않게
+        self.conv41 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, #feat_ch *4는 변치않게
                                 upsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv42 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+        self.conv42 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 upsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv51 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+        self.conv51 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 upsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv52 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+        self.conv52 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 upsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv6 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+        self.conv6 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
 
-        # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 style 적용
+        # -------------------------------------------------------------------------
+        # Legacy multi-output / triple-output compatibility paths
+        # Not used by the reported single-output 2.5D MIGS model.
+        # -------------------------------------------------------------------------
         if self.use_separate_style_layers and self.use_triple_outputs:
-            # 각 branch는 feat_ch 채널 (전체의 1/3)
-            self.conv7_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+            self.conv7_1 = MIGConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                      activate=True, ch=1, is_3d=self.is_3d, )
-            self.conv7_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+            self.conv7_2 = MIGConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                      activate=True, ch=1, is_3d=self.is_3d, )
-            self.conv7_3 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+            self.conv7_3 = MIGConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                      activate=True, ch=1, is_3d=self.is_3d, )
-            self.conv8_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+            self.conv8_1 = MIGConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                      activate=True, ch=1, is_3d=self.is_3d, )
-            self.conv8_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+            self.conv8_2 = MIGConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                      activate=True, ch=1, is_3d=self.is_3d, )
-            self.conv8_3 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+            self.conv8_3 = MIGConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                      activate=True, ch=1, is_3d=self.is_3d, )
-            # 각각 독립적인 conv_final
             self.conv_final_1 = Conv(self.feat_ch, self.output_nc // 3, kernel_size=3, padding=1)
             self.conv_final_2 = Conv(self.feat_ch, self.output_nc // 3, kernel_size=3, padding=1)
             self.conv_final_3 = Conv(self.feat_ch, self.output_nc // 3, kernel_size=3, padding=1)
         elif self.use_separate_style_layers and self.use_multiple_outputs:
-            # 각 branch는 feat_ch 채널 (전체의 절반)
-            self.conv7_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+            self.conv7_1 = MIGConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                      activate=True, ch=1, is_3d=self.is_3d, )
-            self.conv7_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+            self.conv7_2 = MIGConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                      activate=True, ch=1, is_3d=self.is_3d, )
-            self.conv8_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+            self.conv8_1 = MIGConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                      activate=True, ch=1, is_3d=self.is_3d, )
-            self.conv8_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
+            self.conv8_2 = MIGConv(self.feat_ch, self.feat_ch, kernel_size=3,
                                      activate=True, ch=1, is_3d=self.is_3d, )
-            # 각각 독립적인 conv_final
             self.conv_final_1 = Conv(self.feat_ch, self.output_nc // 2, kernel_size=3, padding=1)
             self.conv_final_2 = Conv(self.feat_ch, self.output_nc // 2, kernel_size=3, padding=1)
-        
-        ## Added for checkerboard artifact
-        # if self.use_multiple_outputs:
-        #     self.conv7_1 = nn.Conv2d(self.feat_ch * ch // 2, self.feat_ch * ch // 4, kernel_size=3, padding=1)
-        #     self.conv7_2 = nn.Conv2d(self.feat_ch * ch // 2, self.feat_ch * ch // 4, kernel_size=3, padding=1)
-        # else:
-        #     self.conv7 = nn.Conv2d(self.feat_ch * ch, self.feat_ch * ch // 2, kernel_size=3, padding=1)
 
-        # if self.use_multiple_outputs:
-        #     self.conv8_1 = nn.Conv2d(self.feat_ch * ch // 4, self.feat_ch * ch // 8, kernel_size=3, padding=1)
-        #     self.conv8_2 = nn.Conv2d(self.feat_ch * ch // 4, self.feat_ch * ch // 8, kernel_size=3, padding=1)
-        # else:
-        #     self.conv8 = nn.Conv2d(self.feat_ch * ch // 2, self.feat_ch * ch // 4, kernel_size=3, padding=1)
-                                       
-        # if self.use_multiple_outputs:
-        #     self.conv_final_1 = nn.Conv2d(self.feat_ch * ch // 8, self.output_nc // 2, kernel_size=3, padding=1)
-        #     self.conv_final_2 = nn.Conv2d(self.feat_ch * ch // 8, self.output_nc // 2, kernel_size=3, padding=1)
-        # else:
-        #     self.conv_final = nn.Conv2d(self.feat_ch * ch // 4, self.output_nc, kernel_size=3, padding=1)
         self.conv_final = Conv(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
 
-    def _aggregate_ref_stack(self, ref_all):
-        """2.5D: [B, num_streams*K, H, W] -> [B, num_streams, H, W]"""
+    def _aggregate_moving_stack_legacy(self, moving_inputs):
+        """2.5D: [B, num_streams*K, H, W] -> [B, num_streams, H, W]. Used by the is_3d
+        path and by legacy multi/triple-output aggregation (not the reported SWA path)."""
         if not self.use_25d_style:
-            return ref_all
-        chunks = torch.split(ref_all, self.ref_stack_size, dim=1)
+            return moving_inputs
+        chunks = torch.split(moving_inputs, self.ref_stack_size, dim=1)
         style_maps = [z_agg(chunk) for chunk, z_agg in zip(chunks, self.z_aggs)]
         return torch.cat(style_maps, dim=1)
 
-    def _style_size(self, source):
-        H, W = source.shape[-2:]
-        ds = self.ref_condition_downsample
+    def _get_cgm_size(self, fixed_slice):
+        H, W = fixed_slice.shape[-2:]
+        ds = self.swa_downsampling_factor
         return max(1, H // ds), max(1, W // ds)
 
-    def _get_ref_stack(self, ref_all):
-        """Return ref tensor for conditioners.
+    def _select_moving_stack(self, moving_inputs):
+        """Return the moving tensor for the conditioners.
         2D  : [B,1,H,W]
         2.5D: [B,K,H,W]
         """
         if self.use_25d_style and self.ref_stack_size >= 1:
-            return ref_all[:, :self.ref_stack_size]
-        return ref_all[:, :1]
+            return moving_inputs[:, :self.ref_stack_size]
+        return moving_inputs[:, :1]
 
-    def _make_ref_condition(self, source, ref_all, encode_only=False):
-        """Returns style [B,1,h,w].
+    def _build_contrast_guidance(self, fixed_slice, moving_inputs, encode_only=False):
+        """Returns the Contrast Guidance Map (CGM), [B,1,h,w].
 
-        Multi/triple-output generation always uses the z_agg-aggregated ref as style.
-        Single-output 2D generation uses the conv conditioner (ref_condition_use_conv=True)
-        or the slice-window attention conditioner (default).
+        Multi/triple-output generation always uses the legacy z_agg-aggregated moving
+        stack as guidance. Single-output 2D generation uses the conv-ablation guidance
+        (guidance_mode='conv_ablation') or Slice-Window Attention (guidance_mode='swa',
+        the reported default).
         """
-        h, w = self._style_size(source)
+        cgm_h, cgm_w = self._get_cgm_size(fixed_slice)
 
         if not self._use_ref_conditioner:
-            # multi/triple-output: z_agg(2.5D) / nearest-downsampled(2D) ref as style
+            # legacy multi/triple-output: z_agg(2.5D) / nearest-downsampled(2D) as guidance
             if self.use_25d_style and self.ref_stack_size >= 1:
-                base_ref = self._aggregate_ref_stack(ref_all)        # [B,1,H,W] via z_agg
-                return F.interpolate(base_ref, size=(h, w), mode='nearest')
-            ref_map = self._get_ref_stack(ref_all)                   # [B,1,H,W]
-            return F.interpolate(ref_map, size=(h, w), mode='nearest')
+                base_ref = self._aggregate_moving_stack_legacy(moving_inputs)        # [B,1,H,W] via z_agg
+                return F.interpolate(base_ref, size=(cgm_h, cgm_w), mode='nearest')
+            moving_map = self._select_moving_stack(moving_inputs)                    # [B,1,H,W]
+            return F.interpolate(moving_map, size=(cgm_h, cgm_w), mode='nearest')
 
-        if self.ref_condition_use_conv:
-            ref_stack = self._get_ref_stack(ref_all)                 # [B,K,H,W]
-            cond_style, stats = self.ref_conditioner_conv(
-                source=source, ref_stack=ref_stack, out_size=(h, w)
+        if self.guidance_mode == 'conv_ablation':
+            moving_stack = self._select_moving_stack(moving_inputs)                  # [B,K,H,W]
+            guidance_map, stats = self.ref_conditioner_conv(
+                fixed_slice=fixed_slice, moving_stack=moving_stack, cgm_size=(cgm_h, cgm_w)
             )
             if not encode_only:
                 self._last_ref_condition_stats = stats
-            return cond_style
+            return guidance_map
 
         if self.use_25d_style and self.ref_stack_size >= 1:
-            ref_stack = self._get_ref_stack(ref_all)                 # [B,K,H,W]
-            cond_style, stats = self.ref_conditioner_25d(
-                source=source, ref_stack=ref_stack, out_size=(h, w)
+            moving_stack = self._select_moving_stack(moving_inputs)                  # [B,K,H,W]
+            cgm, stats = self.ref_conditioner_25d(
+                fixed_slice=fixed_slice, moving_stack=moving_stack, cgm_size=(cgm_h, cgm_w)
             )
             if not encode_only:
                 self._last_ref_condition_stats = stats
                 self._last_attn_entropy_for_loss = self.ref_conditioner_25d.last_attn_entropy
-            return cond_style
+            return cgm
 
-        ref_map = self._get_ref_stack(ref_all)                       # [B,1,H,W]
-        cond_style, stats = self.ref_conditioner_2d(
-            source=source, ref=ref_map, out_size=(h, w)
+        moving_map = self._select_moving_stack(moving_inputs)                        # [B,1,H,W]
+        cgm, stats = self.ref_conditioner_2d(
+            fixed_slice=fixed_slice, moving_ref=moving_map, cgm_size=(cgm_h, cgm_w)
         )
         if not encode_only:
             self._last_ref_condition_stats = stats
-        return cond_style
+        return cgm
 
     def forward(self, merged_input, layers=[], encode_only=False):
 
-        x = merged_input[:, :1, ...]
-        ref_all = merged_input[:, 1:, ...]
+        fixed_slice = merged_input[:, :1, ...]
+        moving_inputs = merged_input[:, 1:, ...]
 
         if self.is_3d:
-            # 3D path: original logic unchanged
-            ref = self._aggregate_ref_stack(ref_all)
+            # 3D path: legacy compatibility, unrelated to the reported 2D SWA model
+            ref = self._aggregate_moving_stack_legacy(moving_inputs)
             ref = ref.permute(0, 1, 4, 2, 3)
-            style_guidance_1 = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
-            style_guidance_1 = style_guidance_1.permute(0, 1, 3, 4, 2)
+            cgm = F.interpolate(ref, scale_factor=1/16, mode='trilinear', align_corners=False)
+            cgm = cgm.permute(0, 1, 3, 4, 2)
         else:
-            style_guidance_1 = self._make_ref_condition(
-                source=x, ref_all=ref_all, encode_only=encode_only
+            cgm = self._build_contrast_guidance(
+                fixed_slice=fixed_slice, moving_inputs=moving_inputs, encode_only=encode_only
             )
 
-        feats = []
-        feat0 = self.conv0(x, style_guidance_1)
-        feat1 = self.conv11(feat0, style_guidance_1)
-        feat1 = self.conv12(feat1, style_guidance_1)
-        feat2 = self.conv21(feat1, style_guidance_1)
-        feat2 = self.conv22(feat2, style_guidance_1)
-        feat3 = self.conv31(feat2, style_guidance_1)
-        feat3 = self.conv32(feat3, style_guidance_1)
-        feat4 = self.conv41(feat3 + feat2, style_guidance_1)
-        feat4 = self.conv42(feat4, style_guidance_1)
-        feat5 = self.conv51(feat4 + feat1, style_guidance_1)
-        feat5 = self.conv52(feat5, style_guidance_1)
-        feat6 = self.conv6(feat5 + feat0, style_guidance_1)
+        # SWA: construct a coarse CGM from fixed anatomy and moving contrast.
+        # The same CGM spatially modulates all 12 MIGConv blocks.
+        stem_feat = self.conv0(fixed_slice, cgm)
 
-        # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 처리
+        # Encoder
+        enc1_feat = self.conv11(stem_feat, cgm)
+        enc1_feat = self.conv12(enc1_feat, cgm)
+
+        enc2_feat = self.conv21(enc1_feat, cgm)
+        enc2_feat = self.conv22(enc2_feat, cgm)
+
+        # Bottleneck
+        bottleneck_feat = self.conv31(enc2_feat, cgm)
+        bottleneck_feat = self.conv32(bottleneck_feat, cgm)
+
+        # Decoder with element-wise skip addition
+        dec1_feat = self.conv41(bottleneck_feat + enc2_feat, cgm)
+        dec1_feat = self.conv42(dec1_feat, cgm)
+
+        dec2_feat = self.conv51(dec1_feat + enc1_feat, cgm)
+        dec2_feat = self.conv52(dec2_feat, cgm)
+
+        # Final refinement
+        refined_feat = self.conv6(dec2_feat + stem_feat, cgm)
+
+        # -------------------------------------------------------------------------
+        # Legacy multi-output / triple-output compatibility paths
+        # Not used by the reported single-output 2.5D MIGS model.
+        # -------------------------------------------------------------------------
         if self.use_separate_style_layers and self.use_triple_outputs:
-            # feat6를 3등분으로 분리
-            feat6_1, feat6_2, feat6_3 = torch.chunk(feat6, chunks=3, dim=1)  # 각 [B, feat_ch, H, W]
-            # style도 분리
-            style_1 = style_guidance_1[:, :1, ...]  # [B, 1, ...]
-            style_2 = style_guidance_1[:, 1:2, ...]  # [B, 1, ...]
-            style_3 = style_guidance_1[:, 2:3, ...]  # [B, 1, ...]
+            feat6_1, feat6_2, feat6_3 = torch.chunk(refined_feat, chunks=3, dim=1)
+            style_1 = cgm[:, :1, ...]
+            style_2 = cgm[:, 1:2, ...]
+            style_3 = cgm[:, 2:3, ...]
 
-            # conv7: 각각 독립적으로 처리
-            feat7_1 = self.conv7_1(feat6_1, style_1)  # [B, feat_ch, H, W]
-            feat7_2 = self.conv7_2(feat6_2, style_2)  # [B, feat_ch, H, W]
-            feat7_3 = self.conv7_3(feat6_3, style_3)  # [B, feat_ch, H, W]
+            feat7_1 = self.conv7_1(feat6_1, style_1)
+            feat7_2 = self.conv7_2(feat6_2, style_2)
+            feat7_3 = self.conv7_3(feat6_3, style_3)
 
-            # conv8: 각각 독립적으로 처리
-            feat8_1 = self.conv8_1(feat7_1, style_1)  # [B, feat_ch, H, W]
-            feat8_2 = self.conv8_2(feat7_2, style_2)  # [B, feat_ch, H, W]
-            feat8_3 = self.conv8_3(feat7_3, style_3)  # [B, feat_ch, H, W]
+            feat8_1 = self.conv8_1(feat7_1, style_1)
+            feat8_2 = self.conv8_2(feat7_2, style_2)
+            feat8_3 = self.conv8_3(feat7_3, style_3)
 
-            # 각각 conv_final + tanh
-            out_1 = torch.tanh(self.conv_final_1(feat8_1))  # [B, output_nc//3, H, W]
-            out_2 = torch.tanh(self.conv_final_2(feat8_2))  # [B, output_nc//3, H, W]
-            out_3 = torch.tanh(self.conv_final_3(feat8_3))  # [B, output_nc//3, H, W]
+            out_1 = torch.tanh(self.conv_final_1(feat8_1))
+            out_2 = torch.tanh(self.conv_final_2(feat8_2))
+            out_3 = torch.tanh(self.conv_final_3(feat8_3))
 
-            # 마지막에 합쳐서 반환
-            out = torch.cat((out_1, out_2, out_3), dim=1)  # [B, output_nc, H, W]
+            synthesized_slice = torch.cat((out_1, out_2, out_3), dim=1)
         elif self.use_separate_style_layers and self.use_multiple_outputs:
-            # feat6를 반으로 분리
-            feat6_1, feat6_2 = torch.chunk(feat6, chunks=2, dim=1)  # 각 [B, feat_ch, H, W]
-            # style도 분리
-            style_1 = style_guidance_1[:, :1, ...]  # [B, 1, ...]
-            style_2 = style_guidance_1[:, 1:, ...]  # [B, 1, ...]
+            feat6_1, feat6_2 = torch.chunk(refined_feat, chunks=2, dim=1)
+            style_1 = cgm[:, :1, ...]
+            style_2 = cgm[:, 1:, ...]
 
-            # conv7: 각각 독립적으로 처리
-            feat7_1 = self.conv7_1(feat6_1, style_1)  # [B, feat_ch, H, W]
-            feat7_2 = self.conv7_2(feat6_2, style_2)  # [B, feat_ch, H, W]
+            feat7_1 = self.conv7_1(feat6_1, style_1)
+            feat7_2 = self.conv7_2(feat6_2, style_2)
 
-            # conv8: 각각 독립적으로 처리
-            feat8_1 = self.conv8_1(feat7_1, style_1)  # [B, feat_ch, H, W]
-            feat8_2 = self.conv8_2(feat7_2, style_2)  # [B, feat_ch, H, W]
+            feat8_1 = self.conv8_1(feat7_1, style_1)
+            feat8_2 = self.conv8_2(feat7_2, style_2)
 
-            # 각각 conv_final + tanh
-            out_1 = torch.tanh(self.conv_final_1(feat8_1))  # [B, output_nc//2, H, W]
-            out_2 = torch.tanh(self.conv_final_2(feat8_2))  # [B, output_nc//2, H, W]
+            out_1 = torch.tanh(self.conv_final_1(feat8_1))
+            out_2 = torch.tanh(self.conv_final_2(feat8_2))
 
-            # 마지막에 합쳐서 반환
-            out = torch.cat((out_1, out_2), dim=1)  # [B, output_nc, H, W]
+            synthesized_slice = torch.cat((out_1, out_2), dim=1)
         else:
-            out = self.conv_final(feat6)
-            out = torch.tanh(out)
+            # Moving-contrast output aligned with the fixed anatomy
+            synthesized_slice = torch.tanh(self.conv_final(refined_feat))
 
         if encode_only:
-            layers_dict = {0: feat0, 1: feat1, 2: feat2, 3: feat3, 4: feat4, 5: feat5, 6: feat6}
+            layers_dict = {0: stem_feat, 1: enc1_feat, 2: enc2_feat, 3: bottleneck_feat,
+                            4: dec1_feat, 5: dec2_feat, 6: refined_feat}
             if self.use_separate_style_layers and self.use_triple_outputs:
                 layers_dict[7] = torch.cat((feat7_1, feat7_2, feat7_3), dim=1)
                 layers_dict[8] = torch.cat((feat8_1, feat8_2, feat8_3), dim=1)
@@ -659,10 +686,24 @@ class ProposedSynthesisModule(nn.Module):
                 layers_dict[8] = torch.cat((feat8_1, feat8_2), dim=1)
             return [layers_dict[i] for i in layers]
 
-        return out
+        return synthesized_slice
 
 
-class StyleConv(nn.Module):
+class ProposedSynthesisModule(MIGSGenerator):
+    """Backward-compatible name used by the existing model factory
+    (networks_define.define_G) and by type-name checks in BaseModule_AtoB /
+    BaseModule_AtoB_BtoA (`type(self.netG_A).__name__ == "ProposedSynthesisModule"`).
+    The actual implementation lives in MIGSGenerator above.
+    """
+    pass
+
+
+class MIGConv(nn.Module):
+    """Moving-Image-Guided Convolution (MIG Conv), corresponding to Eq. (4).
+
+    Spatial operation -> affine-free InstanceNorm -> learnable Gaussian noise
+    -> CGM-derived gamma/beta modulation -> LeakyReLU.
+    """
     def __init__(self,
                  input_nc,
                  feat_ch,
@@ -677,7 +718,7 @@ class StyleConv(nn.Module):
                  is_3d=False,
                  noise_independent=False):
 
-        super(StyleConv, self).__init__()
+        super(MIGConv, self).__init__()
         self.eps = eps
         self.input_nc = input_nc
         self.feat_ch = feat_ch
@@ -704,7 +745,7 @@ class StyleConv(nn.Module):
                 nn.Upsample(scale_factor=2, mode=mode),
                 Conv(input_nc, feat_ch, kernel_size=3, padding=1)
             )
-        
+
         elif self.downsample:
             factor = 2
             p = (len(blur_kernel) - factor) - (kernel_size - 1)
@@ -716,14 +757,15 @@ class StyleConv(nn.Module):
                 )
         else:
             self.conv = Conv(input_nc, feat_ch, kernel_size=3, padding=1)
-            
-        # self.batch_norm = nn.BatchNorm2d(feat_ch, affine=False)
+
         self.normalize = Norm(feat_ch, affine=False)
-        # self.batch_norm = nn.SyncBatchNorm(feat_ch, affine=False)
 
         nhidden = 512
 
         self.ch = ch
+        # CGM encoder shared by the gamma and beta heads (and per-stream heads
+        # for legacy multi/triple-output). Attribute names kept for checkpoint
+        # compatibility.
         if ch == 1:
             self.mlp_shared = nn.Sequential(
                 Conv(1, nhidden, kernel_size=3, padding=1),
@@ -778,7 +820,9 @@ class StyleConv(nn.Module):
                 self.noise_strength_2 = nn.Parameter(torch.zeros(1), requires_grad=True)
                 self.noise_strength_3 = nn.Parameter(torch.zeros(1), requires_grad=True)
 
-    def forward(self, x, style):
+    def forward(self, feature, cgm):
+        x = feature
+        style = cgm
 
         if self.downsample:
             original_size = x.size()
@@ -792,24 +836,23 @@ class StyleConv(nn.Module):
                 x = F.interpolate(x, size=original_size[2:], mode='bilinear', align_corners=True)
         else:
             x = self.conv(x)
-        
+
         if not self.noise_independent:
-            # 기존 방식: normalize -> cat -> noise 한꺼번에
+            # normalize -> cat -> noise 한꺼번에
             if style.shape[1] == 1:
                 x = self.normalize(x)
             elif style.shape[1] == 2:
-                x1, x2 = torch.chunk(x, chunks=2, dim=1)  # 각 부분 [B, C/2, H, W]
+                x1, x2 = torch.chunk(x, chunks=2, dim=1)
                 x1 = self.normalize(x1)
                 x2 = self.normalize(x2)
                 x = torch.cat((x1, x2), dim=1)
             elif style.shape[1] == 3:
-                x1, x2, x3 = torch.chunk(x, chunks=3, dim=1)  # 각 부분 [B, C/3, H, W]
+                x1, x2, x3 = torch.chunk(x, chunks=3, dim=1)
                 x1 = self.normalize(x1)
                 x2 = self.normalize(x2)
                 x3 = self.normalize(x3)
                 x = torch.cat((x1, x2, x3), dim=1)
 
-            # Add noise
             if self.randomize_noise:
                 noise = torch.randn_like(x) * self.noise_strength
             else:
@@ -817,7 +860,7 @@ class StyleConv(nn.Module):
 
             x = x + noise
         else:
-            # 새로운 방식: normalize -> noise 개별 주입 -> cat
+            # normalize -> noise 개별 주입 -> cat
             if style.shape[1] == 1:
                 x = self.normalize(x)
                 if self.randomize_noise:
@@ -826,10 +869,9 @@ class StyleConv(nn.Module):
                     noise = torch.zeros_like(x) * self.noise_strength
                 x = x + noise
             elif style.shape[1] == 2:
-                x1, x2 = torch.chunk(x, chunks=2, dim=1)  # 각 부분 [B, C/2, H, W]
+                x1, x2 = torch.chunk(x, chunks=2, dim=1)
                 x1 = self.normalize(x1)
                 x2 = self.normalize(x2)
-                # noise 개별 주입
                 if self.randomize_noise:
                     noise1 = torch.randn_like(x1) * self.noise_strength_1
                     noise2 = torch.randn_like(x2) * self.noise_strength_2
@@ -840,11 +882,10 @@ class StyleConv(nn.Module):
                 x2 = x2 + noise2
                 x = torch.cat((x1, x2), dim=1)
             elif style.shape[1] == 3:
-                x1, x2, x3 = torch.chunk(x, chunks=3, dim=1)  # 각 부분 [B, C/3, H, W]
+                x1, x2, x3 = torch.chunk(x, chunks=3, dim=1)
                 x1 = self.normalize(x1)
                 x2 = self.normalize(x2)
                 x3 = self.normalize(x3)
-                # noise 개별 주입
                 if self.randomize_noise:
                     noise1 = torch.randn_like(x1) * self.noise_strength_1
                     noise2 = torch.randn_like(x2) * self.noise_strength_2
@@ -857,27 +898,29 @@ class StyleConv(nn.Module):
                 x2 = x2 + noise2
                 x3 = x3 + noise3
                 x = torch.cat((x1, x2, x3), dim=1)
-        if self.style_denorm:
-            # 1. style을 x의 크기와 맞게 interpolation 
+
+        use_cgm_modulation = self.style_denorm
+        if use_cgm_modulation:
+            # 1. CGM을 x의 크기와 맞게 interpolation
             mode = 'trilinear' if self.is_3d else 'nearest'
-            style = F.interpolate(style, size=x.size()[2:], mode=mode) # TODO: bilinear 도 시도
-            # 2. style을 x의 C과 맞게 mlp
+            style = F.interpolate(style, size=x.size()[2:], mode=mode)
+            # 2. CGM을 x의 채널 수와 맞게 mlp
             if style.shape[1] == 1:
-                actv = self.mlp_shared(style)
-                gamma = self.mlp_gamma(actv)
-                beta = self.mlp_beta(actv)
+                cgm_features = self.mlp_shared(style)
+                gamma = self.mlp_gamma(cgm_features)
+                beta = self.mlp_beta(cgm_features)
             elif style.shape[1] == 2:
                 actv1 = self.mlp_shared(style[:, :1, :, :])
-                gamma = self.mlp_gamma(actv1) # B, 256, f_H, f_W
-                beta = self.mlp_beta(actv1) # B, 256, f_H, f_W
+                gamma = self.mlp_gamma(actv1)
+                beta = self.mlp_beta(actv1)
                 actv_2 = self.mlp_shared_2(style[:, 1:, :, :])
                 gamma_2 = self.mlp_gamma_2(actv_2)
                 beta_2 = self.mlp_beta_2(actv_2)
-                gamma = torch.cat((gamma, gamma_2), dim=1) # B, 512, f_H, f_W
+                gamma = torch.cat((gamma, gamma_2), dim=1)
                 beta = torch.cat((beta, beta_2), dim=1)
             elif style.shape[1] == 3:
                 actv1 = self.mlp_shared(style[:, :1, ...])
-                gamma = self.mlp_gamma(actv1)  # B, feat_ch//3, f_H, f_W
+                gamma = self.mlp_gamma(actv1)
                 beta = self.mlp_beta(actv1)
                 actv_2 = self.mlp_shared_2(style[:, 1:2, ...])
                 gamma_2 = self.mlp_gamma_2(actv_2)
@@ -885,12 +928,12 @@ class StyleConv(nn.Module):
                 actv_3 = self.mlp_shared_3(style[:, 2:3, ...])
                 gamma_3 = self.mlp_gamma_3(actv_3)
                 beta_3 = self.mlp_beta_3(actv_3)
-                gamma = torch.cat((gamma, gamma_2, gamma_3), dim=1)  # B, feat_ch, f_H, f_W
+                gamma = torch.cat((gamma, gamma_2, gamma_3), dim=1)
                 beta = torch.cat((beta, beta_2, beta_3), dim=1)
 
-            # 3. affine modulation
-            x_pre = x
-            x = x * gamma + beta
+            # 3. CGM-derived affine modulation
+            normalized_feature = x
+            x = gamma * normalized_feature + beta
 
             if getattr(self, '_log_style_modulation', False):
                 with torch.no_grad():
@@ -900,8 +943,8 @@ class StyleConv(nn.Module):
                         'beta_abs': beta.abs().mean().detach(),
                         'gamma_spatial_std': gamma.std(dim=(-2, -1)).mean().detach(),
                         'beta_spatial_std': beta.std(dim=(-2, -1)).mean().detach(),
-                        'delta_ratio': ((x - x_pre).abs().mean() / (x_pre.abs().mean() + eps)).detach(),
-                        'x_out_over_x_pre': (x.abs().mean() / (x_pre.abs().mean() + eps)).detach(),
+                        'delta_ratio': ((x - normalized_feature).abs().mean() / (normalized_feature.abs().mean() + eps)).detach(),
+                        'x_out_over_x_pre': (x.abs().mean() / (normalized_feature.abs().mean() + eps)).detach(),
                         'style_in_std': style.std().detach(),
                         'style_in_spatial_std': style.std(dim=(-2, -1)).mean().detach(),
                     }
@@ -911,9 +954,9 @@ class StyleConv(nn.Module):
         if self.activate:
             x = self.activation(x)
         return x
-    
 
-    
+
+
 class Blur(nn.Module):
     def __init__(self, kernel, pad, upsample_factor=1):
         super(Blur, self).__init__()

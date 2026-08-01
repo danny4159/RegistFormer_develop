@@ -1,6 +1,6 @@
-_target_: src.models.proposed_synthesis_module.ProposedSynthesisModule
+_target_: src.models.proposed_synthesis_module.MIGSModule
 
-name: ProposedSynthesis
+name: MIGS
 
 optimizer:
   _target_: torch.optim.Adam
@@ -17,7 +17,7 @@ scheduler:
 
 netG_A:
   _target_: src.models.components.networks_define.define_G
-  netG_type: 'proposed_synthesis'
+  netG_type: 'proposed_synthesis'  # keep: selects MIGSGenerator (aliased as ProposedSynthesisModule) in the model factory
   input_nc: 1
   output_nc: 1
   feat_ch: 264 #256 # For triple_outputs, use 126 or 132 (multiple of 3)
@@ -26,19 +26,19 @@ netG_A:
   is_3d: ${data.is_3d}
   use_separate_style_layers: false
   noise_independent: false  # false: cat 후 noise 주입 (기존), true: chunk별 개별 noise 주입
-  use_25d_style: ${data.use_25d_style}
-  ref_stack_size: ${data.ref_stack_size}
-  ref_condition_use_conv: false    # true: plain-conv reference conditioner (ablation baseline) instead of slice-window attention
-  ref_condition_window: 3         # local window size (odd): 1 (slice-only) | 3 | 5
-  ref_condition_dim: 16           # hidden dim for conditioner Q/K/V projections (default 16)
-  ref_condition_center_bias: 0.0  # center slice score bias; lower = attention learns more freely (e.g. 0.05)
-  ref_condition_direct: true      # true: attention weights directly mix raw ref values (no V_proj/out_proj shortcut)
-  ref_condition_direct_alpha: 1.0  # style = center_ref + alpha*(weighted_ref - center_ref); 0=center only, 1=full attention
-  ref_condition_qk_norm: true     # true: cosine similarity QK + learnable temperature (prevents Q,K→0 collapse)
-  ref_condition_uniform_attn: false  # true: bypass learned attn with 1/(K*win²) uniform weights (ablation baseline)
-  ref_condition_init_temperature: 10.0  # initial temperature for QK softmax (higher=sharper; 3.0=soft, 10.0=default, 30.0=sharp)
-  ref_condition_temperature_learnable: true  # false: freeze QK temperature at init (prevent collapse toward uniform)
-  ref_condition_downsample: 8      # style map downsample factor: 16 (1/16) | 8 | 4 | 2 | 1
+  use_25d_style: ${data.use_25d_style}  # keep: connects to common DataModule / model factory
+  ref_stack_size: ${data.ref_stack_size}  # keep: K, size of the moving stack y_adj^k
+  guidance_mode: swa              # 'swa' (Slice-Window Attention, reported model) | 'conv_ablation' (plain-conv CGM baseline) | 'local_2d_legacy'
+  swa_window_size: 3              # local window size (odd): 1 (slice-only) | 3 | 5
+  swa_qk_channels: 16             # hidden dim for SWA Q/K/V projections (default 16)
+  swa_center_slice_bias: 0.0      # center slice score bias; lower = attention learns more freely (e.g. 0.05)
+  swa_use_raw_values: true        # true: attention weights directly mix raw moving-stack values (no V_proj/out_proj shortcut)
+  cgm_blend_alpha: 1.0            # cgm = center_moving + alpha*(attended_moving - center_moving); 0=center only, 1=full attention
+  swa_use_cosine_similarity: true # true: cosine similarity QK + learnable temperature (prevents Q,K→0 collapse)
+  swa_use_uniform_attention: false  # true: bypass learned attn with 1/(K*win²) uniform weights (ablation baseline)
+  swa_temperature_init: 10.0      # initial temperature for QK softmax (higher=sharper; 3.0=soft, 10.0=default, 30.0=sharp)
+  swa_learnable_temperature: true # false: freeze QK temperature at init (prevent collapse toward uniform)
+  swa_downsampling_factor: 8      # CGM downsample factor: 16 (1/16) | 8 | 4 | 2 | 1 (submitted model uses 8)
   # init_type: 'kaiming'
 
 netD_A:
@@ -78,15 +78,15 @@ netF_A: # For PatchNCELoss
 
 params: # Other params
   lambda_gan: 1
-  lambda_style: 5
+  lambda_cx: 5           # contextual (cx) loss weight against the moving stack
   # lambda_cycle_a: 1
   # lambda_cycle_b: 1
   # lambda_sc: 0.1
   lambda_nce: 1.5
   lambda_mind: 0
   lambda_l1: 0
-  lambda_perceptual: 0  # VGG feature L2 perceptual loss (same 2.5D softmin form as contextual)
-  lambda_attn_entropy: 0  # >0: penalize attention entropy (encourage selective/peaked slice-window attention)
+  lambda_perceptual: 0     # VGG feature L2 perceptual loss (same 2.5D softmin form as contextual)
+  lambda_swa_entropy: 0    # >0: penalize SWA attention entropy (encourage selective/peaked slice-window attention)
   flip_equivariance: False
   batch_size: ${data.batch_size}
   nce_layers: [0,2,4,6] # [0,2,4,6] # 3까지가 encoder # [0,1,2,3]-> encoder만 하니까 성능 떨어진다. 전부다 하는게 낫다.
@@ -102,10 +102,10 @@ params: # Other params
   is_registration: false
   use_25d_style: ${data.use_25d_style}
   ref_stack_size: ${data.ref_stack_size}
-  ctx_center_only: false     # true: 2.5D에서도 center slice만으로 ctx loss 계산 (2D equivalent)
-  ctx_agg_mode: 'mean'    # 'softmin': center-biased soft-min (default) | 'mean': simple mean over all slices
-  ctx_softmin_tau: 0.3       # soft-min temperature (작을수록 hard-min에 가까움) — softmin 전용
-  ctx_shift_penalty: 0.05    # center slice preference bias per neighbor step — softmin 전용
-  log_ref_condition: true     # true: ref_condition/* 통계 로그 (A~D 실험용)
-  log_style_modulation: true  # true: StyleConv gamma/beta/aux_beta 통계 로그 (D 방식 aux_applied_over_x_pre 등)
-  log_z_select_interval: 100   # ref_condition / style_modulation 로그 주기 (step)
+  cx_center_only: false     # true: 2.5D에서도 center slice만으로 cx loss 계산 (2D equivalent)
+  cx_stack_aggregation: 'mean'  # 'softmin': center-biased soft-min (default) | 'mean': simple mean over all slices (reported MIGS)
+  cx_softmin_temperature: 0.3   # soft-min temperature (작을수록 hard-min에 가까움) — softmin 전용
+  cx_slice_offset_penalty: 0.05 # center slice preference bias per neighbor step — softmin 전용
+  log_swa_stats: true       # true: swa/* (Slice-Window Attention) 통계 로그
+  log_mig_conv_stats: true  # true: mig_conv/* (CGM gamma/beta modulation) 통계 로그
+  diagnostic_log_interval: 100  # swa/mig_conv 진단 로그 주기 (step)

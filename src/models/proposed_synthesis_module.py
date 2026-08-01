@@ -45,8 +45,36 @@ log = utils.get_pylogger(__name__)
 gray2rgb = lambda x : torch.cat((x, x, x), dim=1)
 
 
+# -------------------------------------------------------------------------
+# Legacy batch-variable mapping inherited from BaseModule_AtoB
+#
+# real_a:
+#   fixed_slice / fixed image x^k
+#   Anatomical source input and PatchNCE structural reference.
+#
+# real_b:
+#   reference_aligned_target
+#   Available in controlled settings such as IXI for evaluation only.
+#   It is not used as a supervised pixel-aligned training target.
+#
+# fake_b:
+#   synthesized_slice / MIGS output y_hat^k
+#   Moving-contrast image synthesized in the fixed-image geometry.
+#
+# real_b_ref:
+#   moving_stack y_adj^k
+#   K moving-domain slices after initial rigid pre-alignment;
+#   residual through-plane and in-plane mismatch may remain.
+#
+# The variable names themselves (real_a/real_b/fake_b/real_b_ref) are kept
+# as-is because they are the tuple-unpacking interface returned by
+# BaseModule_AtoB.model_step(), which is shared with other models and not
+# modified here.
+# -------------------------------------------------------------------------
 
-class ProposedSynthesisModule(BaseModule_AtoB):
+
+class MIGSModule(BaseModule_AtoB):
+    """Lightning training module for MIGS (Moving-Image-Guided Synthesis)."""
 
     def __init__(
         self,
@@ -82,9 +110,9 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             # choose layers what you want # "conv_1_2", "conv_2_2", "conv_3_4", "conv_4_4", "conv_5_4"
             listen_list = ["conv_4_2", "conv_5_4"] # PatchNCE는 MR을 반영하는 것. high level feature layer를 선택. low lever로 하면 mr의 feature가 그대로 많이 남을것
             self.vgg = VGG_Model(listen_list=listen_list)
-            
-        # assign contextual loss
-        style_feat_layers = {
+
+        # assign contextual loss (cx = "contextual", the paper's appearance-matching term)
+        cx_feature_layers = {
             "conv_1_2": 1.0,
             "conv_2_1": 1.0,
             "conv_2_2": 1.0,
@@ -92,11 +120,12 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             "conv_4_2": 1.0,
             "conv_4_4": 1.0
         }
+        lambda_cx = self._get_lambda_cx()
 
         # loss function
-        self.criterionContextual = Contextual_Loss(style_feat_layers) if params.lambda_style != 0 else None
+        self.criterionContextual = Contextual_Loss(cx_feature_layers) if lambda_cx != 0 else None
         lambda_perceptual = getattr(params, 'lambda_perceptual', 0)
-        self.criterionPerceptual = PerceptualVGGLoss(style_feat_layers) if lambda_perceptual != 0 else None
+        self.criterionPerceptual = PerceptualVGGLoss(cx_feature_layers) if lambda_perceptual != 0 else None
         self.criterionGAN = GANLoss(gan_type='lsgan')
         self.criterionNCE = PatchNCELoss(False, nce_T=0.07, batch_size=params.batch_size) if params.lambda_nce != 0 else None
 
@@ -109,6 +138,11 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         # self.nce_layers = [0,2,4,6] # range: 0~6
         # self.flip_equivariance = params.flip_equivariance
 
+    def _get_lambda_cx(self):
+        """lambda_cx (new name) with fallback to the legacy lambda_style key,
+        so old override scripts/configs keep working."""
+        return float(getattr(self.params, 'lambda_cx', getattr(self.params, 'lambda_style', 0.0)))
+
     @staticmethod
     def _softmin_contextual(cx_list, shift_penalties=None, tau=0.3):
         """Soft-min over a list of contextual losses (center-biased)."""
@@ -118,81 +152,97 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             losses = losses + penalties
         return -tau * torch.logsumexp(-losses / tau, dim=0)
 
-    def _contextual_stack_loss(self, fake_img, ref_stack, lambda_style):
-        """Contextual loss for 2.5D ref stack.
-        ctx_center_only=True : center slice only (2D equivalent).
-        ctx_agg_mode='softmin': center-biased soft-min over K slices (default).
-        ctx_agg_mode='mean'   : simple mean over all K slices.
-        """
-        K = ref_stack.shape[1]
-        center_idx = K // 2
-        if getattr(self.params, 'ctx_center_only', False):
-            return self.criterionContextual(ref_stack[:, center_idx:center_idx+1], fake_img) * lambda_style
-        agg_mode = getattr(self.params, 'ctx_agg_mode', 'softmin')
-        cx_losses = [self.criterionContextual(ref_stack[:, i:i+1], fake_img).squeeze() for i in range(K)]
-        if agg_mode == 'mean':
-            return torch.stack(cx_losses).mean() * lambda_style
-        # softmin (default)
-        tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
-        shift_penalty_base = getattr(self.params, 'ctx_shift_penalty', 0.05)
-        shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
-        return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_style
+    def _compute_cx_loss_over_moving_stack(self, synthesized_slice, moving_stack, lambda_cx):
+        """Compute contextual (cx) loss against the K-slice moving stack.
 
-    def _perceptual_stack_loss(self, fake_img, ref_stack, lambda_perceptual):
-        """VGG perceptual loss for 2.5D ref stack — same softmin aggregation as contextual."""
-        K = ref_stack.shape[1]
+        Reported MIGS: mean aggregation over all K slices (cx_stack_aggregation='mean').
+        Optional ablations: center-only (cx_center_only=True) or center-biased soft-min.
+        """
+        K = moving_stack.shape[1]
         center_idx = K // 2
-        p_losses = [self.criterionPerceptual(fake_img, ref_stack[:, i:i+1]).squeeze() for i in range(K)]
-        tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
-        shift_penalty_base = getattr(self.params, 'ctx_shift_penalty', 0.05)
+        if getattr(self.params, 'cx_center_only', getattr(self.params, 'ctx_center_only', False)):
+            return self.criterionContextual(moving_stack[:, center_idx:center_idx+1], synthesized_slice) * lambda_cx
+        agg_mode = getattr(self.params, 'cx_stack_aggregation', getattr(self.params, 'ctx_agg_mode', 'softmin'))
+        cx_losses = [self.criterionContextual(moving_stack[:, i:i+1], synthesized_slice).squeeze() for i in range(K)]
+        if agg_mode == 'mean':
+            return torch.stack(cx_losses).mean() * lambda_cx
+        # softmin (default)
+        tau = getattr(self.params, 'cx_softmin_temperature', getattr(self.params, 'ctx_softmin_tau', 0.3))
+        shift_penalty_base = getattr(self.params, 'cx_slice_offset_penalty', getattr(self.params, 'ctx_shift_penalty', 0.05))
+        shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
+        return self._softmin_contextual(cx_losses, shift_penalties, tau) * lambda_cx
+
+    def _compute_perceptual_loss_over_moving_stack(self, synthesized_slice, moving_stack, lambda_perceptual):
+        """VGG perceptual loss for 2.5D moving stack — same softmin aggregation as contextual."""
+        K = moving_stack.shape[1]
+        center_idx = K // 2
+        p_losses = [self.criterionPerceptual(synthesized_slice, moving_stack[:, i:i+1]).squeeze() for i in range(K)]
+        tau = getattr(self.params, 'cx_softmin_temperature', getattr(self.params, 'ctx_softmin_tau', 0.3))
+        shift_penalty_base = getattr(self.params, 'cx_slice_offset_penalty', getattr(self.params, 'ctx_shift_penalty', 0.05))
         shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
         return self._softmin_contextual(p_losses, shift_penalties, tau) * lambda_perceptual
 
-    def _l1_stack_loss(self, fake_img, ref_stack, lambda_l1):
-        """L1 loss for 2.5D ref stack — same softmin aggregation as contextual."""
-        K = ref_stack.shape[1]
+    def _compute_l1_loss_over_moving_stack(self, synthesized_slice, moving_stack, lambda_l1):
+        """L1 loss for 2.5D moving stack — same softmin aggregation as contextual."""
+        K = moving_stack.shape[1]
         center_idx = K // 2
-        l1_losses = [self.criterionL1(fake_img, ref_stack[:, i:i+1]).squeeze() for i in range(K)]
-        tau = getattr(self.params, 'ctx_softmin_tau', 0.3)
-        shift_penalty_base = getattr(self.params, 'ctx_shift_penalty', 0.05)
+        l1_losses = [self.criterionL1(synthesized_slice, moving_stack[:, i:i+1]).squeeze() for i in range(K)]
+        tau = getattr(self.params, 'cx_softmin_temperature', getattr(self.params, 'ctx_softmin_tau', 0.3))
+        shift_penalty_base = getattr(self.params, 'cx_slice_offset_penalty', getattr(self.params, 'ctx_shift_penalty', 0.05))
         shift_penalties = [abs(i - center_idx) * shift_penalty_base for i in range(K)]
         return self._softmin_contextual(l1_losses, shift_penalties, tau) * lambda_l1
 
-    def _setup_style_debug_flags(self):
+    def _setup_mig_conv_debug_flags(self):
         if not hasattr(self, 'netG_A'):
             return
-        log_style = getattr(self.params, 'log_style_modulation', False)
+        log_mig_conv = getattr(self.params, 'log_mig_conv_stats', getattr(self.params, 'log_style_modulation', False))
         for mod in self.netG_A.modules():
-            if type(mod).__name__ == 'StyleConv':
-                mod._log_style_modulation = log_style
+            if type(mod).__name__ == 'MIGConv':
+                mod._log_style_modulation = log_mig_conv
 
-    def _log_ref_condition_stats(self):
+    def _log_swa_stats(self):
+        """Log Slice-Window Attention diagnostics (attention entropy, QK stats, etc.)."""
         stats = getattr(self.netG_A, '_last_ref_condition_stats', None)
         if not stats:
             return
         for k, v in stats.items():
-            self.log(f"ref_condition/{k}", v, prog_bar=False)
+            self.log(f"swa/{k}", v, prog_bar=False)
 
-    def _log_style_modulation_stats(self):
-        if not getattr(self.params, 'log_style_modulation', False):
+    def _log_mig_conv_stats(self):
+        """Log MIGConv (CGM gamma/beta modulation) diagnostics."""
+        if not getattr(self.params, 'log_mig_conv_stats', getattr(self.params, 'log_style_modulation', False)):
             return
         for name, mod in self.netG_A.named_modules():
-            if type(mod).__name__ == 'StyleConv' and hasattr(mod, 'last_style_debug'):
+            if type(mod).__name__ == 'MIGConv' and hasattr(mod, 'last_style_debug'):
                 for k, v in mod.last_style_debug.items():
-                    self.log(f"style/{name}/{k}", v, prog_bar=False)
+                    self.log(f"mig_conv/{name}/{k}", v, prog_bar=False)
 
-    def backward_G(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref): # real_a, real_b, fake_b
+    def compute_generator_loss(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref):
+        """Compute the generator's total loss (does not perform backward itself).
+
+        Paper-code mapping for the reported single-output model:
+          real_a     -> fixed_slice x^k
+          real_b     -> reference_aligned_target (evaluation only)
+          fake_b     -> synthesized_slice y_hat^k
+          real_b_ref -> moving_stack y_adj^k
+
+        Reported self-supervised objective:
+          1. PatchNCE: fixed structure vs. synthesized output
+          2. Contextual (cx): moving-stack appearance vs. synthesized output
+          3. LSGAN: moving-domain fidelity
+        """
         loss_G = torch.tensor(0.0, device=real_a.device)
         use_25d = getattr(self.params, 'use_25d_style', False)
 
-        # Effective style refs for contextual and NCE real-side
-        # 2.5D: real_b_ref is K-channel stack
-        # 2D misalign: real_b_ref is single misaligned ref
-        # 2D no misalign: real_b is GT
+        # Moving-domain references used by the contextual loss and as
+        # conditioning inputs during PatchNCE feature extraction.
+        # 2.5D: real_b_ref is the K-channel moving stack
+        # 2D misalign: real_b_ref is a single misaligned moving reference
+        # 2D no misalign: real_b (GT) is used directly
         if use_25d or self.params.use_misalign_simul:
-            eff_b, eff_c, eff_d = real_b_ref, real_c_ref, real_d_ref
+            moving_ref_b, moving_ref_c, moving_ref_d = real_b_ref, real_c_ref, real_d_ref
         else:
-            eff_b, eff_c, eff_d = real_b, real_c, real_d
+            moving_ref_b, moving_ref_c, moving_ref_d = real_b, real_c, real_d
 
         ##################################################################################################################
         ## 1. GAN Loss
@@ -200,60 +250,61 @@ class ProposedSynthesisModule(BaseModule_AtoB):
         if self.criterionGAN and lambda_gan > 0:
             pred_fake = self.netD_A(fake_b)
             loss_gan_b = self.criterionGAN(pred_fake, True) * lambda_gan
-            self.log("Gan_b_Loss", loss_gan_b.detach(), prog_bar=True)
+            self.log("loss/gan_b", loss_gan_b.detach(), prog_bar=True)
             loss_G += loss_gan_b
             if self.params.use_multiple_outputs or self.params.use_triple_outputs:
                 pred_fake = self.netD_B(fake_c)
                 loss_gan_c = self.criterionGAN(pred_fake, True) * lambda_gan
-                self.log("Gan_c_Loss", loss_gan_c.detach(), prog_bar=True)
+                self.log("loss/gan_c", loss_gan_c.detach(), prog_bar=True)
                 loss_G += loss_gan_c
                 if self.params.use_triple_outputs and fake_d is not None:
                     pred_fake = self.netD_C(fake_d)
                     loss_gan_d = self.criterionGAN(pred_fake, True) * lambda_gan
-                    self.log("Gan_d_Loss", loss_gan_d.detach(), prog_bar=True)
+                    self.log("loss/gan_d", loss_gan_d.detach(), prog_bar=True)
                     loss_G += loss_gan_d
 
         ##################################################################################################################
-        ## 2. Contextual loss
+        ## 2. Contextual (cx) loss
         if self.criterionContextual:
-            if use_25d and eff_b is not None:
-                loss_style_b = self._contextual_stack_loss(fake_b, eff_b, self.params.lambda_style)
+            lambda_cx = self._get_lambda_cx()
+            if use_25d and moving_ref_b is not None:
+                loss_cx_b = self._compute_cx_loss_over_moving_stack(fake_b, moving_ref_b, lambda_cx)
             else:
-                loss_style_b = self.criterionContextual(eff_b, fake_b) * self.params.lambda_style
-            self.log("Context_b_Loss", loss_style_b.detach(), prog_bar=True)
-            loss_G += loss_style_b.squeeze()
+                loss_cx_b = self.criterionContextual(moving_ref_b, fake_b) * lambda_cx
+            self.log("loss/cx_b", loss_cx_b.detach(), prog_bar=True)
+            loss_G += loss_cx_b.squeeze()
 
             if self.params.use_multiple_outputs or self.params.use_triple_outputs:
-                if use_25d and eff_c is not None:
-                    loss_style_c = self._contextual_stack_loss(fake_c, eff_c, self.params.lambda_style)
+                if use_25d and moving_ref_c is not None:
+                    loss_cx_c = self._compute_cx_loss_over_moving_stack(fake_c, moving_ref_c, lambda_cx)
                 else:
-                    loss_style_c = self.criterionContextual(eff_c, fake_c) * self.params.lambda_style
-                self.log("Context_c_Loss", loss_style_c.detach(), prog_bar=True)
-                loss_G += loss_style_c.squeeze()
+                    loss_cx_c = self.criterionContextual(moving_ref_c, fake_c) * lambda_cx
+                self.log("loss/cx_c", loss_cx_c.detach(), prog_bar=True)
+                loss_G += loss_cx_c.squeeze()
                 if self.params.use_triple_outputs and fake_d is not None:
-                    if use_25d and eff_d is not None:
-                        loss_style_d = self._contextual_stack_loss(fake_d, eff_d, self.params.lambda_style)
+                    if use_25d and moving_ref_d is not None:
+                        loss_cx_d = self._compute_cx_loss_over_moving_stack(fake_d, moving_ref_d, lambda_cx)
                     else:
-                        loss_style_d = self.criterionContextual(eff_d, fake_d) * self.params.lambda_style
-                    self.log("Context_d_Loss", loss_style_d.detach(), prog_bar=True)
-                    loss_G += loss_style_d.squeeze()
+                        loss_cx_d = self.criterionContextual(moving_ref_d, fake_d) * lambda_cx
+                    self.log("loss/cx_d", loss_cx_d.detach(), prog_bar=True)
+                    loss_G += loss_cx_d.squeeze()
 
         ##################################################################################################################
         ## 2b. Perceptual loss (VGG feature L2, same 2.5D softmin aggregation as contextual)
         if self.criterionPerceptual:
             lambda_perceptual = getattr(self.params, 'lambda_perceptual', 0)
-            if use_25d and eff_b is not None:
-                loss_perceptual_b = self._perceptual_stack_loss(fake_b, eff_b, lambda_perceptual)
+            if use_25d and moving_ref_b is not None:
+                loss_perceptual_b = self._compute_perceptual_loss_over_moving_stack(fake_b, moving_ref_b, lambda_perceptual)
             else:
-                loss_perceptual_b = self.criterionPerceptual(fake_b, eff_b) * lambda_perceptual
-            self.log("Perceptual_b_Loss", loss_perceptual_b.detach(), prog_bar=True)
+                loss_perceptual_b = self.criterionPerceptual(fake_b, moving_ref_b) * lambda_perceptual
+            self.log("loss/perceptual_b", loss_perceptual_b.detach(), prog_bar=True)
             loss_G += loss_perceptual_b
 
         ##################################################################################################################
         ## 2c. L1 stack loss (2.5D softmin, replaces old center-slice-only L1)
-        if self.criterionL1 and use_25d and eff_b is not None:
-            loss_l1_b = self._l1_stack_loss(fake_b, eff_b, self.params.lambda_l1)
-            self.log("L1_b_Loss", loss_l1_b.detach(), prog_bar=True)
+        if self.criterionL1 and use_25d and moving_ref_b is not None:
+            loss_l1_b = self._compute_l1_loss_over_moving_stack(fake_b, moving_ref_b, self.params.lambda_l1)
+            self.log("loss/l1_b", loss_l1_b.detach(), prog_bar=True)
             loss_G += loss_l1_b
 
         ##################################################################################################################
@@ -273,150 +324,151 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 self.vgg.to(real_a.device)
 
                 if self.params.nce_independent:
-                    feat_a = self.vgg(real_rgb)
-                    feat_a = list(feat_a.values())
+                    fixed_features = self.vgg(real_rgb)
+                    fixed_features = list(fixed_features.values())
 
-                    feat_b = self.vgg(fake_rgb_b)
-                    feat_b = list(feat_b.values())
+                    synthesized_features_b = self.vgg(fake_rgb_b)
+                    synthesized_features_b = list(synthesized_features_b.values())
 
-                    feat_c = self.vgg(fake_rgb_c)
-                    feat_c = list(feat_c.values())
+                    synthesized_features_c = self.vgg(fake_rgb_c)
+                    synthesized_features_c = list(synthesized_features_c.values())
 
-                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
-                    feat_c_pool, _ = self.netF_A(feat_c, 256, sample_ids)
+                    fixed_patch_features, shared_patch_ids = self.netF_A(fixed_features, 256, None)
+                    synthesized_patch_features_b, _ = self.netF_A(synthesized_features_b, 256, shared_patch_ids)
+                    synthesized_patch_features_c, _ = self.netF_A(synthesized_features_c, 256, shared_patch_ids)
 
                     total_nce_loss = 0.0
 
-                    for f_a, f_b, f_c in zip(feat_a_pool, feat_b_pool, feat_c_pool):
+                    for f_a, f_b, f_c in zip(fixed_patch_features, synthesized_patch_features_b, synthesized_patch_features_c):
                         loss = (self.criterionNCE(f_a, f_b) + self.criterionNCE(f_a, f_c)) * self.params.lambda_nce
                         total_nce_loss = total_nce_loss + loss.mean()
-                    loss_nce_b = total_nce_loss / (len(feat_b) + len(feat_c))
-                    self.log("NCE_b_Loss", loss_nce_b.detach(), prog_bar=True)
+                    loss_nce_b = total_nce_loss / (len(synthesized_features_b) + len(synthesized_features_c))
+                    self.log("loss/nce_b", loss_nce_b.detach(), prog_bar=True)
                     loss_G += loss_nce_b
 
                 else:
-                    feat_b = self.vgg(fake_rgb)
-                    feat_b = list(feat_b.values()) # [0]:8,512,16,16 [1]:8,512,8,8
+                    synthesized_features = self.vgg(fake_rgb)
+                    synthesized_features = list(synthesized_features.values()) # [0]:8,512,16,16 [1]:8,512,8,8
 
-                    feat_a = self.vgg(real_rgb)
-                    feat_a = list(feat_a.values())
+                    fixed_features = self.vgg(real_rgb)
+                    fixed_features = list(fixed_features.values())
 
-                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+                    fixed_patch_features, shared_patch_ids = self.netF_A(fixed_features, 256, None)
+                    synthesized_patch_features, _ = self.netF_A(synthesized_features, 256, shared_patch_ids)
 
                     total_nce_loss = 0.0
 
-                    for f_a, f_b in zip(feat_a_pool,feat_b_pool):
+                    for f_a, f_b in zip(fixed_patch_features, synthesized_patch_features):
                         loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce
                         total_nce_loss = total_nce_loss + loss.mean()
-                    loss_nce_b = total_nce_loss / len(feat_b)
-                    self.log("NCE_b_Loss", loss_nce_b.detach(), prog_bar=True)
+                    loss_nce_b = total_nce_loss / len(synthesized_features)
+                    self.log("loss/nce_b", loss_nce_b.detach(), prog_bar=True)
                     loss_G += loss_nce_b
 
             else:
-                # For 2.5D: fake side uses dummy stacks; real side uses eff_b/c/d (already K-ch stacks)
+                # A fixed-filled dummy moving stack is used only to satisfy the generator
+                # input format while extracting features from the synthesized slice.
                 if use_25d:
                     K = self.params.ref_stack_size
-                    dummy = real_a.repeat(1, K, 1, 1)
+                    dummy_moving_stack = real_a.repeat(1, K, 1, 1)
                 else:
-                    dummy = real_a  # 2D: use real_a as neutral style
+                    dummy_moving_stack = real_a  # 2D: use real_a as neutral guidance
 
                 if self.params.use_triple_outputs:
                     n_layers = len(self.params.nce_layers)
-                    merged_input_1 = torch.cat((fake_b, dummy, dummy, dummy), dim=1)
-                    feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
+                    synthesized_feature_input_b = torch.cat((fake_b, dummy_moving_stack, dummy_moving_stack, dummy_moving_stack), dim=1)
+                    synthesized_features_b = self.netG_A(synthesized_feature_input_b, self.params.nce_layers, encode_only=True)
 
-                    merged_input_2 = torch.cat((fake_c, dummy, dummy, dummy), dim=1)
-                    feat_c = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+                    synthesized_feature_input_c = torch.cat((fake_c, dummy_moving_stack, dummy_moving_stack, dummy_moving_stack), dim=1)
+                    synthesized_features_c = self.netG_A(synthesized_feature_input_c, self.params.nce_layers, encode_only=True)
 
-                    merged_input_3 = torch.cat((fake_d, dummy, dummy, dummy), dim=1)
-                    feat_d = self.netG_A(merged_input_3, self.params.nce_layers, encode_only=True)
+                    synthesized_feature_input_d = torch.cat((fake_d, dummy_moving_stack, dummy_moving_stack, dummy_moving_stack), dim=1)
+                    synthesized_features_d = self.netG_A(synthesized_feature_input_d, self.params.nce_layers, encode_only=True)
 
                     flipped_for_equivariance = np.random.random() < 0.5
                     if self.params.flip_equivariance and flipped_for_equivariance:
-                        feat_b = [torch.flip(fb, [3]) for fb in feat_b]
-                        feat_c = [torch.flip(fc, [3]) for fc in feat_c]
-                        feat_d = [torch.flip(fd, [3]) for fd in feat_d]
+                        synthesized_features_b = [torch.flip(fb, [3]) for fb in synthesized_features_b]
+                        synthesized_features_c = [torch.flip(fc, [3]) for fc in synthesized_features_c]
+                        synthesized_features_d = [torch.flip(fd, [3]) for fd in synthesized_features_d]
 
-                    merged_input_real = torch.cat((real_a, eff_b, eff_c, eff_d), dim=1)
-                    feat_a = self.netG_A(merged_input_real, self.params.nce_layers, encode_only=True)
-                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
-                    feat_c_pool, _ = self.netF_A(feat_c, 256, sample_ids)
-                    feat_d_pool, _ = self.netF_A(feat_d, 256, sample_ids)
+                    fixed_feature_input = torch.cat((real_a, moving_ref_b, moving_ref_c, moving_ref_d), dim=1)
+                    fixed_features = self.netG_A(fixed_feature_input, self.params.nce_layers, encode_only=True)
+                    fixed_patch_features, shared_patch_ids = self.netF_A(fixed_features, 256, None)
+                    synthesized_patch_features_b, _ = self.netF_A(synthesized_features_b, 256, shared_patch_ids)
+                    synthesized_patch_features_c, _ = self.netF_A(synthesized_features_c, 256, shared_patch_ids)
+                    synthesized_patch_features_d, _ = self.netF_A(synthesized_features_d, 256, shared_patch_ids)
 
                     total_nce_loss = 0.0
-                    for f_a, f_b, f_c, f_d in zip(feat_a_pool, feat_b_pool, feat_c_pool, feat_d_pool):
+                    for f_a, f_b, f_c, f_d in zip(fixed_patch_features, synthesized_patch_features_b, synthesized_patch_features_c, synthesized_patch_features_d):
                         loss = (self.criterionNCE(f_a, f_b) + self.criterionNCE(f_a, f_c) + self.criterionNCE(f_a, f_d)) * self.params.lambda_nce
                         total_nce_loss = total_nce_loss + loss.mean()
                     loss_nce_b = total_nce_loss / n_layers
-                    self.log("NCE_b_Loss", loss_nce_b.detach(), prog_bar=True)
+                    self.log("loss/nce_b", loss_nce_b.detach(), prog_bar=True)
                     loss_G += loss_nce_b
                     assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
                 elif self.params.use_multiple_outputs:
                     n_layers = len(self.params.nce_layers)
-                    merged_input_1 = torch.cat((fake_b, dummy, dummy), dim=1)
-                    feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
+                    synthesized_feature_input_b = torch.cat((fake_b, dummy_moving_stack, dummy_moving_stack), dim=1)
+                    synthesized_features_b = self.netG_A(synthesized_feature_input_b, self.params.nce_layers, encode_only=True)
 
-                    merged_input_2 = torch.cat((fake_c, dummy, dummy), dim=1)
-                    feat_c = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
+                    synthesized_feature_input_c = torch.cat((fake_c, dummy_moving_stack, dummy_moving_stack), dim=1)
+                    synthesized_features_c = self.netG_A(synthesized_feature_input_c, self.params.nce_layers, encode_only=True)
 
                     flipped_for_equivariance = np.random.random() < 0.5
                     if self.params.flip_equivariance and flipped_for_equivariance:
-                        feat_b = [torch.flip(fb, [3]) for fb in feat_b]
-                        feat_c = [torch.flip(fc, [3]) for fc in feat_c]
+                        synthesized_features_b = [torch.flip(fb, [3]) for fb in synthesized_features_b]
+                        synthesized_features_c = [torch.flip(fc, [3]) for fc in synthesized_features_c]
 
-                    merged_input_real = torch.cat((real_a, eff_b, eff_c), dim=1)
-                    feat_a = self.netG_A(merged_input_real, self.params.nce_layers, encode_only=True)
-                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
-                    feat_c_pool, _ = self.netF_A(feat_c, 256, sample_ids)
+                    fixed_feature_input = torch.cat((real_a, moving_ref_b, moving_ref_c), dim=1)
+                    fixed_features = self.netG_A(fixed_feature_input, self.params.nce_layers, encode_only=True)
+                    fixed_patch_features, shared_patch_ids = self.netF_A(fixed_features, 256, None)
+                    synthesized_patch_features_b, _ = self.netF_A(synthesized_features_b, 256, shared_patch_ids)
+                    synthesized_patch_features_c, _ = self.netF_A(synthesized_features_c, 256, shared_patch_ids)
 
                     total_nce_loss = 0.0
-                    for f_a, f_b, f_c in zip(feat_a_pool, feat_b_pool, feat_c_pool):
+                    for f_a, f_b, f_c in zip(fixed_patch_features, synthesized_patch_features_b, synthesized_patch_features_c):
                         loss = (self.criterionNCE(f_a, f_b) + self.criterionNCE(f_a, f_c)) * self.params.lambda_nce
                         total_nce_loss = total_nce_loss + loss.mean()
                     loss_nce_b = total_nce_loss / n_layers
-                    self.log("NCE_b_Loss", loss_nce_b.detach(), prog_bar=True)
+                    self.log("loss/nce_b", loss_nce_b.detach(), prog_bar=True)
                     loss_G += loss_nce_b
                     assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
                 else:
                     n_layers = len(self.params.nce_layers)
-                    merged_input_1 = torch.cat((fake_b, dummy), dim=1)
-                    feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
+                    synthesized_feature_input = torch.cat((fake_b, dummy_moving_stack), dim=1)
+                    synthesized_features = self.netG_A(synthesized_feature_input, self.params.nce_layers, encode_only=True)
 
                     flipped_for_equivariance = np.random.random() < 0.5
                     if self.params.flip_equivariance and flipped_for_equivariance:
-                        feat_b = [torch.flip(fb, [3]) for fb in feat_b]
+                        synthesized_features = [torch.flip(fb, [3]) for fb in synthesized_features]
 
-                    merged_input_real = torch.cat((real_a, eff_b), dim=1)
-                    feat_a = self.netG_A(merged_input_real, self.params.nce_layers, encode_only=True)
-                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+                    fixed_feature_input = torch.cat((real_a, moving_ref_b), dim=1)
+                    fixed_features = self.netG_A(fixed_feature_input, self.params.nce_layers, encode_only=True)
+                    fixed_patch_features, shared_patch_ids = self.netF_A(fixed_features, 256, None)
+                    synthesized_patch_features, _ = self.netF_A(synthesized_features, 256, shared_patch_ids)
 
                     total_nce_loss = 0.0
-                    for f_a, f_b in zip(feat_a_pool, feat_b_pool):
+                    for f_a, f_b in zip(fixed_patch_features, synthesized_patch_features):
                         loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce
                         total_nce_loss = total_nce_loss + loss.mean()
                     loss_nce_b = total_nce_loss / n_layers
-                    self.log("NCE_b_Loss", loss_nce_b.detach(), prog_bar=True)
+                    self.log("loss/nce_b", loss_nce_b.detach(), prog_bar=True)
                     loss_G += loss_nce_b
                     assert not torch.isnan(loss_nce_b).any(), "NCE Loss is NaN"
 
         if self.criterionMIND:
             loss_mind_b = self.criterionMIND(real_a, fake_b) * self.params.lambda_mind
-            self.log("MIND_b_Loss", loss_mind_b.detach(), prog_bar=True)
+            self.log("loss/mind_b", loss_mind_b.detach(), prog_bar=True)
             loss_G += loss_mind_b
 
             if self.params.use_multiple_outputs or self.params.use_triple_outputs:
                 loss_mind_c = self.criterionMIND(real_a, fake_c) * self.params.lambda_mind
-                self.log("MIND_c_Loss", loss_mind_c.detach(), prog_bar=True)
+                self.log("loss/mind_c", loss_mind_c.detach(), prog_bar=True)
                 loss_G += loss_mind_c
 
             if self.params.use_triple_outputs and fake_d is not None:
                 loss_mind_d = self.criterionMIND(real_a, fake_d) * self.params.lambda_mind
-                self.log("MIND_d_Loss", loss_mind_d.detach(), prog_bar=True)
+                self.log("loss/mind_d", loss_mind_d.detach(), prog_bar=True)
                 loss_G += loss_mind_d
 
         if self.criterionL1 and not use_25d:
@@ -426,36 +478,36 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     return t[:, t.shape[1] // 2: t.shape[1] // 2 + 1]
                 return t
             loss_l1_b = self.criterionL1(_center_slice(real_b_ref), fake_b) * self.params.lambda_l1
-            self.log("L1_b_Loss", loss_l1_b.detach(), prog_bar=True)
+            self.log("loss/l1_b", loss_l1_b.detach(), prog_bar=True)
             loss_G += loss_l1_b
 
             if self.params.use_multiple_outputs or self.params.use_triple_outputs:
                 loss_l1_c = self.criterionL1(_center_slice(real_c_ref), fake_c) * self.params.lambda_l1
-                self.log("L1_c_Loss", loss_l1_c.detach(), prog_bar=True)
+                self.log("loss/l1_c", loss_l1_c.detach(), prog_bar=True)
                 loss_G += loss_l1_c
 
             if self.params.use_triple_outputs and fake_d is not None and real_d_ref is not None:
                 loss_l1_d = self.criterionL1(_center_slice(real_d_ref), fake_d) * self.params.lambda_l1
-                self.log("L1_d_Loss", loss_l1_d.detach(), prog_bar=True)
+                self.log("loss/l1_d", loss_l1_d.detach(), prog_bar=True)
                 loss_G += loss_l1_d
 
         ##################################################################################################################
-        ## Attention entropy regularization (encourage selective / peaked attention).
+        ## Attention entropy regularization (encourage selective / peaked SWA attention).
         ## Minimizing normalized entropy pushes attention away from uniform toward query-similar candidates.
-        lambda_attn_entropy = float(getattr(self.params, 'lambda_attn_entropy', 0))
-        if lambda_attn_entropy != 0:
+        lambda_swa_entropy = float(getattr(self.params, 'lambda_swa_entropy', getattr(self.params, 'lambda_attn_entropy', 0)))
+        if lambda_swa_entropy != 0:
             ent = getattr(self.netG_A, '_last_attn_entropy_for_loss', None)
             if ent is not None:
-                loss_attn_entropy = lambda_attn_entropy * ent
-                self.log("AttnEntropy_Loss", loss_attn_entropy.detach(), prog_bar=True)
-                self.log("attn_entropy_val", ent.detach(), prog_bar=False)
-                loss_G += loss_attn_entropy
+                loss_swa_entropy = lambda_swa_entropy * ent
+                self.log("loss/swa_entropy", loss_swa_entropy.detach(), prog_bar=True)
+                self.log("diag/swa_entropy", ent.detach(), prog_bar=False)
+                loss_G += loss_swa_entropy
 
-        self.log("G_loss", loss_G.detach(), prog_bar=True)
+        self.log("loss/g_total", loss_G.detach(), prog_bar=True)
         return loss_G
         # assert not torch.isnan(loss_G).any(), "Total Loss is NaN"
 
-    def backward_G_3D(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref):
+    def compute_generator_loss_3d_legacy(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref):
         loss_G = torch.tensor(0.0, device=real_a.device)
         D = real_a.shape[-1]  # 슬라이스 수
 
@@ -473,15 +525,16 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 pred_fake = self.netD_A(fb)
                 loss_gan_b = self.criterionGAN(pred_fake, True) * lambda_gan / D
                 loss_G += loss_gan_b
-                loss_logs.setdefault("Gan_b_Loss", 0.0)
-                loss_logs["Gan_b_Loss"] += loss_gan_b.detach()
+                loss_logs.setdefault("loss/gan_b", 0.0)
+                loss_logs["loss/gan_b"] += loss_gan_b.detach()
 
-            # Contextual
+            # Contextual (cx)
             if self.criterionContextual:
-                loss_style_b = self.criterionContextual(rb, fb) * self.params.lambda_style / D
-                loss_G += loss_style_b.squeeze()
-                loss_logs.setdefault("Context_b_Loss", 0.0)
-                loss_logs["Context_b_Loss"] += loss_style_b.detach()
+                lambda_cx = self._get_lambda_cx()
+                loss_cx_b = self.criterionContextual(rb, fb) * lambda_cx / D
+                loss_G += loss_cx_b.squeeze()
+                loss_logs.setdefault("loss/cx_b", 0.0)
+                loss_logs["loss/cx_b"] += loss_cx_b.detach()
 
             ## PatchNCE (slice-wise)
             if self.criterionNCE:
@@ -490,58 +543,58 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                     fake_rgb = fb.repeat(1, 3, 1, 1)
                     self.vgg.to(ra.device)
 
-                    feat_b = self.vgg(fake_rgb)
-                    feat_b = list(feat_b.values()) # [0]:8,512,16,16 [1]:8,512,8,8
+                    synthesized_features = self.vgg(fake_rgb)
+                    synthesized_features = list(synthesized_features.values()) # [0]:8,512,16,16 [1]:8,512,8,8
 
-                    feat_a = self.vgg(real_rgb)
-                    feat_a = list(feat_a.values())
+                    fixed_features = self.vgg(real_rgb)
+                    fixed_features = list(fixed_features.values())
 
-                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+                    fixed_patch_features, shared_patch_ids = self.netF_A(fixed_features, 256, None)
+                    synthesized_patch_features, _ = self.netF_A(synthesized_features, 256, shared_patch_ids)
 
                     total_nce_loss = 0.0
 
-                    for f_a, f_b in zip(feat_a_pool, feat_b_pool):
+                    for f_a, f_b in zip(fixed_patch_features, synthesized_patch_features):
                         loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce / D
                         total_nce_loss = total_nce_loss + loss.mean()
-                    loss_nce_b = total_nce_loss / len(feat_b)
-                    loss_logs.setdefault("NCE_b_Loss", 0.0)
-                    loss_logs["NCE_b_Loss"] += loss_nce_b.detach()
+                    loss_nce_b = total_nce_loss / len(synthesized_features)
+                    loss_logs.setdefault("loss/nce_b", 0.0)
+                    loss_logs["loss/nce_b"] += loss_nce_b.detach()
                     loss_G += loss_nce_b
 
                 else:
                     n_layers = len(self.params.nce_layers)
-                    merged_input_1 = torch.cat((fb, ra), dim=1)
-                    feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
+                    synthesized_feature_input = torch.cat((fb, ra), dim=1)
+                    synthesized_features = self.netG_A(synthesized_feature_input, self.params.nce_layers, encode_only=True)
 
                     flipped_for_equivariance = np.random.random() < 0.5
                     if self.params.flip_equivariance and flipped_for_equivariance:
-                        feat_b = [torch.flip(fb_, [3]) for fb_ in feat_b]
+                        synthesized_features = [torch.flip(fb_, [3]) for fb_ in synthesized_features]
 
-                    merged_input_2 = torch.cat((ra, rb), dim=1)
-                    feat_a = self.netG_A(merged_input_2, self.params.nce_layers, encode_only=True)
-                    feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
-                    feat_b_pool, _ = self.netF_A(feat_b, 256, sample_ids)
+                    fixed_feature_input = torch.cat((ra, rb), dim=1)
+                    fixed_features = self.netG_A(fixed_feature_input, self.params.nce_layers, encode_only=True)
+                    fixed_patch_features, shared_patch_ids = self.netF_A(fixed_features, 256, None)
+                    synthesized_patch_features, _ = self.netF_A(synthesized_features, 256, shared_patch_ids)
 
                     total_nce_loss = 0.0
-                    for f_a, f_b in zip(feat_a_pool, feat_b_pool):
+                    for f_a, f_b in zip(fixed_patch_features, synthesized_patch_features):
                         loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce / D
                         total_nce_loss += loss.mean()
 
                     loss_nce_b = total_nce_loss / n_layers
-                    loss_logs.setdefault("NCE_b_Loss", 0.0)
-                    loss_logs["NCE_b_Loss"] += loss_nce_b.detach()
+                    loss_logs.setdefault("loss/nce_b", 0.0)
+                    loss_logs["loss/nce_b"] += loss_nce_b.detach()
                     loss_G += loss_nce_b
         # 평균 로그 출력
         for key, val in loss_logs.items():
             self.log(key, val, prog_bar=True)
-        self.log("G_loss", loss_G.detach(), prog_bar=True)
+        self.log("loss/g_total", loss_G.detach(), prog_bar=True)
 
         return loss_G
 
     def training_step(self, batch: Any, batch_idx: int):
 
-        self._setup_style_debug_flags()
+        self._setup_mig_conv_debug_flags()
 
         real_c = real_d = fake_c = fake_d = None
         real_b_ref = real_c_ref = real_d_ref = None
@@ -578,26 +631,32 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 optimizer_G_A, optimizer_F_A = self.optimizers()
                 optimizer_D_A = None
             if need_ref:
+                # Single-output 2.5D MIGS:
+                # real_a     = fixed slice
+                # real_b     = reference-aligned target for evaluation
+                # fake_b     = synthesized aligned slice
+                # real_b_ref = K-slice moving stack used by SWA and contextual loss
                 real_a, real_b, fake_b, real_b_ref = self.model_step(batch)
             else:
                 real_a, real_b, fake_b = self.model_step(batch)
 
         with optimizer_G_A.toggle_model():
             if self.params.use_triple_outputs:
-                loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
+                loss_G = self.compute_generator_loss(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
             elif self.params.use_multiple_outputs:
-                loss_G = self.backward_G(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
+                loss_G = self.compute_generator_loss(real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref)
             else:
                 if self.params.is_3d and not use_25d:
-                    loss_G = self.backward_G_3D(real_a, real_b, None, None, fake_b, None, None, None, None, None)
+                    loss_G = self.compute_generator_loss_3d_legacy(real_a, real_b, None, None, fake_b, None, None, None, None, None)
                 else:
-                    loss_G = self.backward_G(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
+                    loss_G = self.compute_generator_loss(real_a, real_b, None, None, fake_b, None, None, real_b_ref, None, None)
 
-            if getattr(self.params, 'log_ref_condition', False) or getattr(self.params, 'log_style_modulation', False):
-                interval = int(getattr(self.params, 'log_z_select_interval', 200))
+            if getattr(self.params, 'log_swa_stats', getattr(self.params, 'log_ref_condition', False)) or \
+               getattr(self.params, 'log_mig_conv_stats', getattr(self.params, 'log_style_modulation', False)):
+                interval = int(getattr(self.params, 'diagnostic_log_interval', getattr(self.params, 'log_z_select_interval', 200)))
                 if self.global_step % interval == 0:
-                    self._log_ref_condition_stats()
-                    self._log_style_modulation_stats()
+                    self._log_swa_stats()
+                    self._log_mig_conv_stats()
 
             self.manual_backward(loss_G)
             self.clip_gradients(
@@ -611,51 +670,52 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             optimizer_G_A.zero_grad()
             optimizer_F_A.zero_grad()
 
-        # Discriminator real target: for 2.5D use center slice of stack
-        def _disc_real(ref, gt):
+        # LSGAN real sample: center slice of the moving stack, matching the
+        # moving-domain discriminator setup in the paper.
+        def _select_discriminator_real_slice(ref, gt):
             if use_25d and ref is not None and ref.shape[1] > 1:
                 return ref[:, ref.shape[1] // 2: ref.shape[1] // 2 + 1]
             return ref if self.params.use_misalign_simul else gt
 
         if use_gan:
-            real_b_disc = _disc_real(real_b_ref, real_b)
-            real_c_disc = _disc_real(real_c_ref, real_c) if (self.params.use_multiple_outputs or self.params.use_triple_outputs) else real_c
-            real_d_disc = _disc_real(real_d_ref, real_d) if self.params.use_triple_outputs else real_d
+            moving_center_for_discriminator = _select_discriminator_real_slice(real_b_ref, real_b)
+            moving_center_for_discriminator_c = _select_discriminator_real_slice(real_c_ref, real_c) if (self.params.use_multiple_outputs or self.params.use_triple_outputs) else real_c
+            moving_center_for_discriminator_d = _select_discriminator_real_slice(real_d_ref, real_d) if self.params.use_triple_outputs else real_d
 
             with optimizer_D_A.toggle_model():
                 if self.params.is_3d:
-                    loss_D_A = self.backward_D_A_3D(real_b_disc, fake_b)
+                    loss_D_A = self.backward_D_A_3D(moving_center_for_discriminator, fake_b)
                 else:
-                    loss_D_A = self.backward_D_A(real_b_disc, fake_b)
+                    loss_D_A = self.backward_D_A(moving_center_for_discriminator, fake_b)
                 self.manual_backward(loss_D_A)
                 self.clip_gradients(
                     optimizer_D_A, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
                 )
                 optimizer_D_A.step()
                 optimizer_D_A.zero_grad()
-            self.log("D_A_Loss", loss_D_A.detach(), prog_bar=True)
+            self.log("loss/d_a", loss_D_A.detach(), prog_bar=True)
 
             if self.params.use_multiple_outputs or self.params.use_triple_outputs:
                 with optimizer_D_B.toggle_model():
-                    loss_D_B = self.backward_D_B(real_c_disc, fake_c)
+                    loss_D_B = self.backward_D_B(moving_center_for_discriminator_c, fake_c)
                     self.manual_backward(loss_D_B)
                     self.clip_gradients(
                         optimizer_D_B, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
                     )
                     optimizer_D_B.step()
                     optimizer_D_B.zero_grad()
-                self.log("D_B_Loss", loss_D_B.detach(), prog_bar=True)
+                self.log("loss/d_b", loss_D_B.detach(), prog_bar=True)
 
             if self.params.use_triple_outputs:
                 with optimizer_D_C.toggle_model():
-                    loss_D_C = self.backward_D_C(real_d_disc, fake_d)
+                    loss_D_C = self.backward_D_C(moving_center_for_discriminator_d, fake_d)
                     self.manual_backward(loss_D_C)
                     self.clip_gradients(
                         optimizer_D_C, gradient_clip_val=0.5, gradient_clip_algorithm="norm"
                     )
                     optimizer_D_C.step()
                     optimizer_D_C.zero_grad()
-                self.log("D_C_Loss", loss_D_C.detach(), prog_bar=True)
+                self.log("loss/d_c", loss_D_C.detach(), prog_bar=True)
 
     def configure_optimizers(self):
         """Choose what optimizers and learning-rate schedulers to use in your optimization.
@@ -700,3 +760,8 @@ class ProposedSynthesisModule(BaseModule_AtoB):
             return optimizers, schedulers
 
         return optimizers
+
+
+# Backward-compatible alias: nothing currently imports this by name (hydra
+# instantiates via the _target_ string in the yaml), but kept just in case.
+ProposedSynthesisModule = MIGSModule
