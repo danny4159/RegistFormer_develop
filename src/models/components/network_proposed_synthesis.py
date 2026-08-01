@@ -26,18 +26,16 @@ def _safe_entropy(prob, dim, norm_base):
 
 
 class LocalWindowAttentionConditioner2D(nn.Module):
-    """B/C. Local QKV attention conditioner for 2D reference conditioning.
+    """Local QKV attention conditioner for 2D reference conditioning.
 
-    coarse=False (B): source Q attends to same-resolution ref K,V.
-    coarse=True  (C): source Q attends to 4x4 pooled (then nearest-up) ref K,V.
+    source Q attends to same-resolution ref K,V within a local window.
     """
 
-    def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1):
+    def __init__(self, dim=16, window=3, residual_scale=0.1):
         super().__init__()
         assert window % 2 == 1
         self.dim = dim
         self.window = window
-        self.coarse = coarse
         self.residual_scale = residual_scale
 
         self.q_proj = nn.Conv2d(1, dim, 1)
@@ -67,15 +65,7 @@ class LocalWindowAttentionConditioner2D(nn.Module):
     def forward(self, source, ref, out_size):
         src_low = F.interpolate(source, size=out_size, mode='bilinear', align_corners=False)
         ref_low = F.interpolate(ref, size=out_size, mode='bilinear', align_corners=False)
-
-        h, w = out_size
-        if self.coarse:
-            region_size = (max(1, h // 2), max(1, w // 2))
-            ref_base = F.interpolate(
-                F.adaptive_avg_pool2d(ref_low, region_size), size=out_size, mode='nearest'
-            )
-        else:
-            ref_base = ref_low
+        ref_base = ref_low
 
         q = self.q_proj(src_low)
         k = self.k_proj(ref_base)
@@ -102,38 +92,22 @@ class LocalWindowAttentionConditioner2D(nn.Module):
 
 
 class LocalWindowAttentionConditioner25D(nn.Module):
-    """B/C. source(2D) query vs ref_stack(K-slice) local window attention.
+    """Slice-window attention conditioner: source(2D) query vs ref_stack(K-slice) local window attention.
 
-    coarse=False (B): same-grid local attention across K slices.
-    coarse=True  (C): coarse-region local attention across K slices.
+    Q/K are cosine-normalized (qk_norm) with a learnable softmax temperature. Attention weights
+    directly mix raw ref pixel values (direct_attn) into the style map, blended with the center
+    reference slice via direct_alpha.
     """
 
-    def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2,
-                 blend_mode='none', use_rel_bias=False, use_multihead=False, use_direct_attn=False,
-                 use_qk_norm=False, init_temperature=10.0, use_uniform_attn=False, use_qk_conv3=False,
-                 ref_downsample_mode='bilinear', direct_alpha=0.5, temperature_learnable=True):
+    def __init__(self, dim=16, window=3, residual_scale=0.1, center_slice_bias=0.2,
+                 use_direct_attn=False, use_qk_norm=False, init_temperature=10.0,
+                 use_uniform_attn=False, direct_alpha=0.5, temperature_learnable=True):
         super().__init__()
         assert window % 2 == 1, f"window must be odd, got {window}"
-        assert ref_downsample_mode in ('bilinear', 'nearest', 'conv_stride2'), \
-            f"ref_downsample_mode must be bilinear/nearest/conv_stride2, got {ref_downsample_mode}"
         self.dim = dim
         self.window = window
-        self.coarse = coarse
-        self.ref_downsample_mode = ref_downsample_mode
         self.residual_scale = residual_scale
         self.center_slice_bias = center_slice_bias
-        _valid_blend = ['none', 'center_base', 'center_ref_low']
-        if blend_mode not in _valid_blend:
-            raise ValueError(f"Unknown blend_mode={blend_mode!r}. Choose from {_valid_blend}")
-        self.blend_mode = blend_mode
-        self.use_rel_bias = bool(use_rel_bias)
-        self.spatial_rel_bias_strength = 0.05
-        self.slice_rel_bias_strength = 0.05
-        self.use_multihead = bool(use_multihead)
-        self.num_heads = 4 if self.use_multihead else 1
-        if dim % self.num_heads != 0:
-            raise ValueError(f"dim={dim} must be divisible by num_heads={self.num_heads}")
-        self.head_dim = dim // self.num_heads
         # direct: attention weights directly mix raw ref values; no V_proj/out_proj shortcut
         self.use_direct_attn = bool(use_direct_attn)
         self.direct_alpha = float(direct_alpha)  # style = center_ref + alpha*(weighted_ref - center_ref)
@@ -149,9 +123,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         # differentiable attention entropy from the last forward (for optional entropy regularization)
         self.last_attn_entropy = None
         self.use_uniform_attn = bool(use_uniform_attn)
-        self.use_qk_conv3 = bool(use_qk_conv3)
 
-        # Manhattan distance for each position in the local window
+        # Manhattan distance for each position in the local window (used for diagnostic logging)
         r = window // 2
         dist = [abs(dy) + abs(dx) for dy in range(-r, r + 1) for dx in range(-r, r + 1)]
         self.register_buffer(
@@ -159,28 +132,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             torch.tensor(dist, dtype=torch.float32).view(1, 1, window * window, 1, 1),
         )
 
-        # ref encoder: learned conv+stride2 downsampling (2× stride2 = ÷4, for DS=4)
-        if self.ref_downsample_mode == 'conv_stride2':
-            self.ref_encoder = nn.Sequential(
-                nn.Conv2d(1, max(8, dim // 2), 3, stride=2, padding=1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(max(8, dim // 2), 1, 3, stride=2, padding=1),
-            )
-
-        if self.use_qk_conv3:
-            self.q_proj = nn.Sequential(
-                nn.Conv2d(1, dim, 3, padding=1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(dim, dim, 3, padding=1),
-            )
-            self.k_proj = nn.Sequential(
-                nn.Conv2d(1, dim, 3, padding=1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(dim, dim, 3, padding=1),
-            )
-        else:
-            self.q_proj = nn.Conv2d(1, dim, 1)
-            self.k_proj = nn.Conv2d(1, dim, 1)
+        self.q_proj = nn.Conv2d(1, dim, 1)
+        self.k_proj = nn.Conv2d(1, dim, 1)
         if not self.use_direct_attn:
             self.v_proj = nn.Conv2d(1, dim, 1)
             self.out_proj = nn.Sequential(
@@ -200,29 +153,10 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         center_idx = K // 2
         win = self.window
         win2 = win * win
-        pad = win // 2
 
-        # source도 ref와 동일한 다운샘플 방식을 따름 (nearest면 둘 다 nearest, 그 외 bilinear)
-        if self.ref_downsample_mode == 'nearest':
-            src_low = F.interpolate(source, size=(h, w), mode='nearest')
-        else:
-            src_low = F.interpolate(source, size=(h, w), mode='bilinear', align_corners=False)
-        if self.ref_downsample_mode == 'conv_stride2':
-            ref_low = F.interpolate(
-                self.ref_encoder(ref_stack.reshape(B * K, 1, *ref_stack.shape[-2:])),
-                size=(h, w), mode='bilinear', align_corners=False,
-            ).view(B, K, h, w)
-        elif self.ref_downsample_mode == 'nearest':
-            ref_low = F.interpolate(ref_stack, size=(h, w), mode='nearest')
-        else:
-            ref_low = F.interpolate(ref_stack, size=(h, w), mode='bilinear', align_corners=False)
-
-        if self.coarse:
-            region_size = (max(1, h // 2), max(1, w // 2))
-            ref_base = F.adaptive_avg_pool2d(ref_low.view(B * K, 1, h, w), region_size)
-            ref_base = F.interpolate(ref_base, size=(h, w), mode='nearest').view(B, K, h, w)
-        else:
-            ref_base = ref_low
+        src_low = F.interpolate(source, size=(h, w), mode='bilinear', align_corners=False)
+        ref_low = F.interpolate(ref_stack, size=(h, w), mode='bilinear', align_corners=False)
+        ref_base = ref_low
 
         q = self.q_proj(src_low)  # [B,dim,h,w]
         k = self.k_proj(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.dim, h, w)
@@ -236,42 +170,16 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         k_unfold_flat = self._unfold_same(k.reshape(B * K, self.dim, h, w), win)
         k_unfold = k_unfold_flat.view(B, K, self.dim, win2, h, w)
 
-        # ── score computation (shared for both direct / non-direct) ──────────────────
-        if not self.use_multihead:
-            if self.use_qk_norm:
-                temperature = self.log_temperature.exp()
-                score_nobias = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) * temperature
-            else:
-                score_nobias = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) / math.sqrt(self.dim)
-            score = score_nobias.clone()
-            score[:, center_idx:center_idx + 1] += self.center_slice_bias
-            if self.use_rel_bias:
-                score = score - self.spatial_rel_bias_strength * self.spatial_rel_dist.to(score.device)
-                slice_dist = (torch.arange(K, device=score.device, dtype=score.dtype) - center_idx).abs()
-                score = score - self.slice_rel_bias_strength * slice_dist.view(1, K, 1, 1, 1)
-            attn = torch.softmax(score.view(B, K * win2, h, w), dim=1).view(B, K, win2, h, w)
-            attn_for_log = attn.unsqueeze(1)  # [B,1,K,win2,h,w]
+        # ── score computation ──────────────────────────────────────────────
+        if self.use_qk_norm:
+            temperature = self.log_temperature.exp()
+            score_nobias = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) * temperature
         else:
-            Hh, Dh = self.num_heads, self.head_dim
-            qh = q.view(B, Hh, Dh, h, w)
-            kh = k.view(B, K, Hh, Dh, h, w)
-            kh_unfold = self._unfold_same(kh.reshape(B * K * Hh, Dh, h, w), win)
-            kh_unfold = kh_unfold.view(B, K, Hh, Dh, win2, h, w)
-            if self.use_qk_norm:
-                temperature = self.log_temperature.exp()
-                score_nobias = (qh.unsqueeze(1).unsqueeze(4) * kh_unfold).sum(dim=3) * temperature
-            else:
-                score_nobias = (qh.unsqueeze(1).unsqueeze(4) * kh_unfold).sum(dim=3) / math.sqrt(Dh)
-            score = score_nobias.clone()
-            score[:, center_idx:center_idx + 1] += self.center_slice_bias
-            if self.use_rel_bias:
-                sp_dist = self.spatial_rel_dist.to(score.device)
-                score = score - self.spatial_rel_bias_strength * sp_dist.unsqueeze(2)
-                slice_dist = (torch.arange(K, device=score.device, dtype=score.dtype) - center_idx).abs()
-                score = score - self.slice_rel_bias_strength * slice_dist.view(1, K, 1, 1, 1, 1)
-            score_h = score.permute(0, 2, 1, 3, 4, 5).contiguous()
-            attn_h = torch.softmax(score_h.view(B, Hh, K * win2, h, w), dim=2).view(B, Hh, K, win2, h, w)
-            attn_for_log = attn_h  # [B,Hh,K,win2,h,w]
+            score_nobias = (q.unsqueeze(1).unsqueeze(3) * k_unfold).sum(dim=2) / math.sqrt(self.dim)
+        score = score_nobias.clone()
+        score[:, center_idx:center_idx + 1] += self.center_slice_bias
+        attn = torch.softmax(score.view(B, K * win2, h, w), dim=1).view(B, K, win2, h, w)
+        attn_for_log = attn.unsqueeze(1)  # [B,1,K,win2,h,w]
 
         center_ref_low = ref_low[:, center_idx:center_idx + 1]
         center_base = ref_base[:, center_idx:center_idx + 1]
@@ -279,13 +187,10 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         # Uniform attention baseline: bypass learned attention with 1/(K*win²) weights
         if self.use_uniform_attn:
             attn_for_log = torch.ones_like(attn_for_log) / (K * win2)
-            if not self.use_multihead:
-                attn = attn_for_log.squeeze(1)
-            else:
-                attn_h = attn_for_log
+            attn = attn_for_log.squeeze(1)
 
         # ── style generation ─────────────────────────────────────────────
-        # attn_mean: [B,K,win2,h,w], averaged over heads
+        # attn_mean: [B,K,win2,h,w] (single head, so this equals attn_for_log squeezed)
         attn_mean = attn_for_log.mean(dim=1)
 
         if self.use_direct_attn:
@@ -296,38 +201,20 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             blend_alpha = self.direct_alpha
             style = blend_anchor + blend_alpha * (attn_style - blend_anchor)
         else:
-            # Original: V_proj → out_proj → delta
+            # V_proj → out_proj → delta, residual onto the center slice
             v = self.v_proj(ref_base.reshape(B * K, 1, h, w)).view(B, K, self.dim, h, w)
-            if not self.use_multihead:
-                v_unfold = self._unfold_same(v.reshape(B * K, self.dim, h, w), win)
-                v_unfold = v_unfold.view(B, K, self.dim, win2, h, w)
-                ctx = (attn.unsqueeze(2) * v_unfold).sum(dim=1).sum(dim=2)
-            else:
-                vh = v.view(B, K, Hh, Dh, h, w)
-                vh_unfold = self._unfold_same(vh.reshape(B * K * Hh, Dh, h, w), win)
-                vh_unfold = vh_unfold.view(B, K, Hh, Dh, win2, h, w)
-                vh_unfold_h = vh_unfold.permute(0, 2, 1, 3, 4, 5, 6).contiguous()
-                ctx_h = (attn_h.unsqueeze(3) * vh_unfold_h).sum(dim=2).sum(dim=3)
-                ctx = ctx_h.reshape(B, self.dim, h, w)
+            v_unfold = self._unfold_same(v.reshape(B * K, self.dim, h, w), win)
+            v_unfold = v_unfold.view(B, K, self.dim, win2, h, w)
+            ctx = (attn.unsqueeze(2) * v_unfold).sum(dim=1).sum(dim=2)
             delta = self.out_proj(ctx)
             attn_style = center_base + self.residual_scale * delta
-            if self.blend_mode == 'none':
-                blend_anchor, blend_alpha, style = attn_style, 1.0, attn_style
-            elif self.blend_mode == 'center_base':
-                blend_anchor, blend_alpha = center_base, 0.7
-                style = blend_anchor + blend_alpha * (attn_style - blend_anchor)
-            elif self.blend_mode == 'center_ref_low':
-                blend_anchor, blend_alpha = center_ref_low, 0.5
-                style = blend_anchor + blend_alpha * (attn_style - blend_anchor)
-            else:
-                raise RuntimeError(f"Invalid blend_mode={self.blend_mode}")
+            blend_anchor, blend_alpha, style = attn_style, 1.0, attn_style
 
         # ── unified logging ───────────────────────────────────────────────
-        # (attn_mean already computed above)
         slice_prob = attn_mean.sum(dim=2)                         # [B,K,h,w]
         spatial_center_prob = attn_mean[:, :, win2 // 2].sum(dim=1)  # [B,h,w]
 
-        attn_flat = attn_for_log.view(B, self.num_heads, K * win2, h, w)
+        attn_flat = attn_for_log.view(B, 1, K * win2, h, w)
         attn_entropy = _safe_entropy(attn_flat, dim=2, norm_base=K * win2)
         # keep a differentiable copy (mean normalized entropy) for optional entropy regularization
         self.last_attn_entropy = attn_entropy.mean()
@@ -344,13 +231,6 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             near_slice_weight = (slice_prob * near_slice_mask).sum(dim=1).mean()
             near_spatial_mask = (sp_dist <= 1).to(attn_mean.dtype)
             near_spatial_weight = (attn_mean * near_spatial_mask).sum(dim=(1, 2)).mean()
-
-            # head diversity (multi-head only, zeros for single-head)
-            head_slice_prob = attn_for_log.sum(dim=3)              # [B,Hh,K,h,w]
-            head_center_w = head_slice_prob[:, :, center_idx].mean(dim=(0, 2, 3))  # [Hh]
-            head_spatial_center_w = attn_for_log[:, :, :, win2 // 2].sum(dim=2).mean(dim=(0, 2, 3))
-            head_center_slice_std = head_center_w.std(correction=0)
-            head_spatial_center_std = head_spatial_center_w.std(correction=0)
 
         # QK diagnostics: if qk_score_std_nobias ≈ 0 → Q/K not contributing
         with torch.no_grad():
@@ -377,20 +257,15 @@ class LocalWindowAttentionConditioner25D(nn.Module):
             "qk_score_std": qk_score_std,
             "q_abs": q_abs,
             "k_abs": k_abs,
-            "multihead_enabled": torch.as_tensor(float(self.use_multihead), device=style.device).detach(),
-            "num_heads": torch.as_tensor(float(self.num_heads), device=style.device).detach(),
             "attn_entropy": attn_entropy.mean().detach(),
             "attn_max": attn_max.detach(),
             "slice_entropy": _safe_entropy(slice_prob, dim=1, norm_base=K).detach(),
             "center_slice_weight": slice_prob[:, center_idx].mean().detach(),
             "spatial_center_weight": spatial_center_prob.mean().detach(),
-            "rel_bias_enabled": torch.as_tensor(float(self.use_rel_bias), device=style.device).detach(),
             "expected_abs_slice_offset": expected_abs_slice_offset.detach(),
             "expected_spatial_l1": expected_spatial_l1.detach(),
             "near_slice_weight": near_slice_weight.detach(),
             "near_spatial_weight": near_spatial_weight.detach(),
-            "head_center_slice_std": head_center_slice_std.detach(),
-            "head_spatial_center_std": head_spatial_center_std.detach(),
         }
         return style, stats
 
@@ -411,10 +286,9 @@ class LocalConvConditioner25D(nn.Module):
       Everything downstream (StyleConv modulation, losses) is identical to the attention model.
     """
 
-    def __init__(self, ref_stack_size=3, hidden=32, ref_downsample_mode='bilinear', depth=3):
+    def __init__(self, ref_stack_size=3, hidden=32, depth=3):
         super().__init__()
         self.ref_stack_size = ref_stack_size
-        self.ref_downsample_mode = ref_downsample_mode
         in_ch = 1 + ref_stack_size  # source (1) + K reference slices
         layers = [nn.Conv2d(in_ch, hidden, kernel_size=3, padding=1),
                   nn.LeakyReLU(0.2, inplace=True)]
@@ -425,8 +299,6 @@ class LocalConvConditioner25D(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def _down(self, x, h, w):
-        if self.ref_downsample_mode == 'nearest':
-            return F.interpolate(x, size=(h, w), mode='nearest')
         return F.interpolate(x, size=(h, w), mode='bilinear', align_corners=False)
 
     def forward(self, source, ref_stack, out_size):
@@ -457,7 +329,6 @@ class ProposedSynthesisModule(nn.Module):
             self.input_nc = kwargs['input_nc']
             self.feat_ch = kwargs['feat_ch']
             self.output_nc = kwargs['output_nc']
-            self.demodulate = kwargs['demodulate']
             self.use_multiple_outputs = kwargs.get('use_multiple_outputs', None)
             self.use_triple_outputs = kwargs.get('use_triple_outputs', False)
             self.is_3d = kwargs.get('is_3d', False)
@@ -465,12 +336,7 @@ class ProposedSynthesisModule(nn.Module):
             self.noise_independent = kwargs.get('noise_independent', False)
             self.use_25d_style = kwargs.get('use_25d_style', False)
             self.ref_stack_size = kwargs.get('ref_stack_size', 3)
-            self.z_agg_deep = kwargs.get('z_agg_deep', False)
-            self.ref_condition_mode = kwargs.get('ref_condition_mode', 'original')
-            self.ref_condition_coarse = kwargs.get('ref_condition_coarse', True)
-            self.ref_condition_blend = kwargs.get('ref_condition_blend', 'none')
-            self.ref_condition_rel_bias = kwargs.get('ref_condition_rel_bias', False)
-            self.ref_condition_multihead = kwargs.get('ref_condition_multihead', False)
+            self.ref_condition_use_conv = kwargs.get('ref_condition_use_conv', False)
             self.ref_condition_window = kwargs.get('ref_condition_window', 3)
             self.ref_condition_dim = kwargs.get('ref_condition_dim', 16)
             self.ref_condition_center_bias = kwargs.get('ref_condition_center_bias', 0.2)
@@ -479,27 +345,18 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_condition_init_temperature = kwargs.get('ref_condition_init_temperature', 10.0)
             self.ref_condition_downsample = kwargs.get('ref_condition_downsample', 16)
             self.ref_condition_uniform_attn = kwargs.get('ref_condition_uniform_attn', False)
-            self.ref_condition_qk_conv3 = kwargs.get('ref_condition_qk_conv3', False)
-            self.ref_condition_ref_downsample_mode = kwargs.get('ref_condition_ref_downsample_mode', 'bilinear')
             self.ref_condition_direct_alpha = kwargs.get('ref_condition_direct_alpha', 0.5)
             self.ref_condition_temperature_learnable = kwargs.get('ref_condition_temperature_learnable', True)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
 
-        _valid_ref_condition_modes = ['original', 'C_coarse_attn', 'conv']
-        if self.ref_condition_mode not in _valid_ref_condition_modes:
-            raise ValueError(
-                f"Unknown ref_condition_mode={self.ref_condition_mode!r}. "
-                f"Choose from {_valid_ref_condition_modes}"
-            )
         if self.ref_condition_window % 2 == 0:
             raise ValueError(f"ref_condition_window must be odd, got {self.ref_condition_window}")
-
-        if self.is_3d and self.ref_condition_mode != 'original':
-            raise NotImplementedError("ref_condition_mode C_coarse_attn은 2D 전용입니다.")
-        if (self.use_multiple_outputs or self.use_triple_outputs) and self.ref_condition_mode != 'original':
-            raise NotImplementedError("ref_condition_mode C_coarse_attn은 단일 출력 모드에서만 지원됩니다.")
+        if self.is_3d and self.ref_condition_use_conv:
+            raise NotImplementedError("ref_condition_use_conv은 2D 전용입니다.")
+        if (self.use_multiple_outputs or self.use_triple_outputs) and self.ref_condition_use_conv:
+            raise NotImplementedError("ref_condition_use_conv은 단일 출력 모드에서만 지원됩니다.")
 
         Conv, _, _ = get_layer_by_dim(self.is_3d)
 
@@ -515,64 +372,44 @@ class ProposedSynthesisModule(nn.Module):
             self.num_style_streams = 1
 
         # 2.5D: compress ref stack [B, K, H, W] -> [B, 1, H, W] per style stream
+        # (used by the is_3d path and by multi/triple-output style aggregation)
         if self.use_25d_style:
             hidden = max(8, self.feat_ch // 8)
-            if self.z_agg_deep:
-                def _make_z_agg():
-                    return nn.Sequential(
-                        nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
-                        nn.LeakyReLU(0.2, inplace=True),
-                        nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
-                        nn.LeakyReLU(0.2, inplace=True),
-                        nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
-                    )
-            else:
-                def _make_z_agg():
-                    return nn.Sequential(
-                        nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
-                        nn.LeakyReLU(0.2, inplace=True),
-                        nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
-                    )
+
+            def _make_z_agg():
+                return nn.Sequential(
+                    nn.Conv2d(self.ref_stack_size, hidden, kernel_size=3, padding=1),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Conv2d(hidden, 1, kernel_size=3, padding=1),
+                )
             self.z_aggs = nn.ModuleList([_make_z_agg() for _ in range(self.num_style_streams)])
 
-        # 2D conditioners (always built when mode != original)
-        # 2.5D conditioners (built when use_25d_style=True and ref_stack_size > 1)
+        # Attention / conv conditioners: only used for single-output 2D generation
+        # (multi/triple-output and 3D always use the z_agg aggregation above)
         self.ref_conditioner_2d = None
         self.ref_conditioner_25d = None
-
-        _cd = self.ref_condition_dim  # shorthand
-        _cb = self.ref_condition_center_bias  # shorthand
-        _w2d = self.ref_condition_window  # window is always odd (1/3/5)
-        _coarse = self.ref_condition_coarse  # True: region-pooled K,V (coarse) | False: full-res
-        if self.ref_condition_mode == 'C_coarse_attn':
-            self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
-                dim=_cd, window=_w2d, coarse=_coarse, residual_scale=0.1,
-            )
-            if self.use_25d_style and self.ref_stack_size >= 1:
-                self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
-                    dim=_cd, window=self.ref_condition_window, coarse=_coarse, residual_scale=0.1,
-                    center_slice_bias=_cb, blend_mode=self.ref_condition_blend,
-                    use_rel_bias=self.ref_condition_rel_bias,
-                    use_multihead=self.ref_condition_multihead,
-                    use_direct_attn=self.ref_condition_direct,
-                    use_qk_norm=self.ref_condition_qk_norm,
-                    init_temperature=self.ref_condition_init_temperature,
-                    use_uniform_attn=self.ref_condition_uniform_attn,
-                    use_qk_conv3=self.ref_condition_qk_conv3,
-                    ref_downsample_mode=self.ref_condition_ref_downsample_mode,
-                    direct_alpha=self.ref_condition_direct_alpha,
-                    temperature_learnable=self.ref_condition_temperature_learnable,
-                )
-
-        # Convolution conditioner (ablation baseline for slice-window attention)
         self.ref_conditioner_conv = None
-        if self.ref_condition_mode == 'conv':
-            self.ref_conditioner_conv = LocalConvConditioner25D(
-                ref_stack_size=self.ref_stack_size,
-                hidden=32,
-                ref_downsample_mode=self.ref_condition_ref_downsample_mode,
-                depth=3,
-            )
+        self._use_ref_conditioner = not (self.use_multiple_outputs or self.use_triple_outputs)
+        if self._use_ref_conditioner:
+            if self.ref_condition_use_conv:
+                self.ref_conditioner_conv = LocalConvConditioner25D(
+                    ref_stack_size=self.ref_stack_size, hidden=32, depth=3,
+                )
+            else:
+                self.ref_conditioner_2d = LocalWindowAttentionConditioner2D(
+                    dim=self.ref_condition_dim, window=self.ref_condition_window, residual_scale=0.1,
+                )
+                if self.use_25d_style and self.ref_stack_size >= 1:
+                    self.ref_conditioner_25d = LocalWindowAttentionConditioner25D(
+                        dim=self.ref_condition_dim, window=self.ref_condition_window, residual_scale=0.1,
+                        center_slice_bias=self.ref_condition_center_bias,
+                        use_direct_attn=self.ref_condition_direct,
+                        use_qk_norm=self.ref_condition_qk_norm,
+                        init_temperature=self.ref_condition_init_temperature,
+                        use_uniform_attn=self.ref_condition_uniform_attn,
+                        direct_alpha=self.ref_condition_direct_alpha,
+                        temperature_learnable=self.ref_condition_temperature_learnable,
+                    )
 
         self._last_ref_condition_stats: dict = {}
         self._last_attn_entropy_for_loss = None  # differentiable, set on main forward for entropy reg
@@ -588,46 +425,45 @@ class ProposedSynthesisModule(nn.Module):
         
         # 일부분에만 style_denorm -> 21, 22, 31, 32에만 적용 #TODO: feat_ch에 ref ch만큼 배수로
         self.conv0 = StyleConv(self.input_nc, self.feat_ch * ch, kernel_size=3,
-                                                 activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                                 activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv11 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                downsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv12 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv21 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                downsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv22 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv31 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv32 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv41 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, #feat_ch *4는 변치않게
-                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                upsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv42 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                upsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv51 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=True, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                upsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv52 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+                                upsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv6 = StyleConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                activate=True, demodulate=self.demodulate, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, ) # 이걸 빠트렸었어.
-                                # activate=False, demodulate=self.demodulate)
+                                activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
 
         # Separate style layers: 채널을 완전히 분리해서 각각 독립적으로 style 적용
         if self.use_separate_style_layers and self.use_triple_outputs:
             # 각 branch는 feat_ch 채널 (전체의 1/3)
             self.conv7_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d, )
+                                     activate=True, ch=1, is_3d=self.is_3d, )
             self.conv7_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d, )
+                                     activate=True, ch=1, is_3d=self.is_3d, )
             self.conv7_3 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d, )
+                                     activate=True, ch=1, is_3d=self.is_3d, )
             self.conv8_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d, )
+                                     activate=True, ch=1, is_3d=self.is_3d, )
             self.conv8_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d, )
+                                     activate=True, ch=1, is_3d=self.is_3d, )
             self.conv8_3 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d, )
+                                     activate=True, ch=1, is_3d=self.is_3d, )
             # 각각 독립적인 conv_final
             self.conv_final_1 = Conv(self.feat_ch, self.output_nc // 3, kernel_size=3, padding=1)
             self.conv_final_2 = Conv(self.feat_ch, self.output_nc // 3, kernel_size=3, padding=1)
@@ -635,13 +471,13 @@ class ProposedSynthesisModule(nn.Module):
         elif self.use_separate_style_layers and self.use_multiple_outputs:
             # 각 branch는 feat_ch 채널 (전체의 절반)
             self.conv7_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d, )
+                                     activate=True, ch=1, is_3d=self.is_3d, )
             self.conv7_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d, )
+                                     activate=True, ch=1, is_3d=self.is_3d, )
             self.conv8_1 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d, )
+                                     activate=True, ch=1, is_3d=self.is_3d, )
             self.conv8_2 = StyleConv(self.feat_ch, self.feat_ch, kernel_size=3,
-                                     activate=True, demodulate=self.demodulate, ch=1, is_3d=self.is_3d, )
+                                     activate=True, ch=1, is_3d=self.is_3d, )
             # 각각 독립적인 conv_final
             self.conv_final_1 = Conv(self.feat_ch, self.output_nc // 2, kernel_size=3, padding=1)
             self.conv_final_2 = Conv(self.feat_ch, self.output_nc // 2, kernel_size=3, padding=1)
@@ -691,13 +527,21 @@ class ProposedSynthesisModule(nn.Module):
     def _make_ref_condition(self, source, ref_all, encode_only=False):
         """Returns style [B,1,h,w].
 
-        original      : z_agg(2.5D) / nearest-downsampled(2D) ref as style
-        C_coarse_attn : local-window attention conditioner replaces style
+        Multi/triple-output generation always uses the z_agg-aggregated ref as style.
+        Single-output 2D generation uses the conv conditioner (ref_condition_use_conv=True)
+        or the slice-window attention conditioner (default).
         """
         h, w = self._style_size(source)
 
-        # ── conv conditioner (ablation baseline; handles K=1 or K=3) ────────
-        if self.ref_condition_mode == 'conv':
+        if not self._use_ref_conditioner:
+            # multi/triple-output: z_agg(2.5D) / nearest-downsampled(2D) ref as style
+            if self.use_25d_style and self.ref_stack_size >= 1:
+                base_ref = self._aggregate_ref_stack(ref_all)        # [B,1,H,W] via z_agg
+                return F.interpolate(base_ref, size=(h, w), mode='nearest')
+            ref_map = self._get_ref_stack(ref_all)                   # [B,1,H,W]
+            return F.interpolate(ref_map, size=(h, w), mode='nearest')
+
+        if self.ref_condition_use_conv:
             ref_stack = self._get_ref_stack(ref_all)                 # [B,K,H,W]
             cond_style, stats = self.ref_conditioner_conv(
                 source=source, ref_stack=ref_stack, out_size=(h, w)
@@ -706,12 +550,7 @@ class ProposedSynthesisModule(nn.Module):
                 self._last_ref_condition_stats = stats
             return cond_style
 
-        # ── 2.5D path ──────────────────────────────────────────────────────
         if self.use_25d_style and self.ref_stack_size >= 1:
-            if self.ref_condition_mode == 'original':
-                base_ref = self._aggregate_ref_stack(ref_all)        # [B,1,H,W] via z_agg
-                return F.interpolate(base_ref, size=(h, w), mode='nearest')
-
             ref_stack = self._get_ref_stack(ref_all)                 # [B,K,H,W]
             cond_style, stats = self.ref_conditioner_25d(
                 source=source, ref_stack=ref_stack, out_size=(h, w)
@@ -721,11 +560,7 @@ class ProposedSynthesisModule(nn.Module):
                 self._last_attn_entropy_for_loss = self.ref_conditioner_25d.last_attn_entropy
             return cond_style
 
-        # ── 2D path ────────────────────────────────────────────────────────
         ref_map = self._get_ref_stack(ref_all)                       # [B,1,H,W]
-        if self.ref_condition_mode == 'original':
-            return F.interpolate(ref_map, size=(h, w), mode='nearest')
-
         cond_style, stats = self.ref_conditioner_2d(
             source=source, ref=ref_map, out_size=(h, w)
         )
@@ -836,7 +671,6 @@ class StyleConv(nn.Module):
                  downsample=False,
                  activate=False,
                  blur_kernel=[1, 1.5, 1.5, 1],
-                 demodulate=True,
                  style_denorm=True,
                  eps=1e-8,
                  ch=1,
@@ -847,7 +681,6 @@ class StyleConv(nn.Module):
         self.eps = eps
         self.input_nc = input_nc
         self.feat_ch = feat_ch
-        self.demodulate = demodulate
         self.upsample = upsample
         self.downsample = downsample
         self.activate = activate

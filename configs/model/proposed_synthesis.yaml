@@ -21,7 +21,6 @@ netG_A:
   input_nc: 1
   output_nc: 1
   feat_ch: 264 #256 # For triple_outputs, use 126 or 132 (multiple of 3)
-  demodulate: true
   use_multiple_outputs: ${data.use_multiple_outputs}
   use_triple_outputs: ${data.use_triple_outputs}
   is_3d: ${data.is_3d}
@@ -29,24 +28,17 @@ netG_A:
   noise_independent: false  # false: cat 후 noise 주입 (기존), true: chunk별 개별 noise 주입
   use_25d_style: ${data.use_25d_style}
   ref_stack_size: ${data.ref_stack_size}
-  z_agg_deep: false          # true: 3-layer z_agg (K->hidden->hidden->1), false: 2-layer (K->hidden->1)
-  ref_condition_mode: 'C_coarse_attn'  # original | C_coarse_attn (local-window attention)
-  ref_condition_coarse: false      # C: true=region-pooled K,V (coarse) | false=full-res K,V (=구 B_local_attn)
-  ref_condition_blend: 'none'     # none | center_base (alpha=0.7) | center_ref_low (alpha=0.5)
-  ref_condition_rel_bias: false   # true: spatial+slice distance prior on attention score (strength=0.05)
-  ref_condition_multihead: false  # true: 4-head local cross-attention (head_dim=4 when dim=16)
+  ref_condition_use_conv: false    # true: plain-conv reference conditioner (ablation baseline) instead of slice-window attention
   ref_condition_window: 3         # local window size (odd): 1 (slice-only) | 3 | 5
   ref_condition_dim: 16           # hidden dim for conditioner Q/K/V projections (default 16)
   ref_condition_center_bias: 0.0  # center slice score bias; lower = attention learns more freely (e.g. 0.05)
   ref_condition_direct: true      # true: attention weights directly mix raw ref values (no V_proj/out_proj shortcut)
   ref_condition_direct_alpha: 1.0  # style = center_ref + alpha*(weighted_ref - center_ref); 0=center only, 1=full attention
   ref_condition_qk_norm: true     # true: cosine similarity QK + learnable temperature (prevents Q,K→0 collapse)
-  ref_condition_qk_conv3: false   # true: 3×3 conv for Q/K (local context); false: 1×1 conv (default)
   ref_condition_uniform_attn: false  # true: bypass learned attn with 1/(K*win²) uniform weights (ablation baseline)
   ref_condition_init_temperature: 10.0  # initial temperature for QK softmax (higher=sharper; 3.0=soft, 10.0=default, 30.0=sharp)
   ref_condition_temperature_learnable: true  # false: freeze QK temperature at init (prevent collapse toward uniform)
   ref_condition_downsample: 8      # style map downsample factor: 16 (1/16) | 8 | 4 | 2 | 1
-  ref_condition_ref_downsample_mode: 'bilinear'  # ref downsampling: bilinear | nearest | conv_stride2
   # init_type: 'kaiming'
 
 netD_A:
@@ -90,13 +82,11 @@ params: # Other params
   # lambda_cycle_a: 1
   # lambda_cycle_b: 1
   # lambda_sc: 0.1
-  lambda_nce: 0
+  lambda_nce: 1.5
   lambda_mind: 0
   lambda_l1: 0
   lambda_perceptual: 0  # VGG feature L2 perceptual loss (same 2.5D softmin form as contextual)
   lambda_attn_entropy: 0  # >0: penalize attention entropy (encourage selective/peaked slice-window attention)
-  reverse: ${data.reverse} # A->B if False, B->A if True
-  use_split_inference: ${data.use_split_inference}
   flip_equivariance: False
   batch_size: ${data.batch_size}
   nce_layers: [0,2,4,6] # [0,2,4,6] # 3까지가 encoder # [0,1,2,3]-> encoder만 하니까 성능 떨어진다. 전부다 하는게 낫다.
