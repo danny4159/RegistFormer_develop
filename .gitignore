@@ -152,6 +152,9 @@ configs/local/default.yaml
 !/data/IXI/
 /data/IXI/*
 !/data/IXI/IXI_Preprocessing_Pipeline.md
+!/data/MRBrainS18/
+/data/MRBrainS18/*
+!/data/MRBrainS18/MRBrainS18_Preprocessing_Pipeline.md
 /logs*/
 /results/
 /dummy/

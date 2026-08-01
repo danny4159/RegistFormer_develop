@@ -97,6 +97,8 @@ T2_moved_ghost_{weak,medium,strong}
 
 ---
 
-## 재현
+## 구현 코드 경로
 
-추후 전처리 코드와 데이터 공유 예정.
+- `scripts/IXI_Ver4_Preprocess_Pipeline.py` — 원본 정렬 → misalignment → slice thickness 시뮬레이션 통합 파이프라인 (80-slice H5 생성)
+- `scripts/generate_artifact_h5.py` — Artifact 주입 (Gibbs/K-space spike/Motion/Ghost)
+- 원본 개발 당시 노트북(단계별): `Daniel_ssd2/Jupyter_notebook/IXI_preprocess/` (`[Preprocessing] IXI resampling + h5저장 코드.ipynb`, `(Preprocess_3) MisalignSimulation (IXI h5 misalign and 20SliceOut).ipynb` 등)
