@@ -108,7 +108,7 @@ class MIGSModule(BaseModule_AtoB):
 
         if self.params.nce_on_vgg: # vgg for patchNCE
             # choose layers what you want # "conv_1_2", "conv_2_2", "conv_3_4", "conv_4_4", "conv_5_4"
-            listen_list = ["conv_4_2", "conv_5_4"] # PatchNCE는 MR을 반영하는 것. high level feature layer를 선택. low lever로 하면 mr의 feature가 그대로 많이 남을것
+            listen_list = ["conv_4_2", "conv_5_4"] # PatchNCE reflects MR structure; use high-level feature layers. Low-level layers would leave too much raw MR appearance in the features.
             self.vgg = VGG_Model(listen_list=listen_list)
 
         # assign contextual loss (cx = "contextual", the paper's appearance-matching term)
@@ -308,9 +308,9 @@ class MIGSModule(BaseModule_AtoB):
             loss_G += loss_l1_b
 
         ##################################################################################################################
-        ## 3. PatchNCE loss: 이건 fake_b, fake_c 한꺼번에 해서 한번만 해. 이건 fake_d에 대한 코드 구현 필요.
+        ## 3. PatchNCE loss: computed once, jointly, for fake_b and fake_c. fake_d support still needs to be implemented.
         if self.criterionNCE:
-            if self.params.nce_on_vgg: # 이거 안써
+            if self.params.nce_on_vgg: # not used
                 real_rgb = real_a.repeat(1, 3, 1, 1)
                 if self.params.nce_independent:
                     fake_rgb_b = fake_b.repeat(1, 3, 1, 1)
@@ -509,7 +509,7 @@ class MIGSModule(BaseModule_AtoB):
 
     def compute_generator_loss_3d_legacy(self, real_a, real_b, real_c, real_d, fake_b, fake_c, fake_d, real_b_ref, real_c_ref, real_d_ref):
         loss_G = torch.tensor(0.0, device=real_a.device)
-        D = real_a.shape[-1]  # 슬라이스 수
+        D = real_a.shape[-1]  # number of slices
 
         loss_logs = {}
 
@@ -585,7 +585,7 @@ class MIGSModule(BaseModule_AtoB):
                     loss_logs.setdefault("loss/nce_b", 0.0)
                     loss_logs["loss/nce_b"] += loss_nce_b.detach()
                     loss_G += loss_nce_b
-        # 평균 로그 출력
+        # log the averaged losses
         for key, val in loss_logs.items():
             self.log(key, val, prog_bar=True)
         self.log("loss/g_total", loss_G.detach(), prog_bar=True)

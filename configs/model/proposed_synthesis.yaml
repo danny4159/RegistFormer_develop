@@ -25,7 +25,7 @@ netG_A:
   use_triple_outputs: ${data.use_triple_outputs}
   is_3d: ${data.is_3d}
   use_separate_style_layers: false
-  noise_independent: false  # false: cat 후 noise 주입 (기존), true: chunk별 개별 noise 주입
+  noise_independent: false  # false: noise injected after concatenation (default), true: separate noise per chunk
   use_25d_style: ${data.use_25d_style}  # keep: connects to common DataModule / model factory
   ref_stack_size: ${data.ref_stack_size}  # keep: K, size of the moving stack y_adj^k
   guidance_mode: swa              # 'swa' (Slice-Window Attention, reported model) | 'conv_ablation' (plain-conv CGM baseline) | 'local_2d_legacy'
@@ -89,7 +89,7 @@ params: # Other params
   lambda_swa_entropy: 0    # >0: penalize SWA attention entropy (encourage selective/peaked slice-window attention)
   flip_equivariance: False
   batch_size: ${data.batch_size}
-  nce_layers: [0,2,4,6] # [0,2,4,6] # 3까지가 encoder # [0,1,2,3]-> encoder만 하니까 성능 떨어진다. 전부다 하는게 낫다.
+  nce_layers: [0,2,4,6] # [0,2,4,6] # up to index 3 is the encoder # [0,1,2,3] -> encoder-only performs worse; using all layers works better.
   eval_on_align: ${data.eval_on_align}
   use_sliding_inference: ${data.use_sliding_inference}
   use_multiple_outputs: ${data.use_multiple_outputs} # Set True if data_group_3 is exist (2 outputs)
@@ -102,10 +102,10 @@ params: # Other params
   is_registration: false
   use_25d_style: ${data.use_25d_style}
   ref_stack_size: ${data.ref_stack_size}
-  cx_center_only: false     # true: 2.5D에서도 center slice만으로 cx loss 계산 (2D equivalent)
+  cx_center_only: false     # true: compute cx loss using only the center slice, even in 2.5D (2D equivalent)
   cx_stack_aggregation: 'mean'  # 'softmin': center-biased soft-min (default) | 'mean': simple mean over all slices (reported MIGS)
-  cx_softmin_temperature: 0.3   # soft-min temperature (작을수록 hard-min에 가까움) — softmin 전용
-  cx_slice_offset_penalty: 0.05 # center slice preference bias per neighbor step — softmin 전용
-  log_swa_stats: true       # true: swa/* (Slice-Window Attention) 통계 로그
-  log_mig_conv_stats: true  # true: mig_conv/* (CGM gamma/beta modulation) 통계 로그
-  diagnostic_log_interval: 100  # swa/mig_conv 진단 로그 주기 (step)
+  cx_softmin_temperature: 0.3   # soft-min temperature (smaller = closer to hard-min) — softmin only
+  cx_slice_offset_penalty: 0.05 # center slice preference bias per neighbor step — softmin only
+  log_swa_stats: true       # true: log swa/* (Slice-Window Attention) statistics
+  log_mig_conv_stats: true  # true: log mig_conv/* (CGM gamma/beta modulation) statistics
+  diagnostic_log_interval: 100  # logging interval (steps) for swa/mig_conv diagnostics

@@ -392,9 +392,9 @@ class MIGSGenerator(nn.Module):
             raise ValueError(f"swa_window_size must be odd, got {self.swa_window_size}")
         _use_conv = self.guidance_mode == 'conv_ablation'
         if self.is_3d and _use_conv:
-            raise NotImplementedError("guidance_mode='conv_ablation'은 2D 전용입니다.")
+            raise NotImplementedError("guidance_mode='conv_ablation' is 2D-only.")
         if (self.use_multiple_outputs or self.use_triple_outputs) and _use_conv:
-            raise NotImplementedError("guidance_mode='conv_ablation'은 단일 출력 모드에서만 지원됩니다.")
+            raise NotImplementedError("guidance_mode='conv_ablation' is only supported for single-output mode.")
 
         Conv, _, _ = get_layer_by_dim(self.is_3d)
 
@@ -479,7 +479,7 @@ class MIGSGenerator(nn.Module):
                                 downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv32 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv41 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, #feat_ch *4는 변치않게
+        self.conv41 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, #feat_ch *4 stays unchanged
                                 upsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv42 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 upsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
@@ -805,8 +805,8 @@ class MIGConv(nn.Module):
 
         self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
         self.randomize_noise = True
-        # noise_independent=True: chunk별로 개별 noise_strength (독립적)
-        # noise_independent=False: 기존처럼 하나의 noise_strength (cat된 상태에서 noise 주입)
+        # noise_independent=True: separate noise_strength per chunk (independent)
+        # noise_independent=False: single shared noise_strength as before (noise injected after concatenation)
         if not self.noise_independent:
             self.noise_strength = nn.Parameter(torch.zeros(1), requires_grad=True)
         else:
@@ -838,7 +838,7 @@ class MIGConv(nn.Module):
             x = self.conv(x)
 
         if not self.noise_independent:
-            # normalize -> cat -> noise 한꺼번에
+            # normalize -> cat -> noise all at once
             if style.shape[1] == 1:
                 x = self.normalize(x)
             elif style.shape[1] == 2:
@@ -860,7 +860,7 @@ class MIGConv(nn.Module):
 
             x = x + noise
         else:
-            # normalize -> noise 개별 주입 -> cat
+            # normalize -> noise injected per chunk -> cat
             if style.shape[1] == 1:
                 x = self.normalize(x)
                 if self.randomize_noise:
@@ -901,10 +901,10 @@ class MIGConv(nn.Module):
 
         use_cgm_modulation = self.style_denorm
         if use_cgm_modulation:
-            # 1. CGM을 x의 크기와 맞게 interpolation
+            # 1. Interpolate the CGM to match the spatial size of x
             mode = 'trilinear' if self.is_3d else 'nearest'
             style = F.interpolate(style, size=x.size()[2:], mode=mode)
-            # 2. CGM을 x의 채널 수와 맞게 mlp
+            # 2. Project the CGM to x's channel count via the shared MLP
             if style.shape[1] == 1:
                 cgm_features = self.mlp_shared(style)
                 gamma = self.mlp_gamma(cgm_features)
