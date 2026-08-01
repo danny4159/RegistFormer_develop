@@ -181,3 +181,12 @@ Mambaforge-Linux-x86_64.sh
 # Python package management
 uv.lock
 pyproject.toml
+
+# docs: keep only .txt, ignore everything else (data exports, etc.)
+docs/**/*
+!docs/**/
+!docs/**/*.txt
+
+# jupyter notebook data exports (not source)
+jupyter_notebook/**/*.csv
+jupyter_notebook/**/*.json

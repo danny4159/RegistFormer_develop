@@ -111,7 +111,7 @@ class LocalWindowAttentionConditioner25D(nn.Module):
     def __init__(self, dim=16, window=3, coarse=False, residual_scale=0.1, center_slice_bias=0.2,
                  blend_mode='none', use_rel_bias=False, use_multihead=False, use_direct_attn=False,
                  use_qk_norm=False, init_temperature=10.0, use_uniform_attn=False, use_qk_conv3=False,
-                 ref_downsample_mode='bilinear', direct_alpha=0.5):
+                 ref_downsample_mode='bilinear', direct_alpha=0.5, temperature_learnable=True):
         super().__init__()
         assert window % 2 == 1, f"window must be odd, got {window}"
         assert ref_downsample_mode in ('bilinear', 'nearest', 'conv_stride2'), \
@@ -140,8 +140,14 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         # qk_norm: cosine similarity attention + learnable temperature
         # prevents Q,K → 0 collapse; small init temperature amplifies tiny cosine differences
         self.use_qk_norm = bool(use_qk_norm)
+        self.temperature_learnable = bool(temperature_learnable)
         if self.use_qk_norm:
-            self.log_temperature = nn.Parameter(torch.tensor(math.log(float(init_temperature))))
+            self.log_temperature = nn.Parameter(
+                torch.tensor(math.log(float(init_temperature))),
+                requires_grad=self.temperature_learnable,
+            )
+        # differentiable attention entropy from the last forward (for optional entropy regularization)
+        self.last_attn_entropy = None
         self.use_uniform_attn = bool(use_uniform_attn)
         self.use_qk_conv3 = bool(use_qk_conv3)
 
@@ -196,7 +202,11 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         win2 = win * win
         pad = win // 2
 
-        src_low = F.interpolate(source, size=(h, w), mode='bilinear', align_corners=False)
+        # source도 ref와 동일한 다운샘플 방식을 따름 (nearest면 둘 다 nearest, 그 외 bilinear)
+        if self.ref_downsample_mode == 'nearest':
+            src_low = F.interpolate(source, size=(h, w), mode='nearest')
+        else:
+            src_low = F.interpolate(source, size=(h, w), mode='bilinear', align_corners=False)
         if self.ref_downsample_mode == 'conv_stride2':
             ref_low = F.interpolate(
                 self.ref_encoder(ref_stack.reshape(B * K, 1, *ref_stack.shape[-2:])),
@@ -319,6 +329,8 @@ class LocalWindowAttentionConditioner25D(nn.Module):
 
         attn_flat = attn_for_log.view(B, self.num_heads, K * win2, h, w)
         attn_entropy = _safe_entropy(attn_flat, dim=2, norm_base=K * win2)
+        # keep a differentiable copy (mean normalized entropy) for optional entropy regularization
+        self.last_attn_entropy = attn_entropy.mean()
         attn_max = attn_flat.max(dim=2).values.mean()
 
         with torch.no_grad():
@@ -383,6 +395,61 @@ class LocalWindowAttentionConditioner25D(nn.Module):
         return style, stats
 
 
+class LocalConvConditioner25D(nn.Module):
+    """Convolution-based reference conditioner — ABLATION baseline for slice-window attention.
+
+    Same interface / output as LocalWindowAttentionConditioner25D (forward(source, ref_stack,
+    out_size) -> (style [B,1,h,w], stats)) so it drops into the exact same generator, but the
+    cross-slice fusion is a plain local convolution instead of data-dependent query-key attention.
+
+    Design (fair ablation):
+      - Receives the SAME inputs as attention: downsampled source (T1 query) + K reference slices.
+      - Concatenates them on the channel axis and applies a small local 3x3 conv stack, so the
+        style is produced by fixed learned filters rather than input-dependent attention weights.
+      - ref_stack_size=1  -> 2D conv   (source + 1 center reference slice; input 2ch)
+      - ref_stack_size=3  -> 2.5D conv (source + 3 reference slices;       input 4ch)
+      Everything downstream (StyleConv modulation, losses) is identical to the attention model.
+    """
+
+    def __init__(self, ref_stack_size=3, hidden=32, ref_downsample_mode='bilinear', depth=3):
+        super().__init__()
+        self.ref_stack_size = ref_stack_size
+        self.ref_downsample_mode = ref_downsample_mode
+        in_ch = 1 + ref_stack_size  # source (1) + K reference slices
+        layers = [nn.Conv2d(in_ch, hidden, kernel_size=3, padding=1),
+                  nn.LeakyReLU(0.2, inplace=True)]
+        for _ in range(max(0, depth - 2)):
+            layers += [nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+                       nn.LeakyReLU(0.2, inplace=True)]
+        layers += [nn.Conv2d(hidden, 1, kernel_size=3, padding=1)]
+        self.net = nn.Sequential(*layers)
+
+    def _down(self, x, h, w):
+        if self.ref_downsample_mode == 'nearest':
+            return F.interpolate(x, size=(h, w), mode='nearest')
+        return F.interpolate(x, size=(h, w), mode='bilinear', align_corners=False)
+
+    def forward(self, source, ref_stack, out_size):
+        h, w = out_size
+        src_low = self._down(source, h, w)      # [B,1,h,w]
+        ref_low = self._down(ref_stack, h, w)   # [B,K,h,w]
+        x = torch.cat([src_low, ref_low], dim=1)  # [B,1+K,h,w]
+        style = self.net(x)                       # [B,1,h,w]
+
+        K = ref_stack.shape[1]
+        center_ref_low = ref_low[:, K // 2:K // 2 + 1]
+        stats = {
+            "base_std": ref_low.std().detach(),
+            "ref_base_std": ref_low.std().detach(),
+            "style_std": style.std().detach(),
+            "style_center_delta": ((style - center_ref_low).abs().mean()
+                                   / (center_ref_low.abs().mean() + 1e-8)).detach(),
+            "conv_conditioner_enabled": torch.as_tensor(1.0, device=style.device),
+            "ref_stack_size": torch.as_tensor(float(K), device=style.device),
+        }
+        return style, stats
+
+
 class ProposedSynthesisModule(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
@@ -415,11 +482,12 @@ class ProposedSynthesisModule(nn.Module):
             self.ref_condition_qk_conv3 = kwargs.get('ref_condition_qk_conv3', False)
             self.ref_condition_ref_downsample_mode = kwargs.get('ref_condition_ref_downsample_mode', 'bilinear')
             self.ref_condition_direct_alpha = kwargs.get('ref_condition_direct_alpha', 0.5)
+            self.ref_condition_temperature_learnable = kwargs.get('ref_condition_temperature_learnable', True)
 
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
 
-        _valid_ref_condition_modes = ['original', 'C_coarse_attn']
+        _valid_ref_condition_modes = ['original', 'C_coarse_attn', 'conv']
         if self.ref_condition_mode not in _valid_ref_condition_modes:
             raise ValueError(
                 f"Unknown ref_condition_mode={self.ref_condition_mode!r}. "
@@ -493,9 +561,21 @@ class ProposedSynthesisModule(nn.Module):
                     use_qk_conv3=self.ref_condition_qk_conv3,
                     ref_downsample_mode=self.ref_condition_ref_downsample_mode,
                     direct_alpha=self.ref_condition_direct_alpha,
+                    temperature_learnable=self.ref_condition_temperature_learnable,
                 )
 
+        # Convolution conditioner (ablation baseline for slice-window attention)
+        self.ref_conditioner_conv = None
+        if self.ref_condition_mode == 'conv':
+            self.ref_conditioner_conv = LocalConvConditioner25D(
+                ref_stack_size=self.ref_stack_size,
+                hidden=32,
+                ref_downsample_mode=self.ref_condition_ref_downsample_mode,
+                depth=3,
+            )
+
         self._last_ref_condition_stats: dict = {}
+        self._last_attn_entropy_for_loss = None  # differentiable, set on main forward for entropy reg
 
         self.guide_net = nn.Sequential(
             nn.Conv2d(self.input_nc, int(self.feat_ch / 8), kernel_size=3, stride=1, padding=1),
@@ -616,6 +696,16 @@ class ProposedSynthesisModule(nn.Module):
         """
         h, w = self._style_size(source)
 
+        # ── conv conditioner (ablation baseline; handles K=1 or K=3) ────────
+        if self.ref_condition_mode == 'conv':
+            ref_stack = self._get_ref_stack(ref_all)                 # [B,K,H,W]
+            cond_style, stats = self.ref_conditioner_conv(
+                source=source, ref_stack=ref_stack, out_size=(h, w)
+            )
+            if not encode_only:
+                self._last_ref_condition_stats = stats
+            return cond_style
+
         # ── 2.5D path ──────────────────────────────────────────────────────
         if self.use_25d_style and self.ref_stack_size >= 1:
             if self.ref_condition_mode == 'original':
@@ -628,6 +718,7 @@ class ProposedSynthesisModule(nn.Module):
             )
             if not encode_only:
                 self._last_ref_condition_stats = stats
+                self._last_attn_entropy_for_loss = self.ref_conditioner_25d.last_attn_entropy
             return cond_style
 
         # ── 2D path ────────────────────────────────────────────────────────

@@ -1,0 +1,321 @@
+================================================================================
+ProposedSynthesis (base) — 네트워크 Block / Module 진행 흐름 상세
+데이터 입력부터 출력까지, 각 단계의 함수·메소드·블록·shape (Train / Inference)
+================================================================================
+작성 기준 커밋: ba1bded (main) + 이 세션의 conv/temperature/entropy 추가분
+기준 설정: configs/model/proposed_synthesis.yaml + configs/data/IXI_Align.yaml
+base = C_coarse_attn / K=3 / W=3 / DS=8 / coarse=false / direct / alpha=1.0 /
+       qk_norm=true / center_bias=0.0 / ctx_agg=mean / lambda(nce=1.5,style=5,gan=1)
+
+기호:  B=batch(=1), K=ref_stack_size(=3), H=W=128(crop),
+       h=w=H/DS=16, DS=8, win=3, win2=9, dim=16(attn), C_f=feat_ch=264
+
+핵심 파일 / 클래스:
+  src/models/proposed_synthesis_module.py   : ProposedSynthesisModule (LightningModule)
+  src/models/base_module_AtoB.py            : BaseModule_AtoB (forward/model_step/test_step)
+  src/models/components/networks_define.py  : define_G / define_D / define_F
+  src/models/components/network_proposed_synthesis.py :
+        ProposedSynthesisModule(nn.Module)  ← 실제 Generator (netG_A)
+        LocalWindowAttentionConditioner25D  ← slice-window attention conditioner
+        LocalConvConditioner25D             ← conv conditioner (ablation, base 아님)
+        StyleConv, Blur                     ← 변조 conv 블록
+  src/models/components/network_patch_sample_F.py : PatchSampleF (netF_A, PatchNCE용)
+  src/data/components/transforms.py         : Dataset (__getitem__)
+
+※ 이름 충돌 주의: LightningModule도 netG_A(진짜 Generator)도 둘 다 클래스명이
+  "ProposedSynthesisModule"임. 아래에서 전자=LightningModule, 후자=netG_A로 구분.
+
+
+################################################################################
+PART 0. 객체 생성 (학습 시작 전 1회)
+################################################################################
+
+Hydra instantiate → LightningModule ProposedSynthesisModule.__init__
+  (proposed_synthesis_module.py:51)
+    self.netG_A = define_G(...)   → networks_define.py:307 → network_proposed_synthesis
+                                    .ProposedSynthesisModule(**kwargs)   [Generator]
+    self.netD_A/B/C = define_D(...) → NLayerDiscriminator (PatchGAN)
+    self.netF_A = define_F(...)   → PatchSampleF (PatchNCE 투영기)
+    criterionGAN = GANLoss('lsgan')  (=MSE)
+    criterionContextual = Contextual_Loss(VGG19 6층)   (lambda_style!=0)
+    criterionNCE = PatchNCELoss(nce_T=0.07)            (lambda_nce!=0)
+    self.automatic_optimization = False   ← 수동 최적화 (proposed_synthesis_module.py:74)
+
+netG_A 내부 블록 구성 (network_proposed_synthesis.ProposedSynthesisModule.__init__):
+    ref_conditioner_25d = LocalWindowAttentionConditioner25D(dim=16, window=3, ...)
+        q_proj = Conv2d(1,16,1)          # 1x1
+        k_proj = Conv2d(1,16,1)          # 1x1
+        log_temperature = Parameter(log 10.0)   # qk_norm용, base는 학습가능
+        (direct=true → v_proj/out_proj 생성 안 함)
+    StyleConv × 13 : conv0, conv11,conv12, conv21,conv22, conv31,conv32,
+                     conv41,conv42, conv51,conv52, conv6
+    conv_final = Conv2d(264, 1, 3, padding=1)
+    z_aggs, guide_net, Blur : 정의되나 base(C_coarse_attn)에서 forward 미사용 (dead)
+
+
+################################################################################
+PART 1. 데이터 입력 (Train / Inference 공통)
+################################################################################
+
+Dataset.__getitem__  (transforms.py:516)
+  - idx → (환자, slice_idx) 역산 (searchsorted)
+  - A = T1 중심 슬라이스           → np (H,W)   → torch [1,H,W]
+  - B = T2(GT) 중심 슬라이스        → np (H,W)   → torch [1,H,W]   (metric 전용)
+  - C = T2_moved_3mm_RigidReg 스택 : _load_slice_stack(K=3)
+        중심±1 = 3장 clamp 로드     → np (3,H,W) → torch [3,H,W]
+  - 증강 RandFlip/RandRotate90 (base prob=0 → no-op)
+  - random_crop(A,B,C, [128,128])  ← 셋에 동일 crop 좌표
+  DataLoader collate →
+      batch = (real_a [B,1,128,128], real_b [B,1,128,128], real_b_ref [B,3,128,128])
+
+
+################################################################################
+PART 2. TRAIN 경로
+################################################################################
+
+── 2-0. training_step 진입 (proposed_synthesis_module.py:542) ──────────────────
+  automatic_optimization=False. use_gan=(lambda_gan>0)=True →
+     optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
+  real_a, real_b, fake_b, real_b_ref = self.model_step(batch)   [line 581]
+     └ 여기서 Generator forward 1회 실행 = fake_b 생성
+
+── 2-1. model_step → forward (fake_b 생성) ────────────────────────────────────
+  base_module_AtoB.model_step (line 238-246, use_25d 경로):
+      real_a, real_b, real_b_ref = batch
+      fake_b = self.forward(real_a, real_b_ref)         # [line 245]
+
+  base_module_AtoB.forward (line 86):   type == ProposedSynthesisModule
+      merged_input = cat(real_a, real_b_ref, dim=1)     # [B,4,128,128]
+                                                         ch0=T1, ch1..3=T2_moved stack
+      is_3d=False, training=True → return self.netG_A(merged_input)  [line 108/121]
+
+── 2-2. Generator forward (netG_A.forward) ────────────────────────────────────
+  network_proposed_synthesis.ProposedSynthesisModule.forward (line ~660)
+
+  [2-2-0] 입력 분리
+      x       = merged_input[:, :1]     # [B,1,128,128]  T1 (source/query)
+      ref_all = merged_input[:, 1:]     # [B,3,128,128]  T2_moved stack (key/value)
+
+  [2-2-1] style map 생성 → _make_ref_condition(source=x, ref_all=ref_all)
+      network_proposed_synthesis.ProposedSynthesisModule._make_ref_condition
+      _style_size(x): h,w = 128//8 = 16,16
+      mode=='C_coarse_attn' & use_25d & K>=1 →
+          ref_stack = _get_ref_stack(ref_all) = ref_all[:, :3]   # [B,3,128,128]
+          style_guidance_1, stats = self.ref_conditioner_25d(x, ref_stack, (16,16))
+
+      ┌── LocalWindowAttentionConditioner25D.forward (line 191) — Attention 블록 ──┐
+      │ (a) 다운샘플 (ref_downsample_mode='bilinear')                              │
+      │     src_low = interpolate(x, (16,16), bilinear)      # [B,1,16,16]         │
+      │     ref_low = interpolate(ref_stack,(16,16),bilinear)# [B,3,16,16]         │
+      │     coarse=false → ref_base = ref_low                # [B,3,16,16]         │
+      │ (b) Q/K 투영 (1x1 conv)                                                    │
+      │     q = q_proj(src_low)                              # [B,16,16,16]        │
+      │     k = k_proj(ref_base.reshape(B*3,1,16,16)).view   # [B,3,16,16,16]      │
+      │     qk_norm=true → q=L2norm(q,dim=1), k=L2norm(k,dim=2)  (cosine)          │
+      │ (c) 로컬윈도우 unfold (win=3)                                              │
+      │     k_unfold                                          # [B,3,16,9,16,16]   │
+      │ (d) score = (q·k_unfold) * temperature(=exp(log_T))  # [B,3,9,16,16]       │
+      │     center_bias 0.0(무효), rel_bias off                                    │
+      │     attn = softmax over K*win2(=27)                  # [B,3,9,16,16]       │
+      │     (uniform_attn=true면 여기서 attn을 1/27로 덮음; base=false)            │
+      │ (e) direct 집계 (v_proj 없음)                                              │
+      │     ref_base_unfold = unfold(ref_base)               # [B,3,9,16,16]       │
+      │     weighted_ref = Σ(attn*ref_base_unfold)           # [B,1,16,16]         │
+      │     center_ref = ref_low[:,1:2] ; alpha=1.0                                │
+      │     style = center_ref + 1.0*(weighted_ref-center_ref) = weighted_ref      │
+      │ (f) 엔트로피 등 통계 stats (+ 이 세션: last_attn_entropy 미분가능 저장)    │
+      │     return style [B,1,16,16], stats                                        │
+      └───────────────────────────────────────────────────────────────────────────┘
+      → style_guidance_1 = [B,1,16,16]   (1채널 저해상 style map)
+
+  [2-2-2] StyleConv U-Net 본체 (style_guidance_1을 전 레이어에 동일 주입)
+      feat0 = conv0 (x,           style)   1→264  , 128x128   [line 662~]
+      feat1 = conv11(feat0,       style)   264→264, 128→64    [downsample]
+      feat1 = conv12(feat1,       style)   264→264, 64x64
+      feat2 = conv21(feat1,       style)   264→264, 64→32     [downsample]
+      feat2 = conv22(feat2,       style)   264→264, 32x32
+      feat3 = conv31(feat2,       style)   264→264, 32x32
+      feat3 = conv32(feat3,       style)   264→264, 32x32
+      feat4 = conv41(feat3+feat2, style)   264→264, 32→64     [upsample, skip+]
+      feat4 = conv42(feat4,       style)   264→264, 64x64
+      feat5 = conv51(feat4+feat1, style)   264→264, 64→128    [upsample, skip+]
+      feat5 = conv52(feat5,       style)   264→264, 128x128
+      feat6 = conv6 (feat5+feat0, style)   264→264, 128x128   [skip+]
+      out   = conv_final(feat6)            264→1  , 128x128   [Conv2d 3x3]
+      fake_b = tanh(out)                   # [B,1,128,128]  in [-1,1]
+      (skip은 concat 아님, 채널 동일(264)해서 덧셈)
+
+      ┌── StyleConv.forward(x, style) 내부 (line ~857) — 1개 블록 구조 ──────────┐
+      │ (1) 공간변환:                                                             │
+      │     downsample=True : x = down(x)   down=Conv2d(Cin,264,k1,s2,p0)         │
+      │     upsample=True   : x = up(x)     up=Seq(Upsample(x2,nearest),          │
+      │                                            Conv2d(Cin,264,3,p1))          │
+      │     else            : x = conv(x)   conv=Conv2d(Cin,264,3,p1)             │
+      │ (2) 정규화: x = InstanceNorm2d(264, affine=False)(x)   ← 스타일 통계 제거 │
+      │ (3) 노이즈: x = x + randn_like(x)*noise_strength(학습0시작)               │
+      │ (4) style→변조 파라미터 (SPADE형):                                         │
+      │     style = interpolate(style, x크기, mode='nearest')  # 16→해당해상도    │
+      │     actv  = mlp_shared(style)    Seq(Conv2d(1,512,3,p1),ReLU)  #[B,512,.]  │
+      │     gamma = mlp_gamma(actv)      Conv2d(512,264,3,p1)          #[B,264,.]  │
+      │     beta  = mlp_beta(actv)       Conv2d(512,264,3,p1)          #[B,264,.]  │
+      │     x = x * gamma + beta         ← 픽셀별 affine 변조                      │
+      │ (5) 활성: x = LeakyReLU(0.2)(x)                                            │
+      │ return x                                                                   │
+      └───────────────────────────────────────────────────────────────────────────┘
+      ※ mlp_shared/gamma/beta는 StyleConv 13개가 각각 별도 파라미터(가중치 공유X)
+
+── 2-3. backward_G (Generator loss) proposed_synthesis_module.py:184 ───────────
+  with optimizer_G_A.toggle_model():   (G/F에만 grad)
+    loss_G = backward_G(real_a, real_b, None,None, fake_b, ..., real_b_ref, ...)
+      eff_b = real_b_ref  (use_25d)   ← 모든 loss 타깃은 misalign ref (GT 아님)
+
+    [L1] GAN loss (line 199):
+        pred_fake = netD_A(fake_b)              # PatchGAN [B,1,~16,~16]
+        loss_gan_b = criterionGAN(pred_fake,True)*1 = MSE(D(fake),1)
+    [L2] Contextual loss (line 218 → _contextual_stack_loss line 121):
+        VGG19 6층 특징, 3장 ref 각각 vs fake_b → CX_0,1,2
+        ctx_agg='mean' → mean(CX)*5
+    [L3] PatchNCE loss (line 317, 단일출력 line 384):
+        dummy = real_a.repeat(1,3,1,1)
+        feat_b = netG_A(cat(fake_b,dummy), nce_layers=[0,2,4,6], encode_only=True)
+        feat_a = netG_A(cat(real_a,eff_b),  nce_layers,           encode_only=True)
+            └ encode_only=True → forward가 out 대신 [feat0,feat2,feat4,feat6] 반환
+              (netG_A forward 2회 추가 = 스텝당 Generator forward 총 3회)
+        netF_A(PatchSampleF): 층별 256위치 샘플→MLP(264→256)→L2norm  # [256,256]
+            (feat_a의 위치 id를 feat_b에도 공유 → 같은 위치 positive)
+        PatchNCELoss(nce_T=0.07): InfoNCE(같은위치 positive, 나머지 negative)
+        loss_nce = Σ_layer mean(NCE)*1.5 / 4
+    [L4] (이 세션 추가) entropy 규제 (line ~446): lambda_attn_entropy>0면
+        loss += lambda * netG_A._last_attn_entropy_for_loss  (base=0, 무효)
+    loss_G = gan + ctx_mean + nce  (+옵션)
+    manual_backward(loss_G); clip_grad(G,0.5); clip_grad(F,0.5)
+    optimizer_G_A.step(); optimizer_F_A.step(); zero_grad
+
+── 2-4. backward_D (Discriminator loss) proposed_synthesis_module.py:602 ───────
+  real_b_disc = real_b_ref[:,1:2]  (ref 중심 슬라이스)   ← _disc_real
+  with optimizer_D_A.toggle_model():
+    backward_D_A → backward_D_basic (base_module_AtoB.py:286):
+        loss_D = 0.5*( MSE(netD_A(real_b_disc),1) + MSE(netD_A(fake_b.detach()),0) )
+    manual_backward; clip_grad(D,0.5); optimizer_D_A.step(); zero_grad
+
+  netD_A 구조 (NLayerDiscriminator, PatchGAN, networks_define.py:461):
+    Conv(1→64,k4,s1,p1)+LReLU+Downsample
+    Conv(64→128)+InstanceNorm+LReLU+Downsample
+    Conv(128→256)+InstanceNorm+LReLU+Downsample
+    Conv(256→512)+InstanceNorm+LReLU
+    Conv(512→1,k4,s1,p1)               # 예측맵 [B,1,~16,~16]
+
+── 2-5. optimizer / scheduler (proposed_synthesis_module.py:648) ──────────────
+    Adam(lr=1e-4, betas=[0.5,0.999], wd=1e-4)  × (G_A, D_A, F_A)
+    scheduler = MultiStepLR([250000,300000], gamma=0.5)
+    Trainer: max_epochs=100, precision=32, strategy=ddp, grad_clip 0.5(norm)
+
+
+################################################################################
+PART 3. INFERENCE 경로 (validation / test / 실제 추론)
+################################################################################
+
+── 3-0. 진입: validation_step / test_step (base_module_AtoB.py:338 / 531) ──────
+  real_a, real_b, fake_b, real_b_ref = self.model_step(batch)   [test_step ~536]
+    └ 학습과 동일한 model_step → forward → netG_A.forward
+      단, self.training=False (eval 모드), torch.no_grad 컨텍스트
+
+── 3-1. forward (inference 분기) base_module_AtoB.forward (line 86) ────────────
+    merged_input = cat(real_a, real_b_ref, dim=1)         # [B,4,128,128]
+    is_3d=False (base) → sliding window 미적용
+    use_sliding_inference=False → return self.netG_A(merged_input)
+    ※ base는 2D라 학습과 동일한 단일 forward. (is_3d=True였다면 line 96-100의
+      monai SlidingWindowInferer 경로를 탔을 것 — base는 해당 없음)
+
+  → netG_A.forward = PART 2-2와 완전히 동일한 블록 순서/shape
+    (Attention conditioner → StyleConv U-Net 13블록 → conv_final → tanh)
+    출력 fake_b [B,1,128,128]
+    차이점: encode_only 안 씀, noise_strength는 학습값 그대로 적용
+            (randomize_noise=True라 추론에도 noise 주입되지만 strength가 작음)
+
+── 3-2. metric 집계 (eval_on_align=True; base_module_AtoB.py:578) ──────────────
+    test_ssim_B.update(real_B, fake_B)          ← GT=real_b(T2), [-1,1] 직접
+    test_psnr_B.update(real_B, fake_B)          data_range=2.0
+    test_lpips_B.update(gray2rgb(real_B.clamp(-1,1)), gray2rgb(fake_B.clamp))
+    test_sharpness_B.update(norm_to_uint8(fake_B))   ← Laplacian 분산
+    (metric 정의: define_metrics line 67, torchmetrics)
+    ※ 학습 loss는 real_b_ref(misalign) 타깃, 평가는 real_b(GT) 타깃 — 비대칭
+
+── 3-3. 예측 저장 (옵션, image_callback / save 스크립트) ──────────────────────
+    fake_b [-1,1] → denorm/uint8 → nii.gz (results/.../preds_a_*.nii.gz) 등
+
+
+################################################################################
+PART 4. 텐서 shape 총정리 (B=1, base)
+################################################################################
+
+[데이터]
+  T1 slice          [1,128,128]      T2 stack        [3,128,128]
+  real_a            [1,1,128,128]    real_b_ref      [1,3,128,128]
+  merged_input      [1,4,128,128]
+
+[Attention conditioner]  (LocalWindowAttentionConditioner25D)
+  x(source)         [1,1,128,128]  → src_low  [1,1,16,16]
+  ref_all           [1,3,128,128]  → ref_low  [1,3,16,16] = ref_base
+  q                 [1,16,16,16]                (B,dim,h,w)
+  k                 [1,3,16,16,16]              (B,K,dim,h,w)
+  k_unfold          [1,3,16,9,16,16]            (B,K,dim,win2,h,w)
+  score/attn        [1,3,9,16,16]               (B,K,win2,h,w) softmax over 27
+  ref_base_unfold   [1,3,9,16,16]
+  weighted_ref=style[1,1,16,16]      ← style_guidance_1
+
+[StyleConv U-Net 본체]
+  feat0             [1,264,128,128]
+  feat1             [1,264, 64, 64]
+  feat2             [1,264, 32, 32]
+  feat3             [1,264, 32, 32]
+  feat4             [1,264, 64, 64]
+  feat5             [1,264,128,128]
+  feat6             [1,264,128,128]
+  fake_b            [1,  1,128,128]  (tanh)
+
+[StyleConv 내부, conv22(32x32) 예]
+  x(정규화·노이즈후) [1,264,32,32]
+  style(nearest확대) [1,  1,32,32]
+  actv=mlp_shared    [1,512,32,32]
+  gamma / beta       [1,264,32,32]
+  x*gamma+beta       [1,264,32,32]
+
+[PatchNCE (train only)]
+  encode feat(층별)  [1,264,H_l,W_l]  (H_l ∈ {128,32,64,128})
+  256 patch 샘플     [256,264]
+  MLP+L2norm         [256,256]
+  InfoNCE out        [256, 1+256]
+
+[Discriminator (PatchGAN)]
+  입력 fake_b/real   [1,1,128,128]
+  netD_A 예측맵      [1,1,~16,~16]
+
+
+################################################################################
+PART 5. 블록 진행 순서 요약 (한 줄 흐름)
+################################################################################
+
+TRAIN:
+  Dataset.__getitem__ → collate
+  → training_step → model_step → BaseModule.forward(cat→merged)
+  → netG_A.forward:
+       _make_ref_condition → LocalWindowAttentionConditioner25D.forward
+         [bilinear down → q_proj/k_proj(1x1) → qk cosine → unfold(win3)
+          → softmax(27) → direct weighted_ref] → style[1,1,16,16]
+       → conv0..conv6 (StyleConv×13; 각: down/up/conv → InstanceNorm → +noise
+          → SPADE(mlp_shared/gamma/beta 3x3) 변조 → LeakyReLU)
+       → conv_final(3x3) → tanh → fake_b
+  → backward_G [GAN(netD_A) + Contextual(VGG19) + PatchNCE(netG_A encode_only
+       ×2 + netF_A + InfoNCE) (+entropy 옵션)] → step(G,F)
+  → backward_D [netD_A: 0.5(MSE(real_ref중심,1)+MSE(fake,0))] → step(D)
+
+INFERENCE:
+  Dataset → model_step → BaseModule.forward → netG_A.forward
+  (Attention conditioner → StyleConv×13 → conv_final → tanh) → fake_b
+  → test_step metric update (SSIM/PSNR/LPIPS/Sharpness vs real_b GT)
+  → (옵션) nii 저장
+
+================================================================================
+문서 끝
+================================================================================

@@ -439,6 +439,18 @@ class ProposedSynthesisModule(BaseModule_AtoB):
                 self.log("L1_d_Loss", loss_l1_d.detach(), prog_bar=True)
                 loss_G += loss_l1_d
 
+        ##################################################################################################################
+        ## Attention entropy regularization (encourage selective / peaked attention).
+        ## Minimizing normalized entropy pushes attention away from uniform toward query-similar candidates.
+        lambda_attn_entropy = float(getattr(self.params, 'lambda_attn_entropy', 0))
+        if lambda_attn_entropy != 0:
+            ent = getattr(self.netG_A, '_last_attn_entropy_for_loss', None)
+            if ent is not None:
+                loss_attn_entropy = lambda_attn_entropy * ent
+                self.log("AttnEntropy_Loss", loss_attn_entropy.detach(), prog_bar=True)
+                self.log("attn_entropy_val", ent.detach(), prog_bar=False)
+                loss_G += loss_attn_entropy
+
         self.log("G_loss", loss_G.detach(), prog_bar=True)
         return loss_G
         # assert not torch.isnan(loss_G).any(), "Total Loss is NaN"

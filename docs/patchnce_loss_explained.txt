@@ -1,0 +1,766 @@
+================================================================================
+PatchNCE Loss — 원리 · 구현 · Shape 상세 정리
+ProposedSynthesis (base) 기준
+================================================================================
+작성 기준 커밋: ba1bded (main)
+기준 설정: configs/model/proposed_synthesis.yaml + configs/data/IXI_Align.yaml
+          base = lambda_nce=1.5, nce_layers=[0,2,4,6], use_25d_style=True,
+                 batch_size=1, crop_size=[128,128], nce_on_vgg=False
+
+관련 파일
+  src/models/proposed_synthesis_module.py               — backward_G 안의 NCE 블록 (line 317~405)
+  src/models/components/network_patch_sample_F.py        — netF_A (PatchSampleF, 패치 샘플링 + MLP)
+  src/losses/patch_nce_loss.py                           — PatchNCELoss (InfoNCE 계산)
+  src/models/components/network_proposed_synthesis.py    — Generator, encode_only 경로
+
+기호
+  B  = batch size (base: 1)
+  K  = ref_stack_size (base: 3)
+  H,W = 128, 128
+  C_f = feat_ch (base: 264)
+  P  = num_patches (코드 고정값: 256)
+  nc = netF_A 출력 차원 (base: 256)
+  L  = len(nce_layers) = 4  (레이어 [0,2,4,6])
+
+
+================================================================================
+0. PatchNCE가 무엇을 위한 loss인가 (직관)
+================================================================================
+
+  목적: 합성 결과 fake_b 가 입력 real_a(T1)와 **구조(내용)** 를 유지하도록 강제.
+
+  문제 상황
+    - GAN loss는 "T2처럼 보이게" 만들지만 구조가 틀어져도 막지 못함.
+    - Contextual/style loss는 참조 T2의 텍스처·대비를 입히는 역할.
+    - 그러면 "T1의 해부학적 구조"가 보존된다는 보장이 약함.
+
+  PatchNCE의 아이디어 (CUT, Park et al. 2020 에서 유래)
+    - real_a 의 어떤 위치 패치와, fake_b 의 **같은 위치** 패치는
+      서로 대응(positive)해야 한다.
+    - real_a 의 그 위치 패치와, fake_b 의 **다른 위치** 패치들은
+      구별(negative)되어야 한다.
+    - 즉 "같은 자리끼리는 가깝게, 다른 자리와는 멀게" → 대조학습(contrastive).
+    - 이렇게 하면 픽셀값을 직접 비교(L1)하지 않으면서도
+      위치별 구조 대응이 유지됨 → cross-modality(T1→T2)에 적합.
+
+  중요한 특징
+    - "특징(feature)"을 뽑는 인코더로 **별도 VGG가 아니라 Generator 자기 자신**을
+      사용 (nce_on_vgg=False 경로). encode_only 모드로 중간 feature를 추출.
+    - 그래서 T1과 fake_b를 같은 Generator 인코더에 통과시켜 feature 공간에서 비교.
+
+
+================================================================================
+1. 전체 흐름 한눈에
+================================================================================
+
+  real_a (T1)  ────────────────┐
+                               │  (같은 Generator 인코더, encode_only)
+  fake_b (합성) ──────────────┤
+                               v
+        Generator.forward(merged, nce_layers=[0,2,4,6], encode_only=True)
+                               │
+                       feat_a, feat_b  (각각 4개 레이어의 feature map 리스트)
+                               │
+                               v
+        netF_A (PatchSampleF): 레이어마다 256개 위치 무작위 샘플 → MLP → L2정규화
+           feat_a 에서 뽑은 위치(sample_ids)를 feat_b 에도 동일 적용  ★
+                               │
+                       feat_a_pool, feat_b_pool  (각 4개, [256, 256])
+                               │
+                               v
+        PatchNCELoss: 레이어마다 InfoNCE (같은 위치 positive, 나머지 negative)
+                               │
+                    Σ / L  × lambda_nce → loss_nce_b
+
+
+================================================================================
+2. Feature 추출 단계 (proposed_synthesis_module.py:384-396)
+================================================================================
+
+  base는 단일 출력 + use_25d 경로 (line 319-323, 384~).
+
+  2-1. fake 쪽 (feat_b)
+  --------------------------------------------------------------------------------
+      dummy = real_a.repeat(1, K, 1, 1)          # [B, 3, 128, 128]
+      merged_input_1 = torch.cat((fake_b, dummy), dim=1)   # [B, 4, 128, 128]
+      feat_b = self.netG_A(merged_input_1, self.params.nce_layers, encode_only=True)
+
+    ★ 왜 dummy 자리에 real_a(T1)를 넣는가:
+        Generator는 [입력 1채널 + ref 3채널] = 4채널을 받는다.
+        여기서는 fake_b의 "구조 feature"만 뽑고 싶고, ref(style)의 영향은
+        빼고 싶다. 그래서 ref 자리에 T1을 복제해 넣어 "중립 style"로 인코딩.
+        (진짜 ref T2를 넣으면 style 정보가 섞여 순수 구조 비교가 어려움)
+
+    ★ fake_b 자체는 Generator가 방금 만든 출력. 여기에 다시 Generator를 통과시켜
+      중간 feature를 뽑는 것. (Generator forward가 스텝당 총 3회 도는 이유 중 2회)
+
+  2-2. real 쪽 (feat_a)
+  --------------------------------------------------------------------------------
+      merged_input_real = torch.cat((real_a, eff_b), dim=1)   # [B, 4, 128, 128]
+      feat_a = self.netG_A(merged_input_real, self.params.nce_layers, encode_only=True)
+
+    - eff_b = real_b_ref (2.5D misalign된 T2 스택, [B,3,128,128])  ← 정상 학습 입력과 동일
+    - 즉 feat_a는 "정상 입력(T1 + 실제 ref)"을 통과시킨 feature.
+
+  2-3. encode_only 가 반환하는 것 (network_proposed_synthesis.py:726-734)
+  --------------------------------------------------------------------------------
+      encode_only=True 이면 forward가 최종 out 대신
+      지정한 레이어의 중간 feature 리스트를 반환:
+
+        layers_dict = {0:feat0, 1:feat1, 2:feat2, 3:feat3, 4:feat4, 5:feat5, 6:feat6}
+        return [layers_dict[i] for i in [0,2,4,6]]
+
+      base의 nce_layers=[0,2,4,6] 에 해당하는 feature shape (H=W=128 기준):
+        feat0  [B, 264, 128, 128]     conv0 직후 (원 해상도)
+        feat2  [B, 264,  32,  32]     conv22 직후 (2번 downsample)
+        feat4  [B, 264,  64,  64]     conv42 직후 (upsample 경로)
+        feat6  [B, 264, 128, 128]     conv6 직후 (원 해상도 복귀)
+
+      → feat_a, feat_b 각각 길이 4인 리스트, 원소는 위 shape의 텐서.
+
+      주석 (proposed_synthesis_module.py:100): nce_layers=[0,2,4,6]
+        "3까지가 encoder. [0,1,2,3]만 쓰면 encoder만 → 성능 하락.
+         전 구간을 쓰는 게 낫다" 는 경험적 선택.
+
+
+================================================================================
+3. 패치 샘플링 + 투영 단계 — netF_A (PatchSampleF)
+================================================================================
+  파일: network_patch_sample_F.py:33-63
+  netF_A 설정: use_mlp=True, input_nc=264, nc=256, init='xavier'
+
+  호출 (proposed_synthesis_module.py:395-396):
+      feat_a_pool, sample_ids = self.netF_A(feat_a, 256, None)
+      feat_b_pool, _          = self.netF_A(feat_b, 256, sample_ids)   ★ 같은 id 재사용
+
+  각 레이어 feat(하나)에 대해 (forward 루프 line 38-62):
+
+  3-1. reshape: 공간을 펼쳐 위치축으로
+  --------------------------------------------------------------------------------
+      feat                       [B, 264, H_l, W_l]
+      feat.permute(0,2,3,1)      [B, H_l, W_l, 264]
+      .flatten(1,2)              [B, H_l*W_l, 264]     = feat_reshape
+        예) feat0: [1, 16384, 264]   (128*128=16384 위치)
+            feat2: [1,  1024, 264]   (32*32)
+
+  3-2. 위치 무작위 선택 (P=256개)
+  --------------------------------------------------------------------------------
+      patch_ids is None 인 첫 호출(feat_a)에서:
+          patch_id = np.random.permutation(H_l*W_l)[:256]    # 256개 위치 인덱스
+      patch_ids 가 주어진 둘째 호출(feat_b)에서:
+          patch_id = patch_ids[feat_id]                       # feat_a와 동일 위치 재사용 ★
+
+      x_sample = feat_reshape[:, patch_id, :].flatten(0,1)
+                 [B, 256, 264] → [B*256, 264] = [256, 264]   (base B=1)
+
+    ★ 핵심: feat_a에서 뽑은 위치 sample_ids를 feat_b에도 그대로 적용.
+       → 같은 공간 위치의 real/fake 패치가 서로 positive pair가 됨.
+       (레이어마다 위치 집합은 다르지만, 같은 레이어 안에서는 a/b가 동일)
+
+    주의(코드 주석 line 8): 배치 내 여러 이미지가 같은 patch_ids를 공유.
+      base는 batch_size=1 이라 무관.
+
+  3-3. MLP 투영 (진짜 nn.Linear, 여기만 1×1이 아니라 FC)
+  --------------------------------------------------------------------------------
+      self.mlp = Sequential(
+          Linear(264, 256), ReLU(), Linear(256, 256))
+      x_sample = self.mlp(x_sample)      [256, 264] → [256, 256]
+
+      (참고: gamma/beta나 Q/K와 달리 여기는 conv가 아니라 Linear.
+       위치별로 독립 투영이라 1×1 conv와 수학적으로 동일하지만 구현은 FC.)
+
+  3-4. L2 정규화 (Normalize, line 66-75)
+  --------------------------------------------------------------------------------
+      x_sample = x_sample / (||x_sample||_2 + 1e-7)     채널(dim=1) 기준
+      → [256, 256], 각 행(패치)이 단위벡터.
+      → 이후 내적이 곧 코사인 유사도가 됨 (InfoNCE의 전제).
+
+  결과:
+      feat_a_pool = [ [256,256] x 4레이어 ]
+      feat_b_pool = [ [256,256] x 4레이어 ]
+      sample_ids  = [ 각 레이어의 256개 위치 인덱스 ] (a→b 공유)
+
+
+================================================================================
+4. InfoNCE 계산 — PatchNCELoss
+================================================================================
+  파일: patch_nce_loss.py:15-57
+  설정: nce_T=0.07, batch_size=1,
+        nce_includes_all_negatives_from_minibatch=False
+
+  한 레이어에 대해 criterionNCE(feat_q, feat_k) 호출.
+    feat_q = feat_a_pool[layer]   [256, 256]   (query = real/T1 쪽)
+    feat_k = feat_b_pool[layer]   [256, 256]   (key   = fake 쪽)
+  (proposed_synthesis_module.py:399-401 에서 criterionNCE(f_a, f_b))
+
+  num_patches = 256 (=P),  dim = 256 (=nc)
+  feat_k = feat_k.detach()     ★ key 쪽은 gradient 차단 (q만 학습 신호 받음)
+
+  4-1. Positive logit (같은 위치끼리)   line 21-23
+  --------------------------------------------------------------------------------
+      l_pos = bmm( feat_q.view(256, 1, 256),        # [256, 1, 256]
+                   feat_k.view(256, 256, 1) )       # [256, 256, 1]
+            = 각 패치 i에 대해  q_i · k_i  (자기 자신과의 내적)
+      l_pos: [256, 1]
+      → i번째 real 패치와 i번째 fake 패치(같은 위치)의 코사인 유사도.
+
+  4-2. Negative logit (다른 위치들과)   line 34-50
+  --------------------------------------------------------------------------------
+      batch_dim_for_bmm = batch_size = 1
+      feat_q = feat_q.view(1, 256, 256)    # [1, P, dim]
+      feat_k = feat_k.view(1, 256, 256)
+      npatches = 256
+
+      l_neg_curbatch = bmm(feat_q, feat_k.transpose(2,1))   # [1, 256, 256]
+        → (i,j) 성분 = q_i · k_j  (모든 위치쌍의 유사도 행렬)
+
+      # 대각선(i==j)은 positive와 중복이므로 제거:
+      diagonal = eye(256)[None]                 # [1,256,256] bool
+      l_neg_curbatch.masked_fill_(diagonal, -10.0)   # 대각선을 exp(-10)≈0 으로
+      l_neg = l_neg_curbatch.view(-1, 256)      # [256, 256]
+
+      → 각 패치 i의 negative = 자기 외 나머지 255개 위치 (+마스킹된 자기자리 1개).
+
+    ★ negative가 "다른 이미지"가 아니라 **같은 이미지 안의 다른 위치**.
+      batch_size=1, all_negatives_from_minibatch=False 이므로
+      한 이미지 내부 256개 패치가 서로의 negative가 됨.
+
+  4-3. InfoNCE = temperature scaling + CrossEntropy   line 52-55
+  --------------------------------------------------------------------------------
+      out = cat(l_pos, l_neg) / nce_T           # [256, 1+256] = [256, 257]
+        열 0    = positive logit
+        열 1~256 = negative logits (열 (i+1)은 마스킹되어 -10/0.07 ≈ -143)
+      nce_T=0.07 로 나눔 → 유사도 차이를 sharpening (작을수록 대조 강함)
+
+      target = zeros(256)  (정답 클래스는 항상 0번 = positive)
+      loss = CrossEntropy(out, target)          reduction='none' → [256]
+
+      의미: 각 패치에 대해 "positive가 257개 후보 중 0번" 이 되도록
+            softmax 분류 문제를 푸는 것.
+            → q_i·k_i (같은 위치)가 q_i·k_j (다른 위치)들보다 커지도록 학습.
+
+      반환: [256] (패치별 loss)
+
+
+================================================================================
+5. 레이어 합산 (proposed_synthesis_module.py:398-404)
+================================================================================
+      total_nce_loss = 0.0
+      for f_a, f_b in zip(feat_a_pool, feat_b_pool):    # 4개 레이어
+          loss = self.criterionNCE(f_a, f_b) * self.params.lambda_nce   # [256]*1.5
+          total_nce_loss += loss.mean()                  # 256개 패치 평균 → 스칼라
+      loss_nce_b = total_nce_loss / n_layers             # /4
+      loss_G += loss_nce_b
+      assert not torch.isnan(loss_nce_b)                 # NaN 가드
+
+      최종 = ( Σ_{l∈[0,2,4,6]} mean_patch( NCE_l ) ) × 1.5 / 4
+
+
+================================================================================
+6. Shape 이동 요약 (B=1, base)
+================================================================================
+
+  입력
+    real_a                 [1, 1, 128, 128]
+    fake_b                 [1, 1, 128, 128]
+    real_b_ref (eff_b)     [1, 3, 128, 128]
+    merged (fake측)        [1, 4, 128, 128]   = cat(fake_b, real_a.repeat(1,3,..))
+    merged (real측)        [1, 4, 128, 128]   = cat(real_a, real_b_ref)
+
+  encode_only feature (4개 레이어)
+    feat0                  [1, 264, 128, 128]
+    feat2                  [1, 264,  32,  32]
+    feat4                  [1, 264,  64,  64]
+    feat6                  [1, 264, 128, 128]
+
+  netF_A (레이어별)
+    feat_reshape           [1, H_l*W_l, 264]
+    256개 위치 샘플         [256, 264]
+    MLP(264→256)           [256, 256]
+    L2 normalize           [256, 256]        ← feat_a_pool[l], feat_b_pool[l]
+
+  PatchNCELoss (레이어별)
+    l_pos                  [256, 1]
+    l_neg                  [256, 256]
+    out = cat/nce_T        [256, 257]
+    CrossEntropy           [256]
+    .mean()                스칼라
+
+  최종
+    loss_nce_b             스칼라 = Σ_4 (mean) × 1.5 / 4
+
+
+================================================================================
+7. base 관련 설정값 및 주의점
+================================================================================
+
+  lambda_nce                 1.5
+  nce_layers                 [0, 2, 4, 6]        (L=4)
+  num_patches                256                 (코드 하드코딩, netF_A 호출 인자)
+  netF_A.nc                  256                 (투영 차원)
+  netF_A.input_nc            264                 (= feat_ch, MLP 입력)
+  nce_T                      0.07                (temperature)
+  nce_includes_all_negatives False               (negative는 같은 이미지 내부)
+  nce_on_vgg                 False               (Generator 자기 인코더 사용)
+  batch_size                 1
+
+  주의점
+   (1) key(feat_k=fake측) detach → gradient는 query(real측 경로)로만 흐름.
+       하지만 feat_a, feat_b 둘 다 같은 netG_A를 통과하므로
+       fake_b→Generator 재인코딩 경로로도 결국 Generator가 학습됨.
+   (2) 스텝당 Generator forward 3회:
+         ① model_step에서 fake_b 생성 (1회)
+         ② feat_b용 encode_only (1회)
+         ③ feat_a용 encode_only (1회)
+       → NCE는 계산량이 큰 loss. lambda_nce=0으로 끄면 이 2회가 사라져 학습이 빨라짐.
+   (3) num_patches=256 은 함수 인자로 하드코딩. config로 노출돼 있지 않음.
+   (4) patch_ids를 a→b 공유하는 것이 positive pair 성립의 핵심.
+       레이어마다 위치 집합은 새로 뽑히지만 같은 레이어의 a/b는 동일.
+   (5) lambda_nce=0 이면 __init__에서 criterionNCE=None 이 되어
+       (proposed_synthesis_module.py:101) NCE 블록 전체가 스킵됨.
+
+
+================================================================================
+8. 한 줄 요약
+================================================================================
+  "T1(real_a)과 합성결과(fake_b)를 같은 Generator 인코더에 통과시켜
+   4개 레이어에서 256개 위치 패치를 뽑고, 같은 위치는 positive·다른 위치는
+   negative로 두는 InfoNCE(온도 0.07) 대조학습으로 위치별 구조 대응을 강제한다.
+   loss = Σ_layer mean_patch(InfoNCE) × 1.5 / 4."
+================================================================================
+
+
+################################################################################
+################################################################################
+##                                                                            ##
+##          CONTEXTUAL LOSS (Style / lambda_style) — 원리·구현·Shape          ##
+##                                                                            ##
+################################################################################
+################################################################################
+
+기준 설정: lambda_style=5, ctx_agg_mode='mean', use_25d_style=True,
+          ref_stack_size(K)=3, crop_size=[128,128]
+관련 파일
+  src/losses/contextual_loss.py                         — Contextual_Loss 본체 + VGG_Model
+  src/models/proposed_synthesis_module.py:97            — criterion 생성
+  src/models/proposed_synthesis_module.py:121-139       — _contextual_stack_loss (2.5D 집계)
+  src/models/proposed_synthesis_module.py:218-224       — backward_G 안의 호출부
+
+
+================================================================================
+C0. Contextual loss가 무엇을 위한 loss인가 (직관)
+================================================================================
+
+  목적: fake_b 가 참조 T2 의 **텍스처·대비(=modality 스타일)** 를 갖게 만들되,
+        픽셀이 정확히 정렬돼 있지 않아도(=misalign) 되게.
+
+  왜 L1/MSE가 아니라 Contextual인가
+    - ref(T2_moved)는 3mm misalign 상태. L1으로 직접 비교하면
+      "위치가 틀어진 것"을 오차로 잘못 벌주게 됨 → blur, 구조 왜곡.
+    - Contextual loss는 픽셀 위치 대응을 요구하지 않는다.
+      "fake의 각 feature에 대해, ref feature들 중 **가장 비슷한 것**이
+       하나라도 있으면 좋다"는 식의 집합 대 집합 유사도.
+    - 즉 위치는 자유롭게 두고 **feature 분포(통계)** 를 맞춘다.
+      → misalign에 관대하면서 modality 스타일은 전달.
+
+  핵심 아이디어 (Mechrez et al. 2018, "The Contextual Loss")
+    - 두 feature 집합 X(fake), Y(ref) 사이에서
+      각 x_i 가 가장 가까운 y_j 를 얼마나 확실히 찾는가를 softmax로 계산.
+    - 모든 x가 어떤 y와 잘 매칭되면 loss 낮음.
+
+
+================================================================================
+C1. 어떤 feature를 쓰나 — VGG19 (contextual_loss.py:140-165)
+================================================================================
+
+  VGG_Model: torchvision vgg19(pretrained=True).features, requires_grad=False
+  (ImageNet 사전학습, 학습 중 고정 — style loss는 VGG를 통과시켜 비교만 함)
+
+  사용 레이어와 가중치 (proposed_synthesis_module.py:87-94, style_feat_layers)
+      conv_1_2 : 1.0    (VGG index 2)
+      conv_2_1 : 1.0    (VGG index 5)
+      conv_2_2 : 1.0    (VGG index 7)
+      conv_3_2 : 1.0    (VGG index 12)
+      conv_4_2 : 1.0    (VGG index 21)
+      conv_4_4 : 1.0    (VGG index 25)
+    → 총 6개 층, 전부 weight 1.0. 저수준(대비/텍스처)~중수준(구조) feature 혼합.
+
+  1채널 입력은 내부에서 repeat(1,3,1,1)로 3채널화 (contextual_loss.py:212-214).
+
+  생성 (proposed_synthesis_module.py:97)
+      self.criterionContextual = Contextual_Loss(style_feat_layers)
+                                 if lambda_style != 0 else None
+    → lambda_style=0 이면 criterion 자체가 None → style loss 전체 스킵.
+
+  Contextual_Loss 기본 인자 (contextual_loss.py:177-189)
+      distance_type = Cosine_Distance   (코사인 거리)
+      crop_quarter  = True              (feature를 4등분해 배치로 쌓음, 아래 C2-1)
+      max_1d_size   = 10000             (H*W가 1e8 넘으면 random pooling; 여기선 항상 미발동)
+      b = 1.0, h = 0.5                  (contextual similarity 지수식 파라미터)
+      cobi = False, l1 = False          (CoBi/L1 변형 모두 미사용 → 순수 CX)
+
+
+================================================================================
+C2. Contextual_Loss.forward(images, gt) 한 층 처리 (contextual_loss.py:211-264)
+================================================================================
+  주의: 이 함수 인자 순서는 (images, gt).
+        _contextual_stack_loss에서는 criterionContextual(ref_slice, fake_img) 로 호출 →
+        즉 images=ref(T2 slice), gt=fake_b 로 들어감 (C4 참고).
+
+  각 층 key(conv_1_2 …)에 대해:
+
+  C2-1. VGG feature 추출 + 사분할 (line 231-243)
+  --------------------------------------------------------------------------------
+      vgg_images[key] : images를 VGG 통과시킨 해당 층 feature   [N, C, H, W]
+      vgg_gt[key]     : gt를    VGG 통과시킨 해당 층 feature   [N, C, H, W]
+
+      crop_quarter=True → _crop_quarters (line 317-327):
+        feature를 좌상/우상/좌하/우하 4조각으로 잘라 배치축(dim=0)으로 concat.
+        [N, C, H, W] → [4N, C, H/2, W/2]
+        (메모리·계산량 절감 + 국소 대응 강조. 아래 shape는 이 4배 확장 반영)
+
+  C2-2. 거리 계산 — 코사인 (line 260 → calculate_CX_Loss line 561)
+  --------------------------------------------------------------------------------
+      distanceType=Cosine → _create_using_dotP (line 400-427):
+        1) _centered_by_T : 두 feature를 T(gt)의 평균으로 중심화
+        2) _normalized_L2_channelwise : 채널 방향 L2 정규화 (단위벡터화)
+        3) F.conv2d로 모든 위치쌍 내적 = 코사인 유사도
+        4) cosine_dist = (1 - cos)/2, clamp(min=0)   → [N', H', W', H'*W']
+      의미: I의 각 위치 feature ↔ T의 모든 위치 feature 간 거리 행렬.
+      (N' = 4N,  H'=H/2, W'=W/2)
+
+  C2-3. 상대 거리 정규화 (line 590, _calculate_relative_distance line 517-525)
+  --------------------------------------------------------------------------------
+      relative = raw / (min_over_targets(raw) + 1e-5)
+      → 각 I 위치에 대해 "가장 가까운 T"를 기준으로 정규화.
+        절대 거리 스케일 차이를 제거 → 매칭의 "상대적 뚜렷함"만 남김.
+
+  C2-4. Contextual similarity (line 600-608)
+  --------------------------------------------------------------------------------
+      exp_distance   = exp((b - relative)/h)          # b=1, h=0.5
+      contextual_sim = exp_distance / sum_over_targets(exp_distance)
+      → I의 각 위치가 T의 각 위치에 대해 갖는 softmax 유사도 (합=1).
+        가장 가까운 T에 확률 질량이 몰릴수록 값이 뾰족.
+
+  C2-5. 층 loss 집계 (line 615-624, average_over_scales=True)
+  --------------------------------------------------------------------------------
+      max_gt_sim = max over T positions ( contextual_sim )   # 각 I가 최적 T와 갖는 유사도
+      CS         = mean over I positions ( max_gt_sim )      # 그 평균 (= CX 유사도)
+      CX_loss    = mean( -log(CS) )                          # 스칼라
+      → "모든 I 위치가 어떤 T와 잘 매칭될수록" -log(CS) ↓.
+
+  C2-6. 층 가중합 (line 262)
+  --------------------------------------------------------------------------------
+      loss += CX_loss * layers_weights[key]     # 6개 층, weight 각 1.0
+      return loss   # 6개 층 -log(CS) 의 합 (스칼라)
+
+
+================================================================================
+C3. 왜 "위치 대응"이 필요 없는가 (핵심 요약)
+================================================================================
+  - PatchNCE : 같은 위치끼리 positive → **위치 정렬을 강제** (구조 보존).
+  - Contextual: I의 각 위치가 T의 **어디든** 가장 가까운 것과 매칭되면 됨
+               (max over T positions) → **위치 자유**, 분포만 매칭 (스타일 전달).
+  → 둘이 상보적. NCE로 T1 구조를 붙잡고, Contextual로 T2 스타일을 입힘.
+    misalign된 ref를 style loss 타깃으로 써도 되는 이유가 여기 있음.
+
+
+================================================================================
+C4. 2.5D 집계 — slice별로 구해서 mean (핵심 요청 부분)
+================================================================================
+  파일: proposed_synthesis_module.py:121-139  (_contextual_stack_loss)
+  호출: backward_G line 219-220
+        if use_25d and eff_b is not None:
+            loss_style_b = self._contextual_stack_loss(fake_b, eff_b, lambda_style)
+
+  입력
+      fake_b     [B, 1, 128, 128]     합성 결과 (단일 슬라이스, 중심)
+      ref_stack  [B, K=3, 128, 128]   = eff_b = real_b_ref (T2_moved 2.5D 스택)
+      lambda_style = 5
+
+  C4-1. slice별 Contextual loss 계산 (line 127-132)
+  --------------------------------------------------------------------------------
+      K = 3,  center_idx = K//2 = 1
+      cx_losses = [ criterionContextual(ref_stack[:, i:i+1], fake_b).squeeze()
+                    for i in range(K) ]
+        i=0: ref 중심-1 슬라이스 vs fake_b  → CX_0 (스칼라)
+        i=1: ref 중심   슬라이스 vs fake_b  → CX_1
+        i=2: ref 중심+1 슬라이스 vs fake_b  → CX_2
+
+      ★ 각 슬라이스를 **독립적으로** fake_b와 비교해 3개의 스칼라 loss를 얻음.
+        (즉 fake는 항상 같은 1장, ref만 3장을 각각 대본다)
+
+  C4-2. 집계 방식 분기 (line 131-139)
+  --------------------------------------------------------------------------------
+    agg_mode = ctx_agg_mode  (base = 'mean')
+
+    ▶ 'mean' (base, line 133-134)
+        return torch.stack(cx_losses).mean() * lambda_style
+        = (CX_0 + CX_1 + CX_2) / 3 × 5
+        → 세 슬라이스 loss의 **단순 평균**.
+          "3장 모두와 고르게 비슷해지도록" 학습. 중심 편향 없음.
+
+    ▶ 'softmin' (기본 코드 default지만 base config는 mean, line 135-139)
+        tau=ctx_softmin_tau(0.3), shift_penalty_base=ctx_shift_penalty(0.05)
+        shift_penalties = [ |i-1|*0.05  for i in 0..2 ] = [0.05, 0.0, 0.05]
+        _softmin_contextual (line 112-119):
+            losses = stack(cx) + penalties
+            return -tau * logsumexp(-losses/tau)    # soft-min
+        → 3장 중 **가장 잘 맞는 슬라이스**로 부드럽게 치우침(soft minimum),
+          중심에서 먼 슬라이스엔 약한 penalty.
+          "가장 대응 잘 되는 이웃 슬라이스에 맞추면 됨" → misalign에 더 관대.
+
+    ▶ 'ctx_center_only=True' (line 129-130, base는 False)
+        중심 슬라이스만 사용 → 2D와 동일 (스택 무시).
+
+  C4-3. 반환
+  --------------------------------------------------------------------------------
+      loss_style_b (스칼라) = agg(CX_0,CX_1,CX_2) × 5
+      backward_G: loss_G += loss_style_b.squeeze()   (line 224)
+
+  ※ mean vs softmin 요약
+      mean    : 3장 평균 → 모든 이웃과 균형 (base 선택)
+      softmin : 최적 1장 위주 → 가장 잘 맞는 슬라이스에 집중, 나머지 관대
+    ablation에서 ctx를 L1/Perceptual로 교체하면 그쪽은 **softmin 고정**이라
+    (mean 옵션 없음) 집계 방식까지 바뀌는 점에 주의 (순수 비교 아님).
+
+
+================================================================================
+C5. Shape 이동 요약 (Contextual, B=1, base)
+================================================================================
+  fake_b                       [1, 1, 128, 128]
+  ref_stack (eff_b)            [1, 3, 128, 128]
+
+  slice별 루프 (i=0,1,2), 각 호출 criterionContextual(ref[:,i:i+1], fake_b):
+    입력 (내부 3채널화)         [1, 3, 128, 128]
+    VGG conv_1_2 예시 feature   [1, 64, 128, 128]
+    crop_quarter 후            [4, 64,  64,  64]
+    cosine 거리 행렬           [4, 64, 64, 64*64]   (I위치 × T위치)
+    contextual_sim             [4, 64, 64, 4096]
+    max over T → CS → -log     스칼라 (층별)
+    6개 층 가중합              CX_i (스칼라)
+
+  집계
+    cx_losses                  [CX_0, CX_1, CX_2]  (스칼라 3개)
+    mean × 5                   loss_style_b (스칼라)
+
+
+================================================================================
+C6. base 설정값 (Contextual)
+================================================================================
+  lambda_style               5
+  criterion                  Contextual_Loss (VGG19)
+  VGG 층                     conv_1_2, conv_2_1, conv_2_2, conv_3_2, conv_4_2, conv_4_4 (각 1.0)
+  distance_type              Cosine_Distance
+  crop_quarter               True
+  b / h                      1.0 / 0.5
+  ctx_agg_mode               mean          (softmin / center_only 대안)
+  ctx_softmin_tau            0.3           (softmin일 때만)
+  ctx_shift_penalty          0.05          (softmin일 때만)
+  use_25d_style / K          True / 3
+  대상(타깃)                 real_b_ref (misalign된 T2 스택)  — GT(real_b) 아님
+
+
+================================================================================
+C7. 두 loss 한 줄 대비
+================================================================================
+  PatchNCE   : T1(real_a) ↔ fake_b, 같은 위치 positive → 구조 보존.
+  Contextual : T2 ref(3 slice) ↔ fake_b, 위치자유 최근접 매칭 → 스타일 전달,
+               2.5D는 slice별로 구해 base는 mean(=3장 평균).
+  base 총합 관련: loss_G = GAN(1) + Contextual_mean(5) + PatchNCE(1.5) [+옵션들]
+================================================================================
+
+
+################################################################################
+################################################################################
+##                                                                            ##
+##             GAN LOSS (Adversarial / lambda_gan) — 원리·구현·Shape          ##
+##                                                                            ##
+################################################################################
+################################################################################
+
+기준 설정: lambda_gan=1, gan_type='lsgan' (LSGAN)
+관련 파일
+  src/losses/gan_loss.py                                 — GANLoss 클래스
+  src/models/components/networks_define.py:461-557       — NLayerDiscriminator (PatchGAN)
+  configs/model/proposed_synthesis.yaml:51-73            — netD_A/B/C 정의
+  src/models/proposed_synthesis_module.py:199-214        — Generator측 GAN loss
+  src/models/base_module_AtoB.py:286-292 (backward_D_basic) — Discriminator측
+  src/models/proposed_synthesis_module.py:602-624        — training_step의 D 업데이트
+
+
+================================================================================
+G0. GAN loss가 무엇을 위한 loss인가 (직관)
+================================================================================
+
+  목적: fake_b 가 "진짜 T2 영상처럼" 보이도록 = 실제 영상의 sharpness·질감을 갖도록.
+
+  왜 필요한가 (다른 loss와의 역할 분담)
+    - Contextual/L1 : 참조와 통계·구조를 맞추지만 결과가 blurry해지기 쉬움.
+    - PatchNCE      : 구조(위치 대응) 보존.
+    - GAN           : "실제 영상 분포"에 속하도록 밀어 → 고주파 디테일·선명도 회복.
+      (앞선 loss ablation에서 GAN을 켜면 sharpness↑, 끄면 SSIM/PSNR↑ 인 트레이드오프
+       가 관측된 것이 이 역할을 반영)
+
+  적대 학습 구조 (2-player)
+    - Discriminator D : "진짜 T2"와 "합성 fake_b"를 구별하도록 학습.
+    - Generator G     : D를 속이도록(=fake를 진짜로 판정하게) 학습.
+    - 두 목표가 반대 → 번갈아 최적화 (본 코드는 manual optimization).
+
+
+================================================================================
+G1. Discriminator 구조 — PatchGAN (networks_define.py:461-557)
+================================================================================
+
+  netD_A = NLayerDiscriminator (configs/model/proposed_synthesis.yaml:51-57)
+      input_nc = 1, ndf = 64, n_layers_D = 3, norm = 'instance', init = 'normal'
+  (netD_B, netD_C도 동일 구조지만 base는 단일 출력이라 netD_A만 사용)
+
+  구성 (no_antialias=False 경로, kernel=4, padding=1)
+      Conv(1→64, k4,s1,p1) → LeakyReLU(0.2) → Downsample(64)
+      Conv(64→128,k4,s1,p1)→ InstanceNorm → LeakyReLU → Downsample(128)
+      Conv(128→256,      ) → InstanceNorm → LeakyReLU → Downsample(256)
+      Conv(256→512,k4,s1,p1)→ InstanceNorm → LeakyReLU
+      Conv(512→1, k4,s1,p1)                          # 1채널 예측 맵
+    → antialias용 Downsample(blur+stride2)로 해상도 축소.
+
+  ★ PatchGAN: 출력이 스칼라(1개)가 아니라 **공간 예측 맵** [B, 1, h_d, w_d].
+     각 위치가 "그 receptive field(패치)가 진짜인가"를 판정.
+     → 전체 이미지 1개 판정이 아니라 여러 국소 패치를 각각 판정 (질감 학습에 유리).
+     예) 입력 128×128 → 대략 [B, 1, 16, 16] 수준의 맵 (다운샘플 3회).
+
+
+================================================================================
+G2. GANLoss 클래스 — LSGAN (gan_loss.py:8-42, 219-265)
+================================================================================
+
+  생성 (proposed_synthesis_module.py:100)
+      self.criterionGAN = GANLoss(gan_type='lsgan')
+      (lambda_nce/style와 달리 GANLoss는 항상 생성됨. 사용 여부는 lambda_gan으로 제어)
+
+  gan_type='lsgan' → 내부 loss = nn.MSELoss (gan_loss.py:29-30)
+    (다른 지원 타입: vanilla=BCEWithLogits, wgan, wgan_softplus, hinge, swd)
+
+  타깃 라벨 (get_target_label, line 219-234)
+      real_label_val = 1.0,  fake_label_val = 0.0
+      target = input.new_ones(input.size()) * target_val
+      → PatchGAN 출력과 **같은 shape의 상수 맵** (전부 1.0 또는 전부 0.0).
+        즉 예측 맵의 모든 위치가 1(또는 0)이 되도록 MSE.
+
+  forward(input, target_is_real, is_disc=False)  (line 236-265)
+      target_label = get_target_label(...)
+      loss = MSELoss(input, target_label)           # lsgan
+      return loss if is_disc else loss * loss_weight  # loss_weight=1.0
+
+  ※ LSGAN 정리: D의 예측 맵을 진짜=1 / 가짜=0 라벨로 MSE 회귀.
+     BCE(vanilla) 대비 gradient가 안정적이고 vanishing이 덜함.
+
+  (gan_loss.py의 pyramid/SWD 관련 메서드들(73-217)은 gan_type='swd' 전용.
+   base는 lsgan이라 전부 미사용 데드코드.)
+
+
+================================================================================
+G3. Generator측 GAN loss (proposed_synthesis_module.py:199-214)
+================================================================================
+      lambda_gan = float(getattr(self.params, 'lambda_gan', 1))   # base=1
+      if self.criterionGAN and lambda_gan > 0:
+          pred_fake  = self.netD_A(fake_b)                    # [B,1,h_d,w_d]
+          loss_gan_b = self.criterionGAN(pred_fake, True) * lambda_gan
+          loss_G += loss_gan_b
+
+    - target_is_real=True → "D가 fake_b를 진짜(1)로 보게" 만들려는 방향.
+      = MSE(D(fake_b), 1)  → G는 이걸 낮추려 함 → fake를 더 진짜처럼.
+    - 여기서 D의 파라미터는 G 스텝에서 업데이트되지 않음
+      (optimizer_G_A.toggle_model() 로 G/F만 grad 흐름, 아래 G5).
+    - fake_b는 detach 안 함 → G로 gradient 전파됨.
+
+  ※ lambda_gan=0 이면 이 블록 스킵 + D optimizer 자체를 안 만듦
+    (configure_optimizers line 658-664). → NoGAN ablation.
+
+
+================================================================================
+G4. Discriminator측 GAN loss (base_module_AtoB.py:286-292)
+================================================================================
+      def backward_D_basic(self, netD, real, fake):
+          pred_real   = netD(real)                            # [B,1,h_d,w_d]
+          loss_D_real = self.criterionGAN(pred_real, True)    # MSE(D(real),1)
+          pred_fake   = netD(fake.detach())                   # ★ fake detach
+          loss_D_fake = self.criterionGAN(pred_fake, False)   # MSE(D(fake),0)
+          loss_D = (loss_D_real + loss_D_fake) * 0.5
+          return loss_D
+
+    - real 은 1로, fake 는 0으로 판정하도록 D 학습.
+    - fake.detach() → D 업데이트 시 G로 gradient 안 흐름 (D만 학습).
+    - 0.5 스케일: real/fake 두 항 평균 (관례적 정규화).
+
+  ★ real 타깃이 무엇인가 (proposed_synthesis_module.py:602-609, _disc_real)
+      real_b_disc = _disc_real(real_b_ref, real_b)
+        use_25d 이고 ref가 K채널이면 → ref_stack의 **중심 슬라이스** 사용
+        = real_b_ref[:, K//2 : K//2+1]                       # [B,1,128,128]
+    → D의 "진짜" 기준도 정렬된 GT(real_b)가 아니라 **misalign된 ref의 중심 슬라이스**.
+      (style/NCE와 마찬가지로 GT는 학습에 안 씀 — 평가 전용)
+
+
+================================================================================
+G5. training_step에서의 순서 (proposed_synthesis_module.py:562-624)
+================================================================================
+  automatic_optimization=False → 수동. use_gan=True(lambda_gan>0)일 때:
+
+    optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
+
+    (1) G/F 업데이트  (line 573-600)
+        with optimizer_G_A.toggle_model():
+            loss_G = backward_G(...)          # G3의 loss_gan_b + style + nce 포함
+            manual_backward(loss_G)
+            clip_gradients(G_A, 0.5, norm); clip_gradients(F_A, 0.5, norm)
+            optimizer_G_A.step(); optimizer_F_A.step(); zero_grad
+
+    (2) D 업데이트   (line 608-624)
+        real_b_disc = ref 중심 슬라이스
+        with optimizer_D_A.toggle_model():
+            loss_D_A = backward_D_A(real_b_disc, fake_b)   # = backward_D_basic
+            manual_backward(loss_D_A)
+            clip_gradients(D_A, 0.5, norm)
+            optimizer_D_A.step(); zero_grad
+
+    → G 먼저, D 나중. 각 스텝마다 1:1 업데이트 (D를 여러 번 돌리지 않음).
+      toggle_model()로 해당 파트에만 grad가 흐르도록 격리.
+
+
+================================================================================
+G6. Shape 이동 요약 (GAN, B=1, base)
+================================================================================
+  fake_b / real_b_disc          [1, 1, 128, 128]
+  netD_A(·) 예측 맵             [1, 1, h_d, w_d]   (PatchGAN, 대략 16×16 수준)
+  target_label (상수 맵)        [1, 1, h_d, w_d]   (전부 1.0 또는 0.0)
+  MSE(pred, target)             스칼라
+    loss_gan_b (G측)            = MSE(D(fake_b), 1) × 1
+    loss_D_A   (D측)            = 0.5*(MSE(D(real),1) + MSE(D(fake.detach()),0))
+
+
+================================================================================
+G7. base 설정값 (GAN)
+================================================================================
+  lambda_gan                 1
+  gan_type                   lsgan  (→ MSELoss)
+  real/fake label            1.0 / 0.0
+  loss_weight                1.0 (G에만 곱함, D는 항상 1.0)
+  netD_A                     NLayerDiscriminator (PatchGAN)
+    input_nc / ndf / n_layers   1 / 64 / 3
+    norm / init                 instance / normal
+  D real 타깃                real_b_ref 중심 슬라이스 (misalign ref, GT 아님)
+  fake 처리                  D 업데이트 시 detach, G 업데이트 시 유지
+  업데이트 비율              G:D = 1:1, gradient clip 0.5(norm)
+
+
+================================================================================
+G8. 세 loss 한 줄 대비 (base)
+================================================================================
+  GAN        : D(fake_b) vs D(ref중심)  — LSGAN(MSE), 실제 분포로 밀어 sharpness↑.
+  Contextual : ref 3slice ↔ fake_b      — 위치자유 최근접, 스타일 전달, base는 mean.
+  PatchNCE   : T1 ↔ fake_b 같은 위치     — 구조(위치대응) 보존.
+  loss_G = GAN(1) + Contextual_mean(5) + PatchNCE(1.5) [+ L1/Perceptual/MIND 옵션]
+  loss_D = 0.5*(MSE(D(ref중심),1) + MSE(D(fake),0))   (lambda_gan>0 일 때만)
+  공통점: 세 loss 모두 정렬 GT(real_b)를 안 쓰고 misalign ref를 타깃으로 사용.
+================================================================================
+문서 끝
