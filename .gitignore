@@ -148,7 +148,10 @@ dmypy.json
 
 # Lightning-Hydra-Template
 configs/local/default.yaml
-/data/
+/data/*
+!/data/IXI/
+/data/IXI/*
+!/data/IXI/IXI_Preprocessing_Pipeline.md
 /logs*/
 /results/
 /dummy/
