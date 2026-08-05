@@ -1,0 +1,44 @@
+# MIGS with a fully convolution-free (pure Transformer) generator backbone, Swin attention.
+#
+# No MIGConv anywhere. Resolution changes use Patch Embedding / Patch Merging /
+# Patch Expanding; every same-resolution block is a CGM-conditioned Swin block.
+# SWA -> CGM guidance is unchanged and still conditions every block.
+#
+#   run: python src/train.py model=proposed_synthesis_pure_swin.yaml ...
+
+defaults:
+  - proposed_synthesis
+  - _self_
+
+name: MIGS_PureSwin
+
+netG_A:
+  backbone_type: pure_transformer    # 'cnn' | 'local_attention' | 'pure_transformer'
+  local_attention_type: swin         # 'swin' | 'natten'
+
+  # ── patch pyramid ─────────────────────────────────────────────────────────
+  pure_patch_size: 2                 # 128 -> 64 at patch embed; total stride to bottleneck = 4*p = 8
+  pure_embed_dim: 96                 # stage dims become [96, 192, 384, 192, 96, 96]
+  # [enc1, enc2, bottleneck, dec1, dec2, refine]
+  pure_stage_depths: [2, 2, 6, 2, 2, 2]
+  pure_num_heads: [3, 6, 12, 6, 3, 3]   # head_dim 32 at every stage
+  pure_mlp_ratio: 4.0                # standard Transformer FFN ratio
+
+  # PatchSampleF shares one Linear across layers, so all taps are projected to
+  # this width. Must equal netF_A.input_nc.
+  pure_nce_proj_dim: 264
+
+  # ── shared local-attention settings ───────────────────────────────────────
+  local_cgm_hidden: 64
+  local_drop: 0.0
+  local_attn_drop: 0.0
+  local_drop_path: 0.1
+  # LayerScale OFF (standard Swin/Swin-Unet). With no MIGConv carrying the signal,
+  # a small LayerScale makes every residual branch ~0 and the backbone a near-identity.
+  pure_layer_scale_init: 0.0
+
+  swin_window_size: 8                # 64/8, 32/8, 16/8, 128/8 all exact
+
+  # only read when local_attention_type=natten
+  natten_kernel_size: 7
+  natten_stage_dilations: [1, 1, 1, 1, 1, 1]

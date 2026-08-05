@@ -321,7 +321,12 @@ def define_G(**kwargs):
         net = DiffusionModelUNet(**kwargs)
     else:
         raise ValueError('This netG_type is not expected')
-    return init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
+    net = init_net(net, kwargs.get('init_type', 'normal'), kwargs.get('init_gain', 0.02), initialize_weights=True)
+    # Let a network restore init that the generic init_net sweep would clobber
+    # (e.g. relative-position bias / identity-initialized modulation heads).
+    if hasattr(net, 'post_init_weights'):
+        net.post_init_weights()
+    return net
 
 
 def define_D(

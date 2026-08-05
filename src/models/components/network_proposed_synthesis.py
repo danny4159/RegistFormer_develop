@@ -13,6 +13,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.models.components.migs_local_attention import MIGLocalTransformerStage2D
+from src.models.components.migs_pure_transformer import MIGSPureTransformerBackbone
+
 
 def get_layer_by_dim(is_3d):
     dim = 3 if is_3d else 2
@@ -28,6 +31,12 @@ def _zero_init_last_conv(seq):
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
             break
+
+
+def _is_sequence(value):
+    """True for list-likes but not strings. Covers omegaconf ListConfig, which is
+    iterable but not a list/tuple instance."""
+    return hasattr(value, '__iter__') and not isinstance(value, (str, bytes))
 
 
 def _safe_entropy(prob, dim, norm_base):
@@ -345,7 +354,24 @@ class MIGSGenerator(nn.Module):
     """MIGS synthesis network G.
 
     Pipeline: fixed_slice + moving_stack -> SliceWindowAttention -> CGM
-              -> 12 MIGConv blocks (StyleConv U-Net) -> synthesized_slice.
+              -> backbone -> synthesized_slice.
+
+    Two backbones are selectable via ``backbone_type``:
+
+    ``cnn`` (default, the reported model)
+        12 MIGConv blocks arranged as a StyleConv U-Net.
+
+    ``local_attention`` (CNN + Transformer hybrid)
+        MIGConv is kept only where the resolution changes (stem / 2 downsamples /
+        2 upsamples); the same-resolution blocks become CGM-conditioned local
+        Transformer stages (Swin windows or NATTEN neighborhoods). Feature
+        resolutions, channel counts, skip additions and the ``encode_only``
+        feature indices are identical to the CNN backbone, so PatchNCE
+        (``nce_layers``, ``netF_A.input_nc``) needs no change.
+
+    The SWA that builds the CGM is orthogonal to this choice: SWA is
+    fixed-vs-moving cross-attention producing the guidance map, while the
+    Transformer stages are self-attention inside the generator features.
     """
 
     def __init__(self, **kwargs):
@@ -385,6 +411,52 @@ class MIGSGenerator(nn.Module):
                 'swa_learnable_temperature', 'ref_condition_temperature_learnable', True
             )
 
+            # ── backbone selection ────────────────────────────────────────────
+            # 'cnn' (default) = the original 12-MIGConv U-Net, unchanged.
+            # 'local_attention' = CNN(resolution changes) + Transformer(same resolution).
+            self.backbone_type = kwargs.get('backbone_type', 'cnn')
+            self.local_attention_type = kwargs.get('local_attention_type', 'swin')
+            self.local_num_heads = int(kwargs.get('local_num_heads', 8))
+            self.local_mlp_ratio = float(kwargs.get('local_mlp_ratio', 2.0))
+            self.local_cgm_hidden = int(kwargs.get('local_cgm_hidden', 64))
+            self.local_drop = float(kwargs.get('local_drop', 0.0))
+            self.local_attn_drop = float(kwargs.get('local_attn_drop', 0.0))
+            self.local_drop_path = float(kwargs.get('local_drop_path', 0.05))
+            _layer_scale = kwargs.get('local_layer_scale_init', 1e-4)
+            self.local_layer_scale_init = 0.0 if _layer_scale is None else float(_layer_scale)
+            # one entry per stage: [enc1, enc2, bottleneck, dec1, dec2, refine]
+            self.local_stage_depths = [
+                int(d) for d in kwargs.get('local_stage_depths', [2, 2, 4, 2, 2, 2])
+            ]
+            self.swin_window_size = int(kwargs.get('swin_window_size', 8))
+            self.natten_kernel_size = int(kwargs.get('natten_kernel_size', 7))
+            # per stage: an int (all blocks) or a per-block sequence, e.g. [1, 1, [1,2,1,2], 1, 1, 1].
+            # Hydra hands these over as ListConfig, so normalize to plain python here.
+            self.natten_stage_dilations = [
+                [int(d) for d in entry] if _is_sequence(entry) else int(entry)
+                for entry in kwargs.get('natten_stage_dilations', [1, 1, 1, 1, 1, 1])
+            ]
+
+            # ── pure-transformer backbone (no MIGConv at all) ─────────────────
+            self.pure_patch_size = int(kwargs.get('pure_patch_size', 2))
+            self.pure_embed_dim = int(kwargs.get('pure_embed_dim', 96))
+            self.pure_stage_depths = [
+                int(d) for d in kwargs.get('pure_stage_depths', [2, 2, 6, 2, 2, 2])
+            ]
+            self.pure_num_heads = [
+                int(h) for h in kwargs.get('pure_num_heads', [3, 6, 12, 6, 3, 3])
+            ]
+            # taps have per-stage channel counts, but PatchSampleF shares one MLP
+            # across layers -> project every tap to this width (== netF_A.input_nc)
+            self.pure_nce_proj_dim = int(kwargs.get('pure_nce_proj_dim', 264))
+            self.pure_mlp_ratio = float(kwargs.get('pure_mlp_ratio', 4.0))
+            # LayerScale has its own default here, independent of the hybrid's.
+            # With no MIGConv to carry the signal, a small LayerScale would make
+            # every residual branch ~0 and the whole backbone a near-identity at
+            # init. Standard Swin / Swin-Unet use no LayerScale, so default off.
+            _pure_ls = kwargs.get('pure_layer_scale_init', 0.0)
+            self.pure_layer_scale_init = 0.0 if _pure_ls is None else float(_pure_ls)
+
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
 
@@ -395,6 +467,45 @@ class MIGSGenerator(nn.Module):
             raise NotImplementedError("guidance_mode='conv_ablation' is 2D-only.")
         if (self.use_multiple_outputs or self.use_triple_outputs) and _use_conv:
             raise NotImplementedError("guidance_mode='conv_ablation' is only supported for single-output mode.")
+
+        if self.backbone_type not in ('cnn', 'local_attention', 'pure_transformer'):
+            raise ValueError(
+                "backbone_type must be 'cnn' (MIGConv U-Net), 'local_attention' "
+                f"(CNN+Transformer hybrid) or 'pure_transformer', got '{self.backbone_type}'"
+            )
+        self.use_local_attention_backbone = self.backbone_type == 'local_attention'
+        self.use_pure_transformer_backbone = self.backbone_type == 'pure_transformer'
+        _transformer_backbone = self.use_local_attention_backbone or self.use_pure_transformer_backbone
+
+        if _transformer_backbone:
+            if self.is_3d:
+                raise NotImplementedError(f"backbone_type='{self.backbone_type}' is 2D-only.")
+            if self.use_multiple_outputs or self.use_triple_outputs:
+                raise NotImplementedError(
+                    f"backbone_type='{self.backbone_type}' is only supported for single-output mode."
+                )
+            if len(self.natten_stage_dilations) != 6:
+                raise ValueError(
+                    "natten_stage_dilations needs 6 entries "
+                    f"[enc1, enc2, bottleneck, dec1, dec2, refine], got {self.natten_stage_dilations}"
+                )
+        if self.use_pure_transformer_backbone:
+            if len(self.pure_stage_depths) != 6:
+                raise ValueError(
+                    "pure_stage_depths needs 6 entries "
+                    f"[enc1, enc2, bottleneck, dec1, dec2, refine], got {self.pure_stage_depths}"
+                )
+            if len(self.pure_num_heads) != 6:
+                raise ValueError(
+                    "pure_num_heads needs 6 entries "
+                    f"[enc1, enc2, bottleneck, dec1, dec2, refine], got {self.pure_num_heads}"
+                )
+        if self.use_local_attention_backbone:
+            if len(self.local_stage_depths) != 6:
+                raise ValueError(
+                    "local_stage_depths needs 6 entries "
+                    f"[enc1, enc2, bottleneck, dec1, dec2, refine], got {self.local_stage_depths}"
+                )
 
         Conv, _, _ = get_layer_by_dim(self.is_3d)
 
@@ -464,31 +575,71 @@ class MIGSGenerator(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-        # 12 MIGConv blocks (stem + 4 enc/dec stages + refinement), CGM-modulated throughout.
+        # MIGConv blocks. The stem and the four resolution-changing blocks
+        # (conv11/conv21 down, conv41/conv51 up) exist for both backbones; the
+        # same-resolution blocks (conv12/22/31/32/42/52/6) exist only for the CNN
+        # backbone, where they complete the 12-MIGConv U-Net.
+        # NOTE: the CNN branch must keep its original definition order -- resuming a
+        # checkpoint restores Adam state by parameter index, not by name.
+        _cnn = self.backbone_type == 'cnn'
+
+        if self.use_pure_transformer_backbone:
+            self._build_pure_transformer_backbone(Conv)
+            return
+
         self.conv0 = MIGConv(self.input_nc, self.feat_ch * ch, kernel_size=3,
                                                  activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv11 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 downsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv12 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+        if _cnn:
+            self.conv12 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+                                    downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv21 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 downsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv22 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv31 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv32 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+        if _cnn:
+            self.conv22 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+                                    downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+            self.conv31 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+                                    downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+            self.conv32 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+                                    downsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv41 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3, #feat_ch *4 stays unchanged
                                 upsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv42 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+        if _cnn:
+            self.conv42 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+                                    upsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
         self.conv51 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
                                 upsample=True, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv52 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                upsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
-        self.conv6 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
-                                activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+        if _cnn:
+            self.conv52 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+                                    upsample=False, activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+            self.conv6 = MIGConv(self.feat_ch * ch, self.feat_ch * ch, kernel_size=3,
+                                    activate=True, ch=ch, is_3d=self.is_3d, noise_independent=self.noise_independent, )
+        else:
+            def _make_local_stage(stage_index):
+                return MIGLocalTransformerStage2D(
+                    dim=self.feat_ch * ch,
+                    depth=self.local_stage_depths[stage_index],
+                    num_heads=self.local_num_heads,
+                    attention_type=self.local_attention_type,
+                    window_size=self.swin_window_size,
+                    natten_kernel_size=self.natten_kernel_size,
+                    natten_dilation=self.natten_stage_dilations[stage_index],
+                    mlp_ratio=self.local_mlp_ratio,
+                    cgm_channels=1,
+                    cgm_hidden=self.local_cgm_hidden,
+                    drop=self.local_drop,
+                    attn_drop=self.local_attn_drop,
+                    drop_path=self.local_drop_path,
+                    layer_scale_init=self.local_layer_scale_init,
+                )
+
+            self.enc1_stage = _make_local_stage(0)
+            self.enc2_stage = _make_local_stage(1)
+            self.bottleneck_stage = _make_local_stage(2)
+            self.dec1_stage = _make_local_stage(3)
+            self.dec2_stage = _make_local_stage(4)
+            self.refine_stage = _make_local_stage(5)
 
         # -------------------------------------------------------------------------
         # Legacy multi-output / triple-output compatibility paths
@@ -523,6 +674,56 @@ class MIGSGenerator(nn.Module):
             self.conv_final_2 = Conv(self.feat_ch, self.output_nc // 2, kernel_size=3, padding=1)
 
         self.conv_final = Conv(self.feat_ch * ch, self.output_nc, kernel_size=3, padding=1)
+
+    def _build_pure_transformer_backbone(self, Conv):
+        """Convolution-free backbone: no MIGConv, no conv up/downsampling.
+
+        Only two convolutions remain and neither is part of the backbone: the
+        patch-embedding projection (a strided non-overlapping patch projection,
+        mathematically a per-patch linear map) and the final output head.
+        """
+        self.pure_backbone = MIGSPureTransformerBackbone(
+            in_nc=self.input_nc,
+            embed_dim=self.pure_embed_dim,
+            patch_size=self.pure_patch_size,
+            stage_depths=self.pure_stage_depths,
+            stage_num_heads=self.pure_num_heads,
+            attention_type=self.local_attention_type,
+            window_size=self.swin_window_size,
+            natten_kernel_size=self.natten_kernel_size,
+            natten_stage_dilations=self.natten_stage_dilations,
+            mlp_ratio=self.pure_mlp_ratio,
+            cgm_channels=1,
+            cgm_hidden=self.local_cgm_hidden,
+            drop=self.local_drop,
+            attn_drop=self.local_attn_drop,
+            drop_path=self.local_drop_path,
+            layer_scale_init=self.pure_layer_scale_init,
+        )
+
+        # PatchSampleF shares a single Linear across layers, so every tap has to
+        # arrive with the same channel count. 1x1 projections, encode_only path only.
+        self.nce_proj = nn.ModuleList([
+            nn.Conv2d(dim, self.pure_nce_proj_dim, kernel_size=1)
+            for dim in self.pure_backbone.tap_dims
+        ])
+
+        # Output head, fed by the full-resolution refine stage. 1x1 (per-pixel
+        # linear, as in Swin-Unet) rather than the CNN backbone's 3x3, so no
+        # spatial kernel is reintroduced after the Transformer stages.
+        self.conv_final = Conv(self.pure_backbone.stage_dims[-1], self.output_nc,
+                               kernel_size=1, padding=0)
+
+    def post_init_weights(self):
+        """Re-apply init that the generic `init_net` pass would otherwise clobber.
+
+        `networks_define.init_net` re-initializes every Conv/Linear with
+        normal(0, 0.02); the local-attention blocks need their relative-position
+        bias trunc-normal and their CGM modulation head zeroed (identity start).
+        """
+        for module in self.modules():
+            if module is not self and hasattr(module, 'reset_special_parameters'):
+                module.reset_special_parameters()
 
     def _aggregate_moving_stack_legacy(self, moving_inputs):
         """2.5D: [B, num_streams*K, H, W] -> [B, num_streams, H, W]. Used by the is_3d
@@ -609,29 +810,63 @@ class MIGSGenerator(nn.Module):
             )
 
         # SWA: construct a coarse CGM from fixed anatomy and moving contrast.
-        # The same CGM spatially modulates all 12 MIGConv blocks.
+        # The same CGM spatially modulates every backbone block.
+        if self.use_pure_transformer_backbone:
+            (stem_feat, enc1_feat, enc2_feat, bottleneck_feat,
+             dec1_feat, dec2_feat, refined_feat) = self.pure_backbone(fixed_slice, cgm)
+
+            if encode_only:
+                taps = [stem_feat, enc1_feat, enc2_feat, bottleneck_feat,
+                        dec1_feat, dec2_feat, refined_feat]
+                # per-tap 1x1 projection to a common width: PatchSampleF shares one
+                # Linear across layers, so all taps must arrive with equal channels
+                return [self.nce_proj[i](taps[i]) for i in layers]
+            return torch.tanh(self.conv_final(refined_feat))
+
         stem_feat = self.conv0(fixed_slice, cgm)
 
-        # Encoder
-        enc1_feat = self.conv11(stem_feat, cgm)
-        enc1_feat = self.conv12(enc1_feat, cgm)
+        if self.use_local_attention_backbone:
+            # Encoder: MIGConv changes the resolution, the Transformer stage
+            # refines the features at that resolution.
+            enc1_feat = self.conv11(stem_feat, cgm)                  # 128 -> 64
+            enc1_feat = self.enc1_stage(enc1_feat, cgm)
 
-        enc2_feat = self.conv21(enc1_feat, cgm)
-        enc2_feat = self.conv22(enc2_feat, cgm)
+            enc2_feat = self.conv21(enc1_feat, cgm)                  # 64 -> 32
+            enc2_feat = self.enc2_stage(enc2_feat, cgm)
 
-        # Bottleneck
-        bottleneck_feat = self.conv31(enc2_feat, cgm)
-        bottleneck_feat = self.conv32(bottleneck_feat, cgm)
+            # Bottleneck
+            bottleneck_feat = self.bottleneck_stage(enc2_feat, cgm)  # 32
 
-        # Decoder with element-wise skip addition
-        dec1_feat = self.conv41(bottleneck_feat + enc2_feat, cgm)
-        dec1_feat = self.conv42(dec1_feat, cgm)
+            # Decoder with element-wise skip addition
+            dec1_feat = self.conv41(bottleneck_feat + enc2_feat, cgm)  # 32 -> 64
+            dec1_feat = self.dec1_stage(dec1_feat, cgm)
 
-        dec2_feat = self.conv51(dec1_feat + enc1_feat, cgm)
-        dec2_feat = self.conv52(dec2_feat, cgm)
+            dec2_feat = self.conv51(dec1_feat + enc1_feat, cgm)        # 64 -> 128
+            dec2_feat = self.dec2_stage(dec2_feat, cgm)
 
-        # Final refinement
-        refined_feat = self.conv6(dec2_feat + stem_feat, cgm)
+            # Final refinement
+            refined_feat = self.refine_stage(dec2_feat + stem_feat, cgm)
+        else:
+            # Encoder
+            enc1_feat = self.conv11(stem_feat, cgm)
+            enc1_feat = self.conv12(enc1_feat, cgm)
+
+            enc2_feat = self.conv21(enc1_feat, cgm)
+            enc2_feat = self.conv22(enc2_feat, cgm)
+
+            # Bottleneck
+            bottleneck_feat = self.conv31(enc2_feat, cgm)
+            bottleneck_feat = self.conv32(bottleneck_feat, cgm)
+
+            # Decoder with element-wise skip addition
+            dec1_feat = self.conv41(bottleneck_feat + enc2_feat, cgm)
+            dec1_feat = self.conv42(dec1_feat, cgm)
+
+            dec2_feat = self.conv51(dec1_feat + enc1_feat, cgm)
+            dec2_feat = self.conv52(dec2_feat, cgm)
+
+            # Final refinement
+            refined_feat = self.conv6(dec2_feat + stem_feat, cgm)
 
         # -------------------------------------------------------------------------
         # Legacy multi-output / triple-output compatibility paths

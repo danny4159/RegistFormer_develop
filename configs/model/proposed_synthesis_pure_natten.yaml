@@ -1,0 +1,41 @@
+# MIGS with a fully convolution-free (pure Transformer) generator backbone,
+# NATTEN neighborhood attention. Identical to proposed_synthesis_pure_swin.yaml
+# except local_attention_type.
+#
+# NOTE the bottleneck runs at H/(4*patch_size) = 16x16 for a 128x128 input, and
+# NATTEN requires H,W >= kernel_size*dilation -- keep natten_kernel_size <= 16.
+#
+# Requires the `natten` package (conda env `natten_py310`).
+#
+#   run: python src/train.py model=proposed_synthesis_pure_natten.yaml ...
+
+defaults:
+  - proposed_synthesis
+  - _self_
+
+name: MIGS_PureNatten
+
+netG_A:
+  backbone_type: pure_transformer
+  local_attention_type: natten
+
+  pure_patch_size: 2
+  pure_embed_dim: 96
+  pure_stage_depths: [2, 2, 6, 2, 2, 2]
+  pure_num_heads: [3, 6, 12, 6, 3, 3]
+  pure_mlp_ratio: 4.0
+  pure_nce_proj_dim: 264
+
+  local_cgm_hidden: 64
+  local_drop: 0.0
+  local_attn_drop: 0.0
+  local_drop_path: 0.1
+  # LayerScale OFF (standard Swin/Swin-Unet). With no MIGConv carrying the signal,
+  # a small LayerScale makes every residual branch ~0 and the backbone a near-identity.
+  pure_layer_scale_init: 0.0
+
+  natten_kernel_size: 7
+  natten_stage_dilations: [1, 1, 1, 1, 1, 1]
+
+  # unused when local_attention_type=natten
+  swin_window_size: 8

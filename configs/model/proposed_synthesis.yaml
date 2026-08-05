@@ -39,6 +39,7 @@ netG_A:
   swa_temperature_init: 10.0      # initial temperature for QK softmax (higher=sharper; 3.0=soft, 10.0=default, 30.0=sharp)
   swa_learnable_temperature: true # false: freeze QK temperature at init (prevent collapse toward uniform)
   swa_downsampling_factor: 8      # CGM downsample factor: 16 (1/16) | 8 | 4 | 2 | 1 (submitted model uses 8)
+  backbone_type: cnn              # 'cnn' (reported 12-MIGConv U-Net) | 'local_attention' (CNN+Transformer hybrid, see proposed_synthesis_swin/natten.yaml)
   # init_type: 'kaiming'
 
 netD_A:

@@ -1,0 +1,41 @@
+# MIGS with the CNN + Transformer hybrid backbone, NATTEN neighborhood attention.
+#
+# Identical to proposed_synthesis_swin.yaml except local_attention_type. NATTEN
+# uses a sliding query-centred neighborhood instead of non-overlapping windows,
+# so no shifted-window mechanism is needed.
+#
+# Requires the `natten` package matching this environment's torch/CUDA build
+# (conda env `natten_py310`: natten 0.17.5 / torch 2.6.0+cu124).
+#
+#   run: python src/train.py model=proposed_synthesis_natten.yaml ...
+
+defaults:
+  - proposed_synthesis
+  - _self_
+
+name: MIGS_Natten
+
+netG_A:
+  # ── Generator backbone ────────────────────────────────────────────────────
+  backbone_type: local_attention
+  local_attention_type: natten
+
+  local_num_heads: 8                 # feat_ch 264 / 8 heads -> head_dim 33
+  local_mlp_ratio: 2.0
+  local_cgm_hidden: 64
+
+  local_drop: 0.0
+  local_attn_drop: 0.0
+  local_drop_path: 0.05
+  local_layer_scale_init: 0.0001
+
+  # [enc1(1/2), enc2(1/4), bottleneck(1/4), dec1(1/2), dec2(1/1), refine(1/1)]
+  local_stage_depths: [2, 2, 4, 2, 2, 2]
+
+  natten_kernel_size: 7              # each query attends to its 7x7 neighborhood
+  # per-stage dilation; a list widens the receptive field within a stage
+  # (DiNAT style), e.g. bottleneck: [1, 2, 1, 2]. Needs H,W >= kernel*dilation.
+  natten_stage_dilations: [1, 1, 1, 1, 1, 1]
+
+  # unused when local_attention_type=natten
+  swin_window_size: 8

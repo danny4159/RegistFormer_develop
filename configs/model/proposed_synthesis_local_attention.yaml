@@ -1,0 +1,31 @@
+# Shallow hybrid-backbone config for smoke tests (shape / forward / backward /
+# PatchNCE / GPU-memory checks). NOT a final experiment setting: depth-1 stages
+# contain no shifted (SW-MSA) block, so Swin windows never exchange information.
+#
+#   run: python src/train.py model=proposed_synthesis_local_attention.yaml \
+#          model.netG_A.local_attention_type=swin trainer.fast_dev_run=true
+
+defaults:
+  - proposed_synthesis
+  - _self_
+
+name: MIGS_LocalAttention_Smoke
+
+netG_A:
+  backbone_type: local_attention
+  local_attention_type: swin         # 'swin' | 'natten'
+
+  local_num_heads: 8
+  local_mlp_ratio: 2.0
+  local_cgm_hidden: 64
+
+  local_drop: 0.0
+  local_attn_drop: 0.0
+  local_drop_path: 0.0
+  local_layer_scale_init: 0.0001
+
+  local_stage_depths: [1, 1, 2, 1, 1, 1]
+
+  swin_window_size: 8
+  natten_kernel_size: 7
+  natten_stage_dilations: [1, 1, 1, 1, 1, 1]

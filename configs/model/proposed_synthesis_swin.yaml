@@ -1,0 +1,37 @@
+# MIGS with the CNN + Transformer hybrid backbone, Swin (shifted-window) attention.
+#
+# Everything except the generator backbone is inherited from proposed_synthesis.yaml:
+# SWA still builds the [B,1,H/8,W/8] CGM, and MIGConv still handles every
+# resolution change. Only the same-resolution blocks become Transformer stages.
+#
+#   run: python src/train.py model=proposed_synthesis_swin.yaml ...
+
+defaults:
+  - proposed_synthesis
+  - _self_
+
+name: MIGS_Swin
+
+netG_A:
+  # ── Generator backbone ────────────────────────────────────────────────────
+  backbone_type: local_attention     # 'cnn' (original) | 'local_attention'
+  local_attention_type: swin         # 'swin' | 'natten'
+
+  local_num_heads: 8                 # feat_ch 264 / 8 heads -> head_dim 33
+  local_mlp_ratio: 2.0               # Conv-FFN hidden = 264 * 2 = 528
+  local_cgm_hidden: 64               # hidden width of the per-block CGM gamma/beta encoder
+
+  local_drop: 0.0
+  local_attn_drop: 0.0
+  local_drop_path: 0.05              # stochastic depth on the residual branches
+  local_layer_scale_init: 0.0001     # LayerScale init (0 or null disables it)
+
+  # depth per stage: [enc1(1/2), enc2(1/4), bottleneck(1/4), dec1(1/2), dec2(1/1), refine(1/1)]
+  # a stage needs depth >= 2 to hold a full W-MSA + SW-MSA pair
+  local_stage_depths: [2, 2, 4, 2, 2, 2]
+
+  swin_window_size: 8                # 128/8=16, 64/8=8, 32/8=4 windows per axis
+
+  # only read when local_attention_type=natten (kept here so both configs stay comparable)
+  natten_kernel_size: 7
+  natten_stage_dilations: [1, 1, 1, 1, 1, 1]
