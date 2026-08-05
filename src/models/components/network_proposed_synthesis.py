@@ -146,8 +146,20 @@ class SliceWindowAttention(nn.Module):
             torch.tensor(dist, dtype=torch.float32).view(1, 1, window_size * window_size, 1, 1),
         )
 
-        self.q_proj = nn.Conv2d(1, qk_channels, 1)
-        self.k_proj = nn.Conv2d(1, qk_channels, 1)
+        # Q/K use a 3x3 conv (with an extra 3x3 conv on top, LeakyReLU in between) rather than
+        # a plain 1x1 conv, so each query/key incorporates local spatial context before the
+        # window-attention score is computed. This was validated as an improvement over the
+        # 1x1-conv baseline (better selectivity + test SSIM/PSNR/LPIPS/sharpness).
+        self.q_proj = nn.Sequential(
+            nn.Conv2d(1, qk_channels, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(qk_channels, qk_channels, 3, padding=1),
+        )
+        self.k_proj = nn.Sequential(
+            nn.Conv2d(1, qk_channels, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(qk_channels, qk_channels, 3, padding=1),
+        )
         if not self.use_direct_attn:
             self.v_proj = nn.Conv2d(1, qk_channels, 1)
             self.out_proj = nn.Sequential(
