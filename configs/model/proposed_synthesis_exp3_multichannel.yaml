@@ -1,0 +1,29 @@
+# EXPERIMENT 3 — Multi-channel guidance tokens, with the raw-appearance branch kept
+#
+# Builds on experiment 2. The guidance becomes Cg-channel instead of 1-channel, so
+# it can carry more than a single contrast scalar per location.
+#
+# The safeguard from the design note is implemented: the raw moving appearance is
+# NOT replaced by a learned value. Both branches are aggregated with the SAME
+# attention weights and then combined:
+#
+#     G_raw     = attn @ (raw moving patch intensity)     [B,1,h,w]
+#     G_learned = attn @ (learned moving token value)     [B,Cg-1,h,w]
+#     G         = Linear(concat(G_raw, G_learned))        [B,Cg,h,w]
+#
+# so channel 0 of the pre-projection guidance is still literally the attended raw
+# moving contrast. If quality drops vs experiment 2, the extra channels are the
+# suspect, not the correspondence mechanism.
+#
+#   run: python src/train.py model=proposed_synthesis_exp3_multichannel.yaml ...
+
+defaults:
+  - proposed_synthesis_exp2_token_swa
+  - _self_
+
+name: MIGS_Exp3_MultiChannelGuidance
+
+netG_A:
+  token_swa_guidance_dim: 32      # >1 enables the learned value branch
+                                  # pyramid then gives 32 / 64 / 128 per stage level
+  token_swa_multiscale: true

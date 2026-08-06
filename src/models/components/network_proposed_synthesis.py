@@ -15,6 +15,10 @@ import torch.nn.functional as F
 
 from src.models.components.migs_local_attention import MIGLocalTransformerStage2D
 from src.models.components.migs_pure_transformer import MIGSPureTransformerBackbone
+from src.models.components.migs_token_guidance import (
+    GuidancePyramid,
+    TokenizedSliceWindowAttention,
+)
 
 
 def get_layer_by_dim(is_3d):
@@ -469,6 +473,21 @@ class MIGSGenerator(nn.Module):
             _pure_ls = kwargs.get('pure_layer_scale_init', 0.0)
             self.pure_layer_scale_init = 0.0 if _pure_ls is None else float(_pure_ls)
 
+            # ── conditioning style (experiment 1) ────────────────────────────
+            # 'cgm_norm'   : per-LayerNorm gamma/beta head, no gate (default)
+            # 'adaln_zero' : one token-wise MLP -> scale/shift/gate for attn & FFN
+            self.pure_modulation = kwargs.get('pure_modulation', 'cgm_norm')
+            self.adaln_gate_zero_init = bool(kwargs.get('adaln_gate_zero_init', True))
+
+            # ── tokenized guidance encoder (experiments 2 & 3) ───────────────
+            self.token_swa_patch_size = int(kwargs.get('token_swa_patch_size', 2))
+            self.token_swa_token_dim = int(kwargs.get('token_swa_token_dim', 96))
+            self.token_swa_qk_dim = int(kwargs.get('token_swa_qk_dim', 32))
+            self.token_swa_window = int(kwargs.get('token_swa_window', 3))
+            # 1 => raw-appearance CGM (exp 2); >1 => multi-channel guidance (exp 3)
+            self.token_swa_guidance_dim = int(kwargs.get('token_swa_guidance_dim', 1))
+            self.token_swa_multiscale = bool(kwargs.get('token_swa_multiscale', True))
+
         except KeyError as e:
             raise ValueError(f"Missing required parameter: {str(e)}")
 
@@ -501,6 +520,23 @@ class MIGSGenerator(nn.Module):
                     "natten_stage_dilations needs 6 entries "
                     f"[enc1, enc2, bottleneck, dec1, dec2, refine], got {self.natten_stage_dilations}"
                 )
+        self.use_token_guidance = self.guidance_mode == 'token_swa'
+        if self.use_token_guidance:
+            # multi-channel guidance and a guidance pyramid are incompatible with
+            # MIGConv, whose modulation branches on style.shape[1] in {1,2,3}
+            if not self.use_pure_transformer_backbone:
+                raise NotImplementedError(
+                    "guidance_mode='token_swa' requires backbone_type='pure_transformer' "
+                    "(MIGConv only accepts a 1-channel CGM)."
+                )
+            if not self.use_25d_style:
+                raise NotImplementedError("guidance_mode='token_swa' requires use_25d_style=True.")
+            if self.token_swa_guidance_dim > 1 and self.pure_modulation != 'adaln_zero':
+                raise ValueError(
+                    "token_swa_guidance_dim>1 needs pure_modulation='adaln_zero' "
+                    "(the cgm_norm head is built for the 1-channel CGM)."
+                )
+
         if self.use_pure_transformer_backbone:
             if len(self.pure_stage_depths) != 6:
                 raise ValueError(
@@ -551,7 +587,10 @@ class MIGSGenerator(nn.Module):
         self.ref_conditioner_2d = None
         self.ref_conditioner_25d = None
         self.ref_conditioner_conv = None
-        self._use_ref_conditioner = not (self.use_multiple_outputs or self.use_triple_outputs)
+        # token_swa replaces the pixel-SWA conditioner entirely
+        self._use_ref_conditioner = not (
+            self.use_multiple_outputs or self.use_triple_outputs or self.use_token_guidance
+        )
         if self._use_ref_conditioner:
             if _use_conv:
                 self.ref_conditioner_conv = ConvGuidanceAblation(
@@ -694,6 +733,34 @@ class MIGSGenerator(nn.Module):
         patch-embedding projection (a strided non-overlapping patch projection,
         mathematically a per-patch linear map) and the final output head.
         """
+        # ── guidance encoder (experiments 2 & 3) ─────────────────────────────
+        self.token_guidance = None
+        self.guidance_pyramid = None
+        guidance_ch_per_stage = None
+        if self.use_token_guidance:
+            self.token_guidance = TokenizedSliceWindowAttention(
+                ref_stack_size=self.ref_stack_size,
+                patch_size=self.token_swa_patch_size,
+                token_dim=self.token_swa_token_dim,
+                qk_dim=self.token_swa_qk_dim,
+                window_size=self.token_swa_window,
+                guidance_dim=self.token_swa_guidance_dim,
+                center_slice_bias=self.swa_center_slice_bias,
+                temperature_init=self.swa_temperature_init,
+                learnable_temperature=self.swa_learnable_temperature,
+                use_cosine_similarity=self.swa_use_cosine_similarity,
+            )
+            if self.token_swa_multiscale:
+                self.guidance_pyramid = GuidancePyramid(
+                    dim=self.token_swa_guidance_dim, num_levels=3,
+                )
+                dims = self.guidance_pyramid.dims
+                guidance_ch_per_stage = [
+                    dims[l] for l in MIGSPureTransformerBackbone.STAGE_GUIDANCE_LEVEL
+                ]
+            else:
+                guidance_ch_per_stage = [self.token_swa_guidance_dim] * 6
+
         self.pure_backbone = MIGSPureTransformerBackbone(
             in_nc=self.input_nc,
             embed_dim=self.pure_embed_dim,
@@ -711,6 +778,9 @@ class MIGSGenerator(nn.Module):
             attn_drop=self.local_attn_drop,
             drop_path=self.local_drop_path,
             layer_scale_init=self.pure_layer_scale_init,
+            modulation=self.pure_modulation,
+            gate_zero_init=self.adaln_gate_zero_init,
+            guidance_channels_per_stage=guidance_ch_per_stage,
         )
 
         # PatchSampleF shares a single Linear across layers, so every tap has to
@@ -768,6 +838,20 @@ class MIGSGenerator(nn.Module):
         (guidance_mode='conv_ablation') or Slice-Window Attention (guidance_mode='swa',
         the reported default).
         """
+        if self.use_token_guidance:
+            # Tokenized SWA: patch tokens give Q/K, raw moving patches give V.
+            # Returns a guidance pyramid (one level per generator stage group).
+            moving_stack = self._select_moving_stack(moving_inputs)              # [B,K,H,W]
+            guidance, stats = self.token_guidance(
+                fixed_slice=fixed_slice, moving_stack=moving_stack
+            )
+            if not encode_only:
+                self._last_ref_condition_stats = stats
+                self._last_attn_entropy_for_loss = self.token_guidance.last_attn_entropy
+            if self.guidance_pyramid is not None:
+                return self.guidance_pyramid(guidance)
+            return guidance
+
         cgm_h, cgm_w = self._get_cgm_size(fixed_slice)
 
         if not self._use_ref_conditioner:

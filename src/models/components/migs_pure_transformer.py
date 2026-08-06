@@ -123,11 +123,17 @@ class MIGSPureTransformerBackbone(nn.Module):
     # channel multiplier per stage: [enc1, enc2, bottleneck, dec1, dec2, refine]
     STAGE_MULTIPLIERS = (1, 2, 4, 2, 1, 1)
 
+    # which guidance pyramid level conditions each stage
+    # [enc1, enc2, bottleneck, dec1, dec2, refine]
+    STAGE_GUIDANCE_LEVEL = (0, 1, 2, 1, 0, 0)
+
     def __init__(self, in_nc, embed_dim, patch_size, stage_depths, stage_num_heads,
                  attention_type='swin', window_size=8, natten_kernel_size=7,
                  natten_stage_dilations=(1, 1, 1, 1, 1, 1), mlp_ratio=4.0,
                  cgm_channels=1, cgm_hidden=64, drop=0.0, attn_drop=0.0,
-                 drop_path=0.1, layer_scale_init=1e-4):
+                 drop_path=0.1, layer_scale_init=1e-4,
+                 modulation='cgm_norm', gate_zero_init=True,
+                 guidance_channels_per_stage=None):
         super().__init__()
         if len(stage_depths) != 6:
             raise ValueError(f"stage_depths needs 6 entries, got {len(stage_depths)}")
@@ -151,6 +157,15 @@ class MIGSPureTransformerBackbone(nn.Module):
 
         self.patch_embed = PatchEmbed2D(in_nc, C, self.patch_size)
 
+        # guidance channels may differ per stage when a guidance pyramid is used
+        if guidance_channels_per_stage is None:
+            guidance_channels_per_stage = [cgm_channels] * 6
+        elif len(guidance_channels_per_stage) != 6:
+            raise ValueError(
+                f"guidance_channels_per_stage needs 6 entries, got {guidance_channels_per_stage}"
+            )
+        self.guidance_channels_per_stage = list(guidance_channels_per_stage)
+
         def _stage(index, dim):
             return MIGLocalTransformerStage2D(
                 dim=dim,
@@ -161,8 +176,10 @@ class MIGSPureTransformerBackbone(nn.Module):
                 natten_kernel_size=natten_kernel_size,
                 natten_dilation=natten_stage_dilations[index],
                 mlp_ratio=mlp_ratio,
-                cgm_channels=cgm_channels,
+                cgm_channels=self.guidance_channels_per_stage[index],
                 cgm_hidden=cgm_hidden,
+                modulation=modulation,
+                gate_zero_init=gate_zero_init,
                 drop=drop,
                 attn_drop=attn_drop,
                 drop_path=drop_path,
@@ -196,7 +213,15 @@ class MIGSPureTransformerBackbone(nn.Module):
         # tap dims in tap order: [stem, enc1, enc2, bottleneck, dec1, dec2, refined]
         self.tap_dims = [C, dims[0], dims[1], dims[2], dims[3], dims[4], dims[5]]
 
+    def _stage_guidance(self, guidance):
+        """Accept a single map or a guidance pyramid; return one entry per stage."""
+        if torch.is_tensor(guidance):
+            return [guidance] * 6
+        levels = list(guidance)
+        return [levels[min(l, len(levels) - 1)] for l in self.STAGE_GUIDANCE_LEVEL]
+
     def forward(self, fixed_slice, cgm):
+        g = self._stage_guidance(cgm)
         B, _, H, W = fixed_slice.shape
 
         # pad so every merge/expand is exact; the output is cropped back at the end
@@ -208,14 +233,14 @@ class MIGSPureTransformerBackbone(nn.Module):
 
         stem_feat = self.patch_embed(fixed_slice)                         # [B,C,H/p,W/p]
 
-        enc1_feat = self.enc1_stage(stem_feat, cgm)                       # [B,C,H/p,W/p]
-        enc2_feat = self.enc2_stage(self.down1(enc1_feat), cgm)           # [B,2C,H/2p,W/2p]
-        bottleneck_feat = self.bottleneck_stage(self.down2(enc2_feat), cgm)  # [B,4C,H/4p,W/4p]
+        enc1_feat = self.enc1_stage(stem_feat, g[0])                      # [B,C,H/p,W/p]
+        enc2_feat = self.enc2_stage(self.down1(enc1_feat), g[1])          # [B,2C,H/2p,W/2p]
+        bottleneck_feat = self.bottleneck_stage(self.down2(enc2_feat), g[2])  # [B,4C,H/4p,W/4p]
 
         # additive skips, mirroring the CNN backbone
-        dec1_feat = self.dec1_stage(self.up1(bottleneck_feat) + enc2_feat, cgm)   # [B,2C,H/2p,..]
-        dec2_feat = self.dec2_stage(self.up2(dec1_feat) + enc1_feat, cgm)         # [B,C,H/p,..]
-        refined_feat = self.refine_stage(self.final_expand(dec2_feat + stem_feat), cgm)  # [B,C,H,W]
+        dec1_feat = self.dec1_stage(self.up1(bottleneck_feat) + enc2_feat, g[3])  # [B,2C,H/2p,..]
+        dec2_feat = self.dec2_stage(self.up2(dec1_feat) + enc1_feat, g[4])        # [B,C,H/p,..]
+        refined_feat = self.refine_stage(self.final_expand(dec2_feat + stem_feat), g[5])  # [B,C,H,W]
 
         if pad_b or pad_r:
             refined_feat = refined_feat[:, :, :H, :W].contiguous()

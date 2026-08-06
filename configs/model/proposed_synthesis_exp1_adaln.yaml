@@ -1,0 +1,24 @@
+# EXPERIMENT 1 — Pure Transformer backbone + existing pixel SWA + Spatial AdaLN-Zero
+#
+# Question: in a convolution-free backbone, is the existing 1-channel CGM still an
+# effective conditioning signal when injected the Transformer-native way?
+#
+# CGM *generation* is unchanged (pixel SWA, raw moving intensities, 1 channel).
+# Only the *modulation* changes:
+#   before: per-LayerNorm conv head -> gamma/beta, no gate
+#   now   : one token-wise MLP -> scale/shift/gate for attention AND FFN separately
+#
+#   run: python src/train.py model=proposed_synthesis_exp1_adaln.yaml ...
+
+defaults:
+  - proposed_synthesis_pure_natten
+  - _self_
+
+name: MIGS_Exp1_AdaLN
+
+netG_A:
+  # guidance_mode stays 'swa' (inherited) — the CGM producer is untouched
+  pure_modulation: adaln_zero     # 'cgm_norm' (previous) | 'adaln_zero'
+  # adaLN-Zero: every block starts as an exact identity and the gates grow from
+  # gradient. Set false to start with a small non-zero gate instead.
+  adaln_gate_zero_init: true

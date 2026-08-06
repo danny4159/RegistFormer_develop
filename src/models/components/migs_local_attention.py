@@ -136,6 +136,64 @@ class CGMAdaptiveLayerNorm2D(nn.Module):
         return normalized * (1.0 + gamma) + beta
 
 
+class SpatialAdaLNModulation(nn.Module):
+    """DiT-style adaLN-Zero conditioning, kept spatial (per-token) and conv-free.
+
+    One shared token-wise MLP turns the guidance map into SIX per-pixel tensors::
+
+        scale_attn, shift_attn, gate_attn, scale_ffn, shift_ffn, gate_ffn
+
+    so attention and FFN are modulated independently, and each residual branch
+    gets its own learned gate. All layers are 1x1 (per-pixel linear), so no
+    spatial kernel is introduced.
+
+    Difference from :class:`CGMAdaptiveLayerNorm2D`: that one has a separate
+    modulation head per LayerNorm and no gate. Here a single head drives both,
+    which is what makes the gate meaningful (it scales the whole branch, not the
+    normalized activations).
+
+    ``gate_zero_init=True`` (adaLN-Zero) starts every block as an exact identity
+    -- the guidance, attention and FFN contribute nothing until the gates grow.
+    Gradients still reach the gate weights, so they do grow; this is the
+    published DiT recipe. Set it False to start with a small non-zero gate if you
+    want the backbone to contribute from step 0.
+    """
+
+    N_PARAMS = 6
+
+    def __init__(self, guidance_channels, dim, hidden=64, gate_zero_init=True):
+        super().__init__()
+        self.dim = dim
+        self.gate_zero_init = bool(gate_zero_init)
+        self.fc1 = nn.Conv2d(guidance_channels, hidden, kernel_size=1)
+        self.act = nn.SiLU()
+        self.fc2 = nn.Conv2d(hidden, self.N_PARAMS * dim, kernel_size=1)
+        self.reset_special_parameters()
+
+    def reset_special_parameters(self):
+        # guidance can be a single channel, for which init_net's blanket
+        # normal(0, 0.02) is far too small (fan_in=1) -- use the proper fan-in scale
+        nn.init.kaiming_normal_(self.fc1.weight, mode='fan_in', nonlinearity='relu')
+        if self.fc1.bias is not None:
+            nn.init.zeros_(self.fc1.bias)
+
+        _trunc_normal_(self.fc2.weight, std=0.02)
+        if self.fc2.bias is not None:
+            nn.init.zeros_(self.fc2.bias)
+        if self.gate_zero_init:
+            # zero ONLY the two gate slices (indices 2 and 5 of the 6 chunks)
+            with torch.no_grad():
+                for idx in (2, 5):
+                    self.fc2.weight[idx * self.dim:(idx + 1) * self.dim].zero_()
+
+    def forward(self, guidance, size):
+        """guidance: [B,Cg,h,w] -> six [B,H,W,dim] tensors at ``size``=(H,W)."""
+        g = F.interpolate(guidance, size=size, mode='nearest')
+        params = self.fc2(self.act(self.fc1(g)))                  # [B, 6*dim, H, W]
+        params = params.permute(0, 2, 3, 1)                       # [B, H, W, 6*dim]
+        return torch.chunk(params, self.N_PARAMS, dim=-1)
+
+
 # ---------------------------------------------------------------------------
 # feed-forward
 # ---------------------------------------------------------------------------
@@ -408,16 +466,31 @@ class MIGLocalTransformerBlock2D(nn.Module):
                  mlp_ratio=2.0, cgm_channels=1, cgm_hidden=64,
                  drop=0.0, attn_drop=0.0, drop_path_prob=0.0,
                  layer_scale_init=1e-4, ffn_type='conv', cgm_kernel_size=3,
-                 cgm_zero_init=True):
+                 cgm_zero_init=True, modulation='cgm_norm', gate_zero_init=True):
         super().__init__()
         self.attention_type = attention_type
+        self.modulation_type = modulation
 
-        self.norm1 = CGMAdaptiveLayerNorm2D(dim, cgm_channels=cgm_channels,
-                                            cgm_hidden=cgm_hidden, kernel_size=cgm_kernel_size,
-                                            zero_init=cgm_zero_init)
-        self.norm2 = CGMAdaptiveLayerNorm2D(dim, cgm_channels=cgm_channels,
-                                            cgm_hidden=cgm_hidden, kernel_size=cgm_kernel_size,
-                                            zero_init=cgm_zero_init)
+        if modulation == 'cgm_norm':
+            # per-LayerNorm modulation head, no gate (original hybrid behaviour)
+            self.norm1 = CGMAdaptiveLayerNorm2D(dim, cgm_channels=cgm_channels,
+                                                cgm_hidden=cgm_hidden, kernel_size=cgm_kernel_size,
+                                                zero_init=cgm_zero_init)
+            self.norm2 = CGMAdaptiveLayerNorm2D(dim, cgm_channels=cgm_channels,
+                                                cgm_hidden=cgm_hidden, kernel_size=cgm_kernel_size,
+                                                zero_init=cgm_zero_init)
+        elif modulation == 'adaln_zero':
+            # one shared head -> scale/shift/gate for attention and FFN separately
+            self.norm1 = nn.LayerNorm(dim, eps=1e-6, elementwise_affine=False)
+            self.norm2 = nn.LayerNorm(dim, eps=1e-6, elementwise_affine=False)
+            self.modulation = SpatialAdaLNModulation(
+                guidance_channels=cgm_channels, dim=dim, hidden=cgm_hidden,
+                gate_zero_init=gate_zero_init,
+            )
+        else:
+            raise ValueError(
+                f"modulation must be 'cgm_norm' or 'adaln_zero', got '{modulation}'"
+            )
 
         if attention_type == 'swin':
             self.attn = SwinLocalAttention2D(
@@ -444,14 +517,30 @@ class MIGLocalTransformerBlock2D(nn.Module):
         self.drop_path1 = DropPath(drop_path_prob)
         self.drop_path2 = DropPath(drop_path_prob)
 
-        self.use_layer_scale = layer_scale_init is not None and layer_scale_init > 0
+        # adaln_zero's gate already scales each residual branch; stacking LayerScale
+        # on top would double-gate it (and re-create the near-identity failure mode).
+        self.use_layer_scale = (
+            modulation != 'adaln_zero'
+            and layer_scale_init is not None and layer_scale_init > 0
+        )
         if self.use_layer_scale:
             self.layer_scale_1 = nn.Parameter(torch.full((dim,), float(layer_scale_init)))
             self.layer_scale_2 = nn.Parameter(torch.full((dim,), float(layer_scale_init)))
 
     def forward(self, feature, cgm):
-        """feature: [B,C,H,W] -> [B,C,H,W] (same shape); cgm: [B,1,h,w]."""
+        """feature: [B,C,H,W] -> [B,C,H,W] (same shape); cgm: [B,Cg,h,w]."""
         x = feature.permute(0, 2, 3, 1).contiguous()              # -> [B,H,W,C]
+
+        if self.modulation_type == 'adaln_zero':
+            H, W = x.shape[1], x.shape[2]
+            s_a, sh_a, g_a, s_f, sh_f, g_f = self.modulation(cgm, (H, W))
+
+            h = self.norm1(x) * (1.0 + s_a) + sh_a
+            x = x + self.drop_path1(g_a * self.attn(h))
+
+            h = self.norm2(x) * (1.0 + s_f) + sh_f
+            x = x + self.drop_path2(g_f * self.ffn(h))
+            return x.permute(0, 3, 1, 2).contiguous()
 
         residual = self.attn(self.norm1(x, cgm))
         if self.use_layer_scale:
@@ -477,7 +566,8 @@ class MIGLocalTransformerStage2D(nn.Module):
                  window_size=8, natten_kernel_size=7, natten_dilation=1,
                  mlp_ratio=2.0, cgm_channels=1, cgm_hidden=64,
                  drop=0.0, attn_drop=0.0, drop_path=0.0, layer_scale_init=1e-4,
-                 ffn_type='conv', cgm_kernel_size=3, cgm_zero_init=True):
+                 ffn_type='conv', cgm_kernel_size=3, cgm_zero_init=True,
+                 modulation='cgm_norm', gate_zero_init=True):
         super().__init__()
         depth = int(depth)
         if depth < 1:
@@ -523,6 +613,8 @@ class MIGLocalTransformerStage2D(nn.Module):
                 ffn_type=ffn_type,
                 cgm_kernel_size=cgm_kernel_size,
                 cgm_zero_init=cgm_zero_init,
+                modulation=modulation,
+                gate_zero_init=gate_zero_init,
             )
             for i in range(depth)
         ])
