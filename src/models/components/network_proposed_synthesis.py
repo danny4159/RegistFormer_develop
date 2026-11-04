@@ -472,6 +472,9 @@ class MIGSGenerator(nn.Module):
             # init. Standard Swin / Swin-Unet use no LayerScale, so default off.
             _pure_ls = kwargs.get('pure_layer_scale_init', 0.0)
             self.pure_layer_scale_init = 0.0 if _pure_ls is None else float(_pure_ls)
+            # Extra full-resolution stage after the symmetric U-shape (mirrors the
+            # CNN backbone's conv6). Ablation switch: set False to drop it entirely.
+            self.pure_use_refine_stage = bool(kwargs.get('pure_use_refine_stage', True))
 
             # ── conditioning style (experiment 1) ────────────────────────────
             # 'cgm_norm'   : per-LayerNorm gamma/beta head, no gate (default)
@@ -781,6 +784,7 @@ class MIGSGenerator(nn.Module):
             modulation=self.pure_modulation,
             gate_zero_init=self.adaln_gate_zero_init,
             guidance_channels_per_stage=guidance_ch_per_stage,
+            use_refine_stage=self.pure_use_refine_stage,
         )
 
         # PatchSampleF shares a single Linear across layers, so every tap has to

@@ -133,8 +133,9 @@ class MIGSPureTransformerBackbone(nn.Module):
                  cgm_channels=1, cgm_hidden=64, drop=0.0, attn_drop=0.0,
                  drop_path=0.1, layer_scale_init=1e-4,
                  modulation='cgm_norm', gate_zero_init=True,
-                 guidance_channels_per_stage=None):
+                 guidance_channels_per_stage=None, use_refine_stage=True):
         super().__init__()
+        self.use_refine_stage = bool(use_refine_stage)
         if len(stage_depths) != 6:
             raise ValueError(f"stage_depths needs 6 entries, got {len(stage_depths)}")
         if len(stage_num_heads) != 6:
@@ -208,7 +209,10 @@ class MIGSPureTransformerBackbone(nn.Module):
         self.dec2_stage = _stage(4, dims[4])               # C  @ H/p
         # back to full resolution
         self.final_expand = PatchExpanding2D(dims[4], dims[5], scale=self.patch_size)
-        self.refine_stage = _stage(5, dims[5])             # C  @ H
+        # refine_stage is an extra full-resolution stage after the symmetric U-shape
+        # (mirrors the CNN backbone's conv6). Optional: when disabled, final_expand's
+        # output is used directly -- no shape/channel change either way since dims[5]==C.
+        self.refine_stage = _stage(5, dims[5]) if self.use_refine_stage else None
 
         # tap dims in tap order: [stem, enc1, enc2, bottleneck, dec1, dec2, refined]
         self.tap_dims = [C, dims[0], dims[1], dims[2], dims[3], dims[4], dims[5]]
@@ -240,7 +244,9 @@ class MIGSPureTransformerBackbone(nn.Module):
         # additive skips, mirroring the CNN backbone
         dec1_feat = self.dec1_stage(self.up1(bottleneck_feat) + enc2_feat, g[3])  # [B,2C,H/2p,..]
         dec2_feat = self.dec2_stage(self.up2(dec1_feat) + enc1_feat, g[4])        # [B,C,H/p,..]
-        refined_feat = self.refine_stage(self.final_expand(dec2_feat + stem_feat), g[5])  # [B,C,H,W]
+        refined_feat = self.final_expand(dec2_feat + stem_feat)                    # [B,C,H,W]
+        if self.use_refine_stage:
+            refined_feat = self.refine_stage(refined_feat, g[5])
 
         if pad_b or pad_r:
             refined_feat = refined_feat[:, :, :H, :W].contiguous()
