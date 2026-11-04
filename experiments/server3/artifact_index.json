@@ -1,0 +1,59 @@
+{
+  "server": "milab-server3",
+  "recorded": "2026-11-04",
+  "aaai_last_worktree": "/SSD5_8TB/Daniel/RegistFormer_aaai_last_ablation",
+  "aaai_last_worktree_status_at_archive": [
+    " M src/metrics/sharpness.py",
+    " M src/models/components/network_proposed_synthesis.py",
+    " M src/train.py",
+    "?? configs/experiment/ixi_aaai_last_concat.yaml",
+    "?? configs/experiment/ixi_aaai_last_guide.yaml",
+    "?? configs/experiment/ixi_aaai_last_no_guide.yaml",
+    "?? configs/experiment/ixi_aaai_last_uniform.yaml",
+    "?? src/callbacks/gpu_memory_probe.py",
+    "?? tests/"
+  ],
+  "artifacts": [
+    {
+      "path": "/SSD5_8TB/Daniel/RegistFormer_aaai_last_ablation/logs/AAAIReviewer20261024",
+      "exists": true,
+      "runtime_exists": false
+    },
+    {
+      "path": "/SSD5_8TB/Daniel/RegistFormer_aaai_last_ablation/logs/AAAILast_IXI_NCE15_20261027",
+      "exists": true,
+      "runtime_exists": true
+    },
+    {
+      "path": "/SSD5_8TB/Daniel/RegistFormer_aaai_last_ablation/logs/AAAILast_IXI_NCE15_Extra_20261027",
+      "exists": true,
+      "runtime_exists": true
+    },
+    {
+      "path": "/SSD5_8TB/Daniel/RegistFormer_aaai_last_ablation/logs/AAAILast_IXI20_DS32_NCE15_20261030",
+      "exists": true,
+      "runtime_exists": true
+    },
+    {
+      "path": "/SSD5_8TB/Daniel/RegistFormer_aaai_last_ablation/logs/AAAILast_IXI20_DS32_NCE15_RawConcat_20261031",
+      "exists": true,
+      "runtime_exists": true
+    },
+    {
+      "path": "/SSD5_8TB/Daniel/RegistFormer_develop/logs/SWA_ValueTemperature_20261028",
+      "exists": true
+    },
+    {
+      "path": "/SSD5_8TB/Daniel/RegistFormer_develop/logs/SWA_ValueAnalysis_20261031",
+      "exists": true
+    },
+    {
+      "path": "/SSD5_8TB/Daniel/RegistFormer_develop/logs/AAAILast_NoV_CheckpointSweep_20261029",
+      "exists": true
+    },
+    {
+      "path": "/SSD5_8TB/Daniel/RegistFormer_develop/logs/AAAILast_VProjection_CheckpointSweep_20261029",
+      "exists": true
+    }
+  ]
+}

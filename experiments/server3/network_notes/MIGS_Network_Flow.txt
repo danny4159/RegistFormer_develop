@@ -1,0 +1,413 @@
+================================================================================
+MIGS (구 ProposedSynthesis) — default 세팅 네트워크 Block / Module 진행 흐름 상세
+================================================================================
+작성 기준: git 커밋 1e851be29da9ce3a2314b03f0be51d93e0eda4e7 (main)
+          (이전 버전 ba1bdedec680dcbb0e41e10be5a71fd7dedafca0 기준 문서를
+           현재 코드로 전면 갱신. 76ec507/792547e/7df9edf/a3a10f4 커밋에서
+           attention selectivity ablation 옵션 추가, dead branch 제거,
+           MIGS 논문 용어로 변수/클래스명 전면 리네이밍이 있었음)
+
+── 구 버전 대비 이름 변경 대응표 ──────────────────────────────────────────────
+  LightningModule  ProposedSynthesisModule        -> MIGSModule
+                   (하위 호환 alias: ProposedSynthesisModule = MIGSModule)
+  Generator class  ProposedSynthesisModule(nn.Module) -> MIGSGenerator
+                   (하위 호환 alias: class ProposedSynthesisModule(MIGSGenerator): pass
+                    -- networks_define.py / base_module_AtoB.py의
+                    type(...).__name__=="ProposedSynthesisModule" 체크가 계속 동작하도록)
+  StyleConv                              -> MIGConv (Moving-Image-Guided Convolution)
+  LocalWindowAttentionConditioner25D     -> SliceWindowAttention (SWA)
+  LocalWindowAttentionConditioner2D      -> LocalWindowAttention2DLegacy
+  LocalConvConditioner25D                -> ConvGuidanceAblation
+  style / style_guidance_1               -> cgm (Contrast Guidance Map)
+  ref_condition_use_conv(bool)           -> guidance_mode: 'swa'|'conv_ablation'|'local_2d_legacy'
+  ref_condition_window                   -> swa_window_size            (3, 변화없음)
+  ref_condition_dim                      -> swa_qk_channels            (16, 변화없음)
+  ref_condition_center_bias              -> swa_center_slice_bias      (0.0, 변화없음)
+  ref_condition_direct                   -> swa_use_raw_values         (true, 변화없음)
+  ref_condition_direct_alpha             -> cgm_blend_alpha            (1.0, 변화없음)
+  ref_condition_qk_norm                  -> swa_use_cosine_similarity  (true, 변화없음)
+  ref_condition_uniform_attn             -> swa_use_uniform_attention  (false, 변화없음)
+  ref_condition_init_temperature         -> swa_temperature_init       (10.0, 변화없음)
+  ref_condition_temperature_learnable    -> swa_learnable_temperature  (true, 변화없음)
+  ref_condition_downsample               -> swa_downsampling_factor    (8, 변화없음)
+  lambda_style                           -> lambda_cx                 (5, 변화없음)
+  ctx_agg_mode                           -> cx_stack_aggregation       ('mean', 변화없음)
+  ctx_center_only                        -> cx_center_only             (false, 변화없음)
+  ctx_softmin_tau                        -> cx_softmin_temperature     (0.3, 변화없음)
+  ctx_shift_penalty                      -> cx_slice_offset_penalty    (0.05, 변화없음)
+  lambda_attn_entropy                    -> lambda_swa_entropy         (0, 변화없음)
+  (신규) log_ref_condition/log_style_modulation 대신
+                                          -> log_swa_stats / log_mig_conv_stats (기본 true)
+                                          -> diagnostic_log_interval (기본 100)
+  netG_type: 'proposed_synthesis' (yaml 키 이름 자체는 유지, 하위 config 호환용)
+  구 코드에 없던 신규 옵션: guidance_mode='conv_ablation'(ConvGuidanceAblation) /
+                          'local_2d_legacy' 를 명시적 top-level 스위치로 노출.
+                          (구버전엔 ref_condition_use_conv bool 하나뿐이었음)
+
+  ※ 값 자체는 base(default) 세팅에서 전부 동일 — 이름만 논문 용어(SWA/CGM/MIGConv)로
+    정리됨. forward 연산 순서/shape는 이전 버전과 완전히 동일함.
+
+기준 설정 (yaml default, override 없이 그대로 돌렸을 때):
+  netG_A: guidance_mode='swa' (SliceWindowAttention 경로),
+          swa_use_raw_values=true, swa_use_cosine_similarity=true,
+          swa_window_size=3, swa_downsampling_factor=8,
+          cgm_blend_alpha=1.0, swa_center_slice_bias=0.0,
+          swa_use_uniform_attention=false, swa_learnable_temperature=true,
+          swa_qk_channels=16, use_multiple_outputs=false, use_triple_outputs=false,
+          is_3d=false, feat_ch=264
+  data:   use_25d_style=true, ref_stack_size=3 (K=3), crop_size=[128,128]
+          data_group_1=T1(fixed/query), data_group_2=T2(GT, eval전용),
+          data_group_3=T2_moved_3mm_RigidReg(moving stack 소스)
+  params: lambda_gan=1, lambda_cx=5, lambda_nce=1.5, lambda_mind=0,
+          lambda_l1=0, lambda_perceptual=0, lambda_swa_entropy=0,
+          cx_stack_aggregation='mean'
+
+기호: B=batch(=1), K=ref_stack_size(=3), H=W=128(crop),
+      h=w=H/DS=16, DS=8, win=3, win2=9, dim=16(swa_qk_channels), C_f=feat_ch=264
+
+
+################################################################################
+PART 0. 이 흐름에 실제로 관련되는 파일 (네트워크 세팅/코드 위주)
+################################################################################
+데이터 처리(Dataset/DataModule/transforms)는 제외하고, 네트워크 구조·학습 로직에
+직접 관여하는 .py / .yaml만 정리.
+
+── 설정(yaml) ──────────────────────────────────────────────────────────────
+  configs/model/proposed_synthesis.yaml
+      _target_: src.models.proposed_synthesis_module.MIGSModule
+      netG_A(Generator 하이퍼파라미터, swa_*/cgm_* 키), netD_A/B/C(Discriminator),
+      netF_A(PatchNCE 투영기), optimizer/scheduler, params(loss weight 등, cx_*/lambda_* 키)
+      실제로 호출되는 하위 config는 없음(모두 이 한 파일에 flat하게 정의됨)
+
+  (참고, 이 흐름 밖) configs/data/IXI_Align.yaml
+      data_group_1/2/3, ref_stack_size, use_25d_style, crop_size 등
+      → 네트워크 kwargs로 ${data.xxx} interpolation되어 흘러들어오는 값들의 출처.
+        네트워크 코드 자체는 안 건드리지만, 세팅값이 여기서 온다는 점만 참고.
+
+── 네트워크(모델) 클래스 정의 ─────────────────────────────────────────────
+  src/models/components/network_proposed_synthesis.py   ★핵심 파일
+      LocalWindowAttention2DLegacy : 2D(비-25D) attention conditioner (legacy)
+      SliceWindowAttention (SWA)   : 2.5D slice-window attention (base가 쓰는 것)
+      ConvGuidanceAblation         : conv 기반 conditioner (ablation, guidance_mode='conv_ablation')
+      MIGSGenerator(nn.Module)     : Generator 본체 — MIGConv U-Net
+      ProposedSynthesisModule      : MIGSGenerator의 하위 호환 alias (실제 로직 없음, pass)
+      MIGConv                       : CGM 변조(modulation) conv 블록, 12개 사용
+      Blur                          : MIGConv up/down 시 쓰는 blur 커널 모듈
+
+  src/models/components/networks_define.py
+      define_G(netG_type='proposed_synthesis') → ProposedSynthesisModule(=MIGSGenerator) 생성
+      define_D(...)  → NLayerDiscriminator (PatchGAN, netD_A/B/C)
+      define_F(...)  → PatchSampleF (netF_A, PatchNCE 투영기)
+
+  src/models/components/network_patch_sample_F.py
+      PatchSampleF   : PatchNCE용 패치 샘플링 + 2-layer MLP 투영기 (netF_A)
+
+── 학습 파이프라인(LightningModule) ────────────────────────────────────────
+  src/models/proposed_synthesis_module.py
+      MIGSModule(BaseModule_AtoB)  ← LightningModule 본체 (구 ProposedSynthesisModule)
+      training_step, compute_generator_loss, configure_optimizers
+      criterionGAN/Contextual(cx)/NCE/(MIND/L1/Perceptual는 lambda=0이라 base에서 비활성)
+      하단에 `ProposedSynthesisModule = MIGSModule` 하위 호환 alias
+
+  src/models/base_module_AtoB.py
+      BaseModule_AtoB (부모 클래스)
+      forward(merged_input 구성), model_step(batch 언패킹),
+      training_step 상위 흐름, validation_step/test_step(metric 집계)
+      ※ 이 파일은 이번 리네이밍에서 수정되지 않음 (type(netG_A).__name__ 문자열
+        체크가 "ProposedSynthesisModule"로 남아있어 alias 클래스명과 계속 일치)
+
+── Loss 구현체 ─────────────────────────────────────────────────────────────
+  src/losses/gan_loss.py            GANLoss (gan_type='lsgan' = MSE)
+  src/losses/contextual_loss.py     Contextual_Loss, VGG_Model (VGG19 6층)
+  src/losses/patch_nce_loss.py      PatchNCELoss (InfoNCE)
+  (lambda_mind=0, lambda_l1=0, lambda_perceptual=0 이라 mind_loss.py는 base 미사용)
+
+────────────────────────────────────────────────────────────────────────────
+정리: "네트워크가 뭘로 만들어지고 뭘 통과하는지"를 보려면 사실상
+  network_proposed_synthesis.py + networks_define.py + network_patch_sample_F.py
+3개 파일이 전부이고, 그걸 학습 루프로 엮는 게
+  proposed_synthesis_module.py + base_module_AtoB.py
+2개 파일. 여기에 config는 proposed_synthesis.yaml 한 장.
+################################################################################
+
+
+################################################################################
+PART 1. 데이터 입력 (Train / Inference 공통, 네트워크 진입 직전까지)
+################################################################################
+(데이터 처리 상세는 생략 — 요청 범위 밖. 네트워크로 들어오는 텐서 shape만 명시)
+
+  DataLoader가 만드는 배치 (2.5D, 단일 출력, base):
+      real_a     [B,1,128,128]   fixed_slice x^k        (T1, source/query)
+      real_b     [B,1,128,128]   reference_aligned_target (T2 GT, metric 전용 — loss에는 안 씀)
+      real_b_ref [B,3,128,128]   moving_stack y_adj^k    (T2_moved 스택, 중심±1 슬라이스)
+
+
+################################################################################
+PART 2. TRAIN 경로
+################################################################################
+
+── 2-0. training_step 진입 ────────────────────────────────────────────────
+  src/models/proposed_synthesis_module.py : MIGSModule.training_step()
+    automatic_optimization=False (수동 최적화)
+    use_gan = (lambda_gan>0) = True →
+        optimizer_G_A, optimizer_D_A, optimizer_F_A = self.optimizers()
+    real_a, real_b, fake_b, real_b_ref = self.model_step(batch)
+        └ 여기서 Generator forward 1회 실행 = fake_b(synthesized_slice) 생성
+
+── 2-1. model_step → forward (fake_b 생성) ────────────────────────────────
+  src/models/base_module_AtoB.py : model_step()  (use_25d 분기)
+      real_a, real_b, real_b_ref = batch
+      fake_b = self.forward(real_a, real_b_ref)
+
+  src/models/base_module_AtoB.py : forward()
+      type(netG_A).__name__ == "ProposedSynthesisModule" (=MIGSGenerator alias) →
+      merged_input = torch.cat((real_a, real_b_ref), dim=1)   # [B,4,128,128]
+                                                                ch0=fixed(T1), ch1..3=moving stack(T2_moved)
+      is_3d=False, use_sliding_inference=False (base) →
+      return self.netG_A(merged_input)
+
+── 2-2. Generator forward (network_proposed_synthesis.MIGSGenerator.forward) ──
+
+  [2-2-0] 입력 분리
+      fixed_slice   = merged_input[:, :1]     # [B,1,128,128]  T1 (query)
+      moving_inputs = merged_input[:, 1:]     # [B,3,128,128]  T2_moved stack (key/value)
+      is_3d=False → else 분기로 진입
+
+  [2-2-1] CGM(Contrast Guidance Map) 생성 → _build_contrast_guidance(fixed_slice, moving_inputs)
+      _get_cgm_size(fixed_slice): h,w = 128//8 = 16,16   (swa_downsampling_factor=8)
+      _use_ref_conditioner = not(multi/triple output) = True (base는 단일 출력)
+      guidance_mode='swa' (conv_ablation 아님) →
+      use_25d_style=True, ref_stack_size=3>=1 →
+          moving_stack = _select_moving_stack(moving_inputs) = moving_inputs[:, :3]   # [B,3,128,128]
+          cgm, stats = self.ref_conditioner_25d(fixed_slice, moving_stack, (16,16))
+
+      ┌── SliceWindowAttention.forward — SWA 블록 ──────────────────────────────┐
+      │ (a) 다운샘플 (bilinear 고정)                                             │
+      │     fixed_slice_down  = interpolate(fixed_slice,  (16,16), bilinear) # [B,1,16,16]│
+      │     moving_stack_down = interpolate(moving_stack,(16,16), bilinear) # [B,3,16,16]│
+      │     moving_base = moving_stack_down   (coarse pooling 없음, full-res 고정)      │
+      │ (b) Q/K 투영 (1x1 conv 고정)                                            │
+      │     query = q_proj(fixed_slice_down)                  # [B,16,16,16]     │
+      │     keys  = k_proj(moving_base.reshape(B*3,1,16,16)).view # [B,3,16,16,16] │
+      │     use_cosine_similarity=true → query=L2norm(dim=1), keys=L2norm(dim=2) │
+      │ (c) 로컬윈도우 unfold (win=3)                                           │
+      │     local_keys                                        # [B,3,16,9,16,16]│
+      │ (d) logits = (query·local_keys) * temperature(=exp(log_temperature))    │
+      │            # [B,3,9,16,16]                                              │
+      │     center_slice_bias(=0.0, 가산되나 무효과) → center 슬라이스 로짓에 가산│
+      │     attention_weights = softmax over K*win2(=27)      # [B,3,9,16,16]    │
+      │     (swa_use_uniform_attention=false → 이 attn 그대로 사용)              │
+      │ (e) direct 집계 (v_proj/out_proj 없음, swa_use_raw_values=true)          │
+      │     moving_value_candidates = unfold(moving_base)     # [B,3,9,16,16]    │
+      │     weighted_moving = Σ(attn_mean*moving_value_candidates) # [B,1,16,16] │
+      │     center_moving = moving_stack_down[:,1:2] ; cgm_blend_alpha=1.0       │
+      │     cgm = center_moving + 1.0*(weighted_moving-center_moving)           │
+      │        = weighted_moving                                                │
+      │ (f) 통계 stats + last_attn_entropy(미분가능, entropy reg용) 저장         │
+      │     return cgm [B,1,16,16], stats                                       │
+      └───────────────────────────────────────────────────────────────────────┘
+      → cgm = [B,1,16,16]
+
+  [2-2-2] MIGConv U-Net 본체 (cgm을 전 레이어에 동일 주입, 12블록)
+      stem_feat = conv0 (fixed_slice,         cgm)   1→264  , 128x128
+      enc1_feat = conv11(stem_feat,           cgm)   264→264, 128→64    [downsample]
+      enc1_feat = conv12(enc1_feat,           cgm)   264→264, 64x64
+      enc2_feat = conv21(enc1_feat,           cgm)   264→264, 64→32     [downsample]
+      enc2_feat = conv22(enc2_feat,           cgm)   264→264, 32x32
+      bottleneck_feat = conv31(enc2_feat,     cgm)   264→264, 32x32
+      bottleneck_feat = conv32(bottleneck_feat,cgm)  264→264, 32x32
+      dec1_feat = conv41(bottleneck_feat+enc2_feat, cgm) 264→264, 32→64 [upsample, skip+]
+      dec1_feat = conv42(dec1_feat,           cgm)   264→264, 64x64
+      dec2_feat = conv51(dec1_feat+enc1_feat, cgm)   264→264, 64→128    [upsample, skip+]
+      dec2_feat = conv52(dec2_feat,           cgm)   264→264, 128x128
+      refined_feat = conv6(dec2_feat+stem_feat, cgm) 264→264, 128x128  [skip+]
+      use_separate_style_layers=false, 단일출력 → else 분기:
+          out            = conv_final(refined_feat)  264→1  , 128x128   [Conv2d 3x3]
+          synthesized_slice(=fake_b) = tanh(out)      # [B,1,128,128]  in [-1,1]
+
+      ┌── MIGConv.forward(feature, cgm) 내부 — 1개 블록 구조 ──────────────────┐
+      │ (1) 공간변환: downsample→down(Conv k1,s2) / upsample→up(Upsample+Conv3)│
+      │              / else→conv(Conv 3x3)                                    │
+      │ (2) 정규화: x = InstanceNorm2d(264, affine=False)(x)                   │
+      │ (3) 노이즈: x = x + randn_like(x)*noise_strength                       │
+      │ (4) cgm→변조 파라미터 (SPADE형):                                       │
+      │     style = interpolate(cgm, x크기, mode='nearest')                    │
+      │     cgm_features = mlp_shared(style)  Conv2d(1,512,3)+ReLU  #[B,512,.,.]│
+      │     gamma = mlp_gamma(cgm_features)   Conv2d(512,264,3)     #[B,264,.,.]│
+      │     beta  = mlp_beta(cgm_features)    Conv2d(512,264,3)     #[B,264,.,.]│
+      │     x = gamma*x + beta            ← 픽셀별 affine 변조 (CGM-derived)    │
+      │ (5) 활성: x = LeakyReLU(0.2)(x)                                        │
+      └─────────────────────────────────────────────────────────────────────┘
+      ※ mlp_shared/gamma/beta는 MIGConv 12개가 각각 별도 파라미터
+
+── 2-3. compute_generator_loss (Generator loss) ───────────────────────────
+  src/models/proposed_synthesis_module.py : MIGSModule.training_step() 내
+  with optimizer_G_A.toggle_model():   (G/F에만 grad)
+    moving_ref_b = real_b_ref  (use_25d)   ← 모든 loss 타깃은 moving stack (GT 아님)
+
+    [L1] GAN loss:
+        pred_fake = netD_A(fake_b)              # PatchGAN [B,1,~16,~16]
+        loss_gan_b = criterionGAN(pred_fake,True)*lambda_gan(1) = MSE(D(fake),1)
+    [L2] Contextual(cx) loss (_compute_cx_loss_over_moving_stack):
+        VGG19 6층 특징, moving stack 3장 각각 vs fake_b → cx_0,1,2
+        cx_stack_aggregation='mean' → mean(cx)*lambda_cx(5)
+    [L3] PatchNCE loss (단일출력, encode_only=True 재사용):
+        dummy_moving_stack = real_a.repeat(1,3,1,1)
+        synthesized_features = netG_A(cat(fake_b,dummy_moving_stack), nce_layers=[0,2,4,6], encode_only=True)
+        fixed_features       = netG_A(cat(real_a,moving_ref_b), nce_layers,          encode_only=True)
+            └ encode_only=True → forward가 synthesized_slice 대신
+              [stem_feat,enc1_feat,enc2_feat,refined_feat] 반환
+              (netG_A forward 2회 추가 = 스텝당 Generator forward 총 3회)
+        netF_A(PatchSampleF): 층별 256위치 샘플→MLP(264→256)→L2norm  # [256,256]
+        PatchNCELoss(nce_T=0.07): InfoNCE(같은위치 positive, 나머지 negative)
+        loss_nce_b = Σ_layer mean(NCE)*lambda_nce(1.5) / 4
+    [L4] SWA entropy 규제: lambda_swa_entropy=0(base) → 스킵 (no-op)
+    loss_G = gan(1) + cx_mean(5) + nce(1.5)
+    manual_backward(loss_G); clip_grad(G,0.5); clip_grad(F,0.5)
+    optimizer_G_A.step(); optimizer_F_A.step(); zero_grad
+
+── 2-4. Discriminator loss (backward_D_A, base_module_AtoB.py 공용) ────────
+  moving_center_for_discriminator = real_b_ref[:,1:2]  (moving stack 중심 슬라이스)
+      ← _select_discriminator_real_slice(): use_25d=True, K=3>1 → 중심 슬라이스 선택
+  with optimizer_D_A.toggle_model():
+    src/models/base_module_AtoB.py : backward_D_A() → backward_D_basic()
+        loss_D_A = 0.5*( MSE(netD_A(moving_center_for_discriminator),1)
+                        + MSE(netD_A(fake_b.detach()),0) )
+    manual_backward; clip_grad(D,0.5); optimizer_D_A.step(); zero_grad
+
+  netD_A 구조 (NLayerDiscriminator, PatchGAN, networks_define.py):
+    Conv(1→64,k4,s1,p1)+LReLU+Downsample
+    Conv(64→128)+InstanceNorm+LReLU+Downsample
+    Conv(128→256)+InstanceNorm+LReLU+Downsample
+    Conv(256→512)+InstanceNorm+LReLU
+    Conv(512→1,k4,s1,p1)               # 예측맵 [B,1,~16,~16]
+
+── 2-5. optimizer / scheduler ─────────────────────────────────────────────
+    Adam(lr=1e-4, betas=[0.5,0.999], wd=1e-4)  × (G_A, D_A, F_A)
+    scheduler = MultiStepLR([250000,300000], gamma=0.5)
+    Trainer: max_epochs=100, precision=32, strategy=ddp, grad_clip 0.5(norm)
+
+
+################################################################################
+PART 3. INFERENCE 경로 (validation / test)
+################################################################################
+
+── 3-0. 진입 ────────────────────────────────────────────────────────────
+  src/models/base_module_AtoB.py : validation_step()/test_step()
+    real_a, real_b, fake_b, real_b_ref = self.model_step(batch)
+      └ 학습과 동일한 model_step → forward → netG_A.forward
+        단, self.training=False (eval 모드), torch.no_grad 컨텍스트
+
+── 3-1. forward (inference 분기) ──────────────────────────────────────────
+    merged_input = cat(real_a, real_b_ref, dim=1)         # [B,4,128,128]
+    is_3d=False (base) → sliding window 미적용
+    use_sliding_inference=False → return self.netG_A(merged_input)
+    ※ base는 2D라 학습과 완전히 동일한 단일 forward 호출.
+
+  → netG_A.forward = PART 2-2와 완전히 동일한 블록 순서/shape
+    (SWA CGM 생성 → MIGConv U-Net 12블록 → conv_final → tanh)
+    출력 fake_b(synthesized_slice) [B,1,128,128]
+    차이점: encode_only 안 씀. noise는 randomize_noise=True라 추론에도 주입됨
+            (학습된 noise_strength 그대로 적용).
+
+── 3-2. metric 집계 (eval_on_align=True) ──────────────────────────────────
+  src/models/base_module_AtoB.py : test_step()
+    test_ssim_B.update(real_B, fake_B)          ← GT=real_b(reference_aligned_target/T2), [-1,1] 직접
+    test_psnr_B.update(real_B, fake_B)          data_range=2.0
+    test_lpips_B.update(gray2rgb(real_B.clamp(-1,1)), gray2rgb(fake_B.clamp))
+    test_sharpness_B.update(norm_to_uint8(fake_B))   ← Laplacian 분산
+    ※ 학습 loss는 real_b_ref(moving stack) 타깃, 평가는 real_b(GT) 타깃 — 비대칭
+
+
+################################################################################
+PART 4. 텐서 shape 총정리 (B=1, base)
+################################################################################
+
+[데이터]
+  fixed slice(T1)    [1,128,128]      moving stack(T2_moved) [3,128,128]
+  real_a             [1,1,128,128]    real_b_ref              [1,3,128,128]
+  merged_input       [1,4,128,128]
+
+[SWA — SliceWindowAttention]
+  fixed_slice        [1,1,128,128]  → fixed_slice_down  [1,1,16,16]
+  moving_stack       [1,3,128,128]  → moving_stack_down [1,3,16,16] = moving_base
+  query              [1,16,16,16]                (B,dim,h,w)
+  keys               [1,3,16,16,16]              (B,K,dim,h,w)
+  local_keys         [1,3,16,9,16,16]            (B,K,dim,win2,h,w)
+  attention_weights  [1,3,9,16,16]               (B,K,win2,h,w) softmax over 27
+  moving_value_candidates [1,3,9,16,16]
+  weighted_moving=cgm[1,1,16,16]
+
+[MIGConv U-Net 본체]
+  stem_feat          [1,264,128,128]
+  enc1_feat          [1,264, 64, 64]
+  enc2_feat          [1,264, 32, 32]
+  bottleneck_feat     [1,264, 32, 32]
+  dec1_feat          [1,264, 64, 64]
+  dec2_feat          [1,264,128,128]
+  refined_feat        [1,264,128,128]
+  fake_b(synthesized_slice) [1,  1,128,128]  (tanh)
+
+[MIGConv 내부, conv22(32x32) 예]
+  x(정규화·노이즈후)  [1,264,32,32]
+  style(cgm, nearest확대) [1,  1,32,32]
+  cgm_features=mlp_shared [1,512,32,32]
+  gamma / beta       [1,264,32,32]
+  x*gamma+beta        [1,264,32,32]
+
+[PatchNCE (train only)]
+  encode feat(층별)  [1,264,H_l,W_l]  (H_l ∈ {128,32,64,128})
+  256 patch 샘플     [256,264]
+  MLP+L2norm         [256,256]
+  InfoNCE out        [256, 1+256]
+
+[Discriminator (PatchGAN)]
+  입력 fake_b/real   [1,1,128,128]
+  netD_A 예측맵      [1,1,~16,~16]
+
+
+################################################################################
+PART 5. 블록 진행 순서 요약 (한 줄 흐름)
+################################################################################
+
+TRAIN:
+  DataLoader → merged_input(cat)
+  → training_step → model_step → BaseModule.forward
+  → netG_A.forward (MIGSGenerator):
+       _build_contrast_guidance → SliceWindowAttention.forward
+         [bilinear down → q_proj/k_proj(1x1) → cosine → unfold(win3)
+          → softmax(27) → direct weighted_moving] → cgm[1,1,16,16]
+       → conv0..conv6 (MIGConv×12; 각: down/up/conv → InstanceNorm → +noise
+          → CGM 변조(mlp_shared/gamma/beta 3x3) → LeakyReLU)
+       → conv_final(3x3) → tanh → fake_b
+  → compute_generator_loss [GAN(netD_A) + Contextual/cx(VGG19) + PatchNCE(netG_A
+       encode_only ×2 + netF_A + InfoNCE)] → step(G,F)
+  → backward_D_A [netD_A: 0.5(MSE(moving stack 중심,1)+MSE(fake,0))] → step(D)
+
+INFERENCE:
+  DataLoader → model_step → BaseModule.forward → netG_A.forward
+  (SWA → MIGConv×12 → conv_final → tanh) → fake_b
+  → test_step metric update (SSIM/PSNR/LPIPS/Sharpness vs real_b GT)
+
+
+################################################################################
+PART 6. (참고) 이전 문서(ba1bded 기준) 이후 실제로 바뀐 것 요약
+################################################################################
+792547e: dead ref_condition 분기 제거, lambda_nce yaml 리터럴 기본값을 1.5로 명시
+         (기존 문서의 PART 6에 있던 "사라진 죽은 경로 목록"이 이 시점에 실제로 삭제됨)
+76ec507: attention selectivity ablation 옵션 추가
+         - swa_learnable_temperature (온도 학습 고정/해제)
+         - lambda_swa_entropy (attention entropy 정규화)
+         - guidance_mode='conv_ablation' (ConvGuidanceAblation, 공정 비교용 conv baseline)
+7df9edf: MIGS 논문 용어로 클래스/변수/설정키 전면 리네이밍 (본 문서 최상단 대응표 참고).
+         checkpoint 호환을 위해 서브모듈 이름(mlp_shared/mlp_gamma 등)과 Generator
+         클래스명("ProposedSynthesisModule")은 그대로 유지 (얇은 alias 서브클래스로 처리).
+         정확도 검증: 76ec507/792547e 코드 대비 forward/loss 출력 byte-identical 확인.
+a3a10f4: 남은 한글 주석을 영어로 번역 (동작 변화 없음).
+
+conv ablation(ConvGuidanceAblation)은 유지됨 — guidance_mode='conv_ablation'으로 선택.
+base(default)는 guidance_mode='swa'라 SliceWindowAttention 경로 그대로.
+
+================================================================================
+문서 끝
+================================================================================

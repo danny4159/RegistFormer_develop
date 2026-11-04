@@ -191,6 +191,9 @@ pyproject.toml
 # docs: local notes/exports only, not committed
 docs/
 
+# ad-hoc flat copies of source files for external reference, not source of truth
+codes/
+
 # jupyter notebook data exports (not source)
 jupyter_notebook/**/*.csv
 jupyter_notebook/**/*.json

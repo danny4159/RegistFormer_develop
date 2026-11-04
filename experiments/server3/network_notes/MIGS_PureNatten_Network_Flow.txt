@@ -1,0 +1,321 @@
+================================================================================
+MIGS — backbone_type='pure_transformer', local_attention_type='natten'
+(pure_natten) 세팅 네트워크 Block / Module 진행 흐름 상세
+================================================================================
+작성 기준: git 커밋 e7ed9a878f7d4584e9723879619e686e093b150b (main)
+          config: configs/model/proposed_synthesis_pure_natten.yaml
+                  (defaults: [proposed_synthesis, _self_] — netG_A만 override,
+                   guidance_mode/loss lambda/optimizer/netD/netF_A는 CNN base와 100% 동일)
+
+── CNN(MIGS_Network_Flow.txt) 대비 다른 점 요약 ─────────────────────────────
+  다른 것: Generator 본체(backbone)만. MIGConv U-Net(conv0~conv6, 12블록) 전부 제거,
+           대신 conv-free U자형 Transformer(MIGSPureTransformerBackbone)로 교체.
+           conv는 PatchEmbed(사실상 patch-linear)와 최종 1x1 head 딱 2개뿐,
+           그 외 모든 공간 연산은 attention(NATTEN) + Linear.
+  같은 것: CGM 생성(SliceWindowAttention, guidance_mode='swa') — 완전히 동일한
+           모듈, 동일한 코드 경로. Loss 구성(GAN+Contextual+PatchNCE), Discriminator,
+           optimizer/scheduler, 데이터 입력 형태, 학습/추론 상위 흐름 전부 CNN과 동일.
+           즉 "moving stack → SWA → CGM"까지는 완전히 공유되고, CGM을 받아
+           최종 이미지를 만드는 방식만 conv U-Net ↔ conv-free Transformer로 다름.
+
+기준 설정 (proposed_synthesis_pure_natten.yaml, override 없이 그대로 돌렸을 때):
+  netG_A: backbone_type='pure_transformer', local_attention_type='natten',
+          pure_patch_size=2, pure_embed_dim=96(=C),
+          pure_stage_depths=[2,2,6,2,2,2]        (enc1,enc2,bottleneck,dec1,dec2,refine)
+          pure_num_heads=[3,6,12,6,3,3]
+          pure_mlp_ratio=4.0, pure_nce_proj_dim=264,
+          local_cgm_hidden=64, local_drop=0, local_attn_drop=0, local_drop_path=0.1,
+          pure_layer_scale_init=0.0 (LayerScale 없음),
+          natten_kernel_size=7, natten_stage_dilations=[1,1,1,1,1,1],
+          pure_modulation='cgm_norm' (adaln_zero 아님 — 기본값)
+          (아래는 base와 동일, 상속) guidance_mode='swa', swa_use_raw_values=true,
+          swa_use_cosine_similarity=true, swa_window_size=3, swa_downsampling_factor=8,
+          cgm_blend_alpha=1.0, swa_qk_channels=16, feat_ch=264(=netF_A.input_nc 로만 쓰임,
+          pure backbone 자체 채널폭은 pure_embed_dim이 결정)
+  data:   base(CNN)와 완전히 동일 — use_25d_style=true, ref_stack_size=3(K=3),
+          crop_size=[128,128], data_group_1=T1, data_group_2=T2,
+          data_group_3=T2_moved_3mm_RigidReg
+  params: base와 완전히 동일 — lambda_gan=1, lambda_cx=5, lambda_nce=1.5,
+          nce_layers=[0,2,4,6], lambda_mind=0, lambda_l1=0, lambda_perceptual=0
+
+기호: B=batch(=1), K=ref_stack_size(=3), H=W=128(crop), p=patch_size=2,
+      C=pure_embed_dim=96, h=w=H/DS=16(DS=8, CGM 해상도, SWA와 무관하게 backbone과 별개),
+      win=swa_window_size=3, dim=swa_qk_channels=16
+
+
+################################################################################
+PART 0. 이 흐름에 실제로 관련되는 파일
+################################################################################
+데이터 처리(Dataset/DataModule/transforms)는 제외, 네트워크 구조·학습 로직 직결 파일만.
+
+── 설정(yaml) ──────────────────────────────────────────────────────────────
+  configs/model/proposed_synthesis_pure_natten.yaml   ★진입점
+      defaults: [proposed_synthesis, _self_] → 아래 base yaml을 상속하고
+      netG_A.backbone_type/local_attention_type/pure_* 키만 override.
+  configs/model/proposed_synthesis.yaml
+      base. netD_A/B/C, netF_A, optimizer/scheduler, params(loss weight)는
+      pure_natten도 전부 이 파일 값 그대로 사용(override 없음).
+
+── 네트워크(모델) 클래스 정의 ─────────────────────────────────────────────
+  src/models/components/network_proposed_synthesis.py   ★핵심 파일 (CNN과 공유)
+      SliceWindowAttention (SWA)   : CGM 생성 — CNN과 완전히 동일한 클래스/코드 경로
+      MIGSGenerator(nn.Module)     : backbone_type='pure_transformer'일 때
+        __init__에서 _build_pure_transformer_backbone() 호출 후 조기 return
+        (MIGConv 관련 conv0~conv6는 전혀 생성되지 않음)
+      forward(): use_pure_transformer_backbone 분기 —
+        pure_backbone(fixed_slice, cgm) 호출 → conv_final(1x1) → tanh
+
+  src/models/components/migs_pure_transformer.py   ★pure 백본 전용
+      PatchEmbed2D      : Conv2d(kernel=stride=patch_size) + LayerNorm — 최초 토큰화
+      PatchMerging2D    : concat(2x2 이웃, 4C) → LayerNorm → Linear(4C→2C, bias=False)
+      PatchExpanding2D  : Linear(C→scale²·out_C) → pixel_shuffle(scale) → LayerNorm
+      MIGSPureTransformerBackbone : PatchEmbed→enc1→merge→enc2→merge→bottleneck
+        →expand+skip→dec1→expand+skip→dec2→expand+skip→refine, forward()가
+        [stem,enc1,enc2,bottleneck,dec1,dec2,refined] 7개 tap 반환
+
+  src/models/components/migs_local_attention.py   ★Transformer 블록 전용
+      CGMAdaptiveLayerNorm2D : SPADE류 CGM modulation. pure 백본은
+        kernel_size=1(순수 per-pixel, 강제), zero_init=False(강제, CGM이 유일한
+        guidance 경로라 zero-init하면 초기에 moving을 완전히 무시하게 됨)
+      NattenLocalAttention2D : natten.NeighborhoodAttention2D 얇은 wrapper
+      MlpFFN2D        : Linear→GELU→Linear (conv 없음, ffn_type='mlp' 강제)
+      MIGLocalTransformerBlock2D : pre-LN 블록 (아래 PART2-2-3 참고)
+      MIGLocalTransformerStage2D : depth개 블록 스택
+
+  src/models/components/networks_define.py
+      define_G(netG_type='proposed_synthesis') → MIGSGenerator 생성(backbone_type
+        kwarg가 netG_A yaml에서 그대로 전달됨), init_net 후 post_init_weights() 호출
+        → CGMAdaptiveLayerNorm2D.reset_special_parameters() 등 재적용
+      define_D / define_F : CNN과 완전히 동일 (netD_A/B/C, netF_A 구조 변화 없음)
+
+  src/models/components/network_patch_sample_F.py
+      PatchSampleF : CNN과 동일 코드. 단, pure 백본은 tap마다 채널수가 다르므로
+        (C/2C/4C) MIGSGenerator가 nce_proj(1x1 conv, tap별로 별도)로 전부
+        pure_nce_proj_dim(=264)로 통일해서 넘겨줌 — PatchSampleF 자체는 무수정.
+
+── 학습 파이프라인(LightningModule) ────────────────────────────────────────
+  src/models/proposed_synthesis_module.py, src/models/base_module_AtoB.py
+      CNN과 완전히 동일한 코드. backbone_type에 따른 분기가 전혀 없음 —
+      MIGSGenerator.forward()가 알아서 backbone을 스위칭하므로 학습 루프 관점에서는
+      "netG_A(merged_input)"이라는 동일한 인터페이스만 보임.
+
+── Loss 구현체 ─────────────────────────────────────────────────────────────
+  src/losses/gan_loss.py, contextual_loss.py, patch_nce_loss.py — CNN과 동일.
+
+────────────────────────────────────────────────────────────────────────────
+정리: CGM까지의 경로(SWA, network_proposed_synthesis.py 상단부)와 학습 루프
+(proposed_synthesis_module.py + base_module_AtoB.py)는 CNN 문서와 100% 동일.
+새로 봐야 할 파일은 딱 2개 — migs_pure_transformer.py(U자형 골격) +
+migs_local_attention.py(그 안의 Transformer 블록) 뿐이고, network_proposed_synthesis.py
+안에서는 _build_pure_transformer_backbone()과 forward()의 pure 분기만 새로 봄.
+################################################################################
+
+
+################################################################################
+PART 1. 데이터 입력 (CNN과 완전히 동일)
+################################################################################
+  real_a     [B,1,128,128]   fixed_slice x^k        (T1, source/query)
+  real_b     [B,1,128,128]   reference_aligned_target (T2 GT, metric 전용)
+  real_b_ref [B,3,128,128]   moving_stack y_adj^k    (T2_moved 스택, 중심±1 슬라이스)
+
+
+################################################################################
+PART 2. TRAIN 경로
+################################################################################
+
+── 2-0, 2-1. training_step → model_step → forward (CNN과 완전히 동일) ──────
+  merged_input = cat(real_a, real_b_ref, dim=1)   # [B,4,128,128]
+  return self.netG_A(merged_input)                # MIGSGenerator.forward()
+
+── 2-2-0. CGM 생성 — SliceWindowAttention (CNN과 완전히 동일한 코드/파라미터) ──
+  fixed_slice   = merged_input[:, :1]     # [B,1,128,128]
+  moving_inputs = merged_input[:, 1:]     # [B,3,128,128]
+  cgm, stats = self.ref_conditioner_25d(fixed_slice, moving_stack, cgm_size=(16,16))
+      (다운샘플 bilinear → Q/K 3x3conv×2 → cosine정규화+temperature → win=3 unfold
+       → softmax(27개 후보) → direct 가중합(raw moving intensity) → cgm)
+  → cgm = [B,1,16,16]                      ※ 상세 내부 블록은 CNN 문서 PART2-2-1 그대로
+
+── 2-2-1. pure_backbone(fixed_slice, cgm) — MIGSPureTransformerBackbone.forward ──
+
+  [해상도/채널 피라미드] (patch_size=2, C=96)
+    입력 fixed_slice                                    [B, 1,128,128]
+    PatchEmbed(2x2 conv,stride2, non-overlapping patchify)→stem   [B,96, 64, 64]
+    enc1_stage  (NATTEN, depth=2, heads=3, kernel=7)              [B,96, 64, 64]
+    PatchMerging(concat4→LN→Linear 4C→2C)              →enc2 입력 [B,192,32, 32]
+    enc2_stage  (depth=2, heads=6)                                [B,192,32, 32]
+    PatchMerging(concat4→LN→Linear 4C→2C)          →bottleneck입력[B,384,16, 16]
+    bottleneck_stage (depth=6, heads=12, 가장 깊음)                [B,384,16, 16]
+    PatchExpanding(Linear→pixel_shuffle,scale2)+skip(enc2,덧셈)    [B,192,32, 32]
+    dec1_stage  (depth=2, heads=6)                                 [B,192,32, 32]
+    PatchExpanding(Linear→pixel_shuffle,scale2)+skip(enc1,덧셈)    [B, 96,64, 64]
+    dec2_stage  (depth=2, heads=3)                                 [B, 96,64, 64]
+    FinalPatchExpanding(scale=patch_size=2)+skip(stem,덧셈)        [B, 96,128,128]
+    refine_stage(depth=2, heads=3)                     →refined   [B, 96,128,128]
+
+    conv는 PatchEmbed(사실상 patch-linear)와 아래 conv_final(1x1) 뿐, 그 외
+    공간 연산 전부 NATTEN self-attention + Linear. skip은 CNN과 동일하게
+    element-wise 덧셈(concat 아님) — PatchExpanding 직후 해상도/채널 맞춰서 더함.
+
+  [각 stage 내부 — MIGLocalTransformerBlock2D, depth개 반복]
+    x[B,H,W,C] (channels-last)
+    │
+    ├─ h = CGMAdaptiveLayerNorm2D(x, cgm)     kernel_size=1, zero_init=False
+    ├─ h = NattenLocalAttention2D(h)           kernel=7 (dilation=1), q/k/v는 nn.Linear
+    └─ x = x + h                                (LayerScale 없음, pure_layer_scale_init=0.0)
+    │
+    ├─ h = CGMAdaptiveLayerNorm2D(x, cgm)
+    ├─ h = MlpFFN2D(h)                          Linear(C→4C)→GELU→Linear(4C→C)
+    └─ x = x + h
+
+    CGMAdaptiveLayerNorm2D.forward(x,cgm):
+      normalized = LayerNorm(x, affine 없음)
+      cgm_resized = interpolate(cgm, 현재(H,W), mode='nearest')
+      affine = Conv1x1(ReLU(Conv1x1(cgm_resized)))   # [B,2C,H,W], cgm_hidden=64 경유
+      gamma,beta = chunk(affine, 2, dim=channel)
+      return normalized*(1+gamma) + beta              ← SPADE류 공간별 affine denorm
+      (CNN의 MIGConv modulation과 완전히 같은 수식. 차이는 conv kernel_size=1(순수
+       per-pixel) vs MIGConv의 3x3. cgm은 한 번만 계산되고(16x16) stage마다
+       nearest-interpolate로 재사용 — 총 6stage×depth개×2번(attn앞/ffn앞) 호출)
+
+    natten_kernel_size=7의 실제 커버리지는 stage마다 다름 (절대 토큰수는 같지만
+    토큰 1개=원본 몇 px 인지가 다름): enc1/dec2/refine(64x64 또는 128x128, 토큰당
+    2px 또는 1px)→14px, enc2/dec1(32x32, 4px/토큰)→28px, bottleneck(16x16,
+    8px/토큰)→56px. bottleneck도 예외 없이 NATTEN 적용(7x7=49/256≈19% 커버).
+
+  [출력]
+    refined_feat [B,96,128,128] → conv_final(1x1, 96→1) → tanh
+    → synthesized_slice(=fake_b) [B,1,128,128]
+
+── 2-2-2. PatchNCE용 tap 투영 (encode_only=True 경로, train 전용) ──────────
+    taps = [stem,enc1,enc2,bottleneck,dec1,dec2,refined]   # 채널 96/96/192/384/192/96/96
+    nce_proj[i] = Conv2d(tap_dim_i, 264, kernel_size=1)     # tap마다 별도 가중치
+    return [nce_proj[i](taps[i]) for i in nce_layers]       # nce_layers=[0,2,4,6]
+    → [stem, enc2, dec1, refined] 4개, 전부 264채널로 통일돼서 PatchSampleF로 전달
+    (CNN도 동일 인덱스 체계: 0=stem,2=enc2,4=dec1,6=refined — nce_layers override 불필요)
+
+── 2-3. compute_generator_loss (CNN과 완전히 동일한 코드/lambda) ───────────
+  loss_gan_b = MSE(netD_A(fake_b), 1) * lambda_gan(1)
+  loss_cx    = mean(VGG19 6층 Contextual(moving stack 3장 vs fake_b)) * lambda_cx(5)
+  loss_nce   = PatchNCE(netG_A encode_only 2회 호출 — fake_b쪽/real쪽 각각 —
+               → nce_proj → netF_A → InfoNCE) * lambda_nce(1.5) / 4
+      ※ netG_A forward가 여기서 2회 더 호출되므로 스텝당 pure_backbone forward
+        총 3회 (일반 fake_b 생성 1회 + encode_only 2회) — CNN과 동일 패턴.
+  loss_G = gan + cx + nce  → manual_backward → clip_grad(0.5) → step(G,F)
+
+── 2-4. Discriminator loss, 2-5. optimizer/scheduler (CNN과 완전히 동일) ───
+  moving_center = real_b_ref[:,1:2] (중심 슬라이스)
+  loss_D_A = 0.5*(MSE(netD_A(moving_center),1) + MSE(netD_A(fake_b.detach()),0))
+  Adam(lr=1e-4,betas=[0.5,0.999],wd=1e-4) × (G_A,D_A,F_A), MultiStepLR([250000,300000],0.5)
+  Trainer: max_epochs=100, precision=32, ddp_find_unused_parameters_true(dead
+    legacy module guide_net/z_aggs/ref_conditioner_2d 때문에 CNN과 동일하게 필요)
+
+
+################################################################################
+PART 3. INFERENCE 경로 (validation / test) — CNN과 완전히 동일한 흐름
+################################################################################
+  real_a, real_b, fake_b, real_b_ref = self.model_step(batch)
+    └ forward → merged_input(cat) → netG_A(merged_input)
+       = PART 2-2와 완전히 동일 (CGM 생성 → pure_backbone → conv_final → tanh)
+       encode_only 안 씀. eval 모드(BatchNorm 없음, InstanceNorm/LayerNorm은
+       CNN처럼 배치통계 안 씀이라 train/eval 차이 없음)
+  metric: test_ssim_B/psnr_B/lpips_B/sharpness_B.update(real_b(GT), fake_b)
+    (학습 loss 타깃은 moving stack, 평가는 GT — CNN과 동일하게 비대칭)
+
+
+################################################################################
+PART 4. 텐서 shape 총정리 (B=1, K=3, patch_size=2, C=96)
+################################################################################
+
+[CGM — SliceWindowAttention, CNN과 완전히 동일]
+  fixed_slice_down [1,1,16,16]  moving_stack_down [1,3,16,16]
+  query [1,16,16,16]  keys [1,3,16,16,16]  attention_weights [1,3,9,16,16]
+  cgm(=weighted_moving) [1,1,16,16]
+
+[pure_backbone U자형 피라미드]
+  입력(fixed_slice)   [1,  1,128,128]
+  stem  (PatchEmbed)  [1, 96, 64, 64]
+  enc1                [1, 96, 64, 64]
+  enc2                [1,192, 32, 32]
+  bottleneck          [1,384, 16, 16]
+  dec1                [1,192, 32, 32]
+  dec2                [1, 96, 64, 64]
+  refined             [1, 96,128,128]
+  fake_b(synthesized_slice) [1,  1,128,128]  (tanh)
+
+[MIGLocalTransformerBlock2D 내부, bottleneck 예 (C=384, heads=12, head_dim=32)]
+  x                   [1,16,16,384]  (channels-last)
+  cgm_resized(nearest) [1, 1,16,16]
+  cgm_encoder(Conv1x1,ReLU) [1,64,16,16]
+  cgm_affine(Conv1x1)  [1,768,16,16] → gamma/beta 각 [1,384,16,16] → [1,16,16,384]
+  NATTEN attn 출력      [1,16,16,384]
+  MlpFFN hidden(4C=1536) [1,16,16,1536] → 출력 [1,16,16,384]
+
+[PatchNCE tap 투영 (train only), nce_layers=[0,2,4,6]]
+  stem(96)→nce_proj→264   [1,264, 64, 64]
+  enc2(192)→nce_proj→264  [1,264, 32, 32]
+  dec1(192)→nce_proj→264  [1,264, 32, 32]
+  refined(96)→nce_proj→264[1,264,128,128]
+  (256 patch 샘플 → MLP+L2norm [256,256] → InfoNCE — 이후 CNN과 완전히 동일)
+
+[Discriminator (PatchGAN) — CNN과 완전히 동일]
+  입력 [1,1,128,128] → netD_A 예측맵 [1,1,~16,~16]
+
+
+################################################################################
+PART 5. 블록 진행 순서 요약 (한 줄 흐름)
+################################################################################
+
+TRAIN:
+  DataLoader → merged_input(cat)
+  → training_step → model_step → BaseModule.forward → netG_A.forward:
+       _build_contrast_guidance → SliceWindowAttention.forward (CNN과 동일)
+         → cgm[1,1,16,16]
+       → pure_backbone.forward:
+            PatchEmbed(conv,stride2) → enc1_stage(NATTEN×2)
+            → PatchMerging → enc2_stage(NATTEN×2)
+            → PatchMerging → bottleneck_stage(NATTEN×6, 가장넓은 실효수용영역)
+            → PatchExpanding+skip(enc2) → dec1_stage(NATTEN×2)
+            → PatchExpanding+skip(enc1) → dec2_stage(NATTEN×2)
+            → FinalPatchExpanding+skip(stem) → refine_stage(NATTEN×2)
+            (모든 stage 블록마다: CGMAdaptiveLayerNorm2D(kernel=1,zero_init=False)
+             → NATTEN attn → 잔차 / CGMAdaptiveLayerNorm2D → MlpFFN → 잔차)
+       → conv_final(1x1) → tanh → fake_b
+  → compute_generator_loss [GAN(netD_A) + Contextual/cx(VGG19) + PatchNCE(netG_A
+       encode_only×2 → nce_proj → netF_A → InfoNCE)] → step(G,F)   ※CNN과 동일
+  → backward_D_A [netD_A: 0.5(MSE(moving stack 중심,1)+MSE(fake,0))] → step(D)
+
+INFERENCE:
+  DataLoader → model_step → BaseModule.forward → netG_A.forward
+  (SWA → pure_backbone(PatchEmbed→NATTEN stage×6, skip덧셈)→conv_final→tanh) → fake_b
+  → test_step metric update (SSIM/PSNR/LPIPS/Sharpness vs real_b GT)   ※CNN과 동일
+
+
+################################################################################
+PART 6. (참고) CNN 백본과의 차이 총정리
+################################################################################
+같음 (완전 동일 코드/파라미터):
+  - CGM 생성(SliceWindowAttention, guidance_mode='swa')
+  - Loss 구성/가중치(GAN, Contextual-cx, PatchNCE), Discriminator, optimizer/scheduler
+  - training_step/model_step/forward 상위 흐름, encode_only 인덱스 체계([0,2,4,6])
+  - 데이터 입력 형태, 평가 metric
+
+다름 (backbone 본체만):
+  - CNN: MIGConv(SPADE류 modulation, InstanceNorm+noise+3x3conv) 12블록, 채널
+    고정 feat_ch=264 전 구간
+  - pure_natten: conv-free U자형 Transformer, 6 stage(NATTEN self-attention,
+    CGMAdaptiveLayerNorm kernel=1), 채널이 96→192→384→192→96→96로 변화,
+    해상도 변경은 PatchMerging(concat+Linear)/PatchExpanding(Linear+pixel_shuffle)
+    담당 (conv 다운/업샘플 없음)
+  - CGM modulation 수식(gamma*norm+beta)은 동일하지만 CGM 인코더 kernel_size가
+    CNN(MIGConv)은 3x3, pure_natten은 1x1(순수 per-pixel, conv-free 원칙 유지)
+  - PatchNCE tap 채널수: CNN은 전 tap 264(feat_ch)로 고정이라 투영 불필요,
+    pure_natten은 tap마다 채널이 달라(96/96/192/384/192/96/96) nce_proj로
+    tap별 1x1 conv 투영을 거쳐 264로 통일
+
+성능 (80slice, K=3, DS=8 기준 실측): CNN이 pure_natten보다 test SSIM이 더
+높게 나옴(그간의 K-ablation/DS-ablation 실험 결과 참고, pure_natten 최고
+test_ssim=0.8555 @epoch95). 자세한 수치는 대화 로그의 K-ablation 표 참고.
+
+================================================================================
+문서 끝
+================================================================================
