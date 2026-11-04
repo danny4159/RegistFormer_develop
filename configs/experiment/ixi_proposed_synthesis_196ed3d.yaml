@@ -1,0 +1,41 @@
+# @package _global_
+
+defaults:
+  - override /data: IXI_Align.yaml
+  - override /model: proposed_synthesis_196ed3d.yaml
+
+tags: IXI_T1_T2_Rigid3mm_ProposedSynthesis196ed3d
+seed: 42
+train: true
+test: true
+ckpt_path: null
+
+data:
+  name: IXI_T1_T2_Rigid3mm
+  batch_size: 8
+  data_group_1: T1
+  data_group_2: T2
+  data_group_3: T2_moved_3mm_RigidReg
+  data_group_4: null
+  data_group_5: null
+  data_group_6: null
+  data_group_7: null
+  is_3d: false
+  reverse: false
+  eval_on_align: true
+  use_misalign_simul: true
+  use_multiple_outputs: false
+  use_triple_outputs: false
+  # 196ed3d uses one reference slice, without SWA or neighboring slices.
+  use_25d_style: false
+  ref_stack_size: 1
+  apply_linear_registration: false
+  apply_non_linear_registration: false
+
+trainer:
+  accelerator: gpu
+  devices: [0]  # launcher restricts visibility to physical GPU 4
+  strategy: auto
+  precision: 32
+  max_epochs: 100
+  log_every_n_steps: 20

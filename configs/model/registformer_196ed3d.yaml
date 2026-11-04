@@ -1,0 +1,91 @@
+# Original 2D Stage 2, with verified Stage 1 and registration best weights.
+_target_: src.models.registformer_196ed3d_module.IXIRegistFormer196ed3dModule
+name: RegistFormer196ed3d
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.0002
+  betas:
+  - 0.9
+  - 0.99
+  weight_decay: 0
+scheduler:
+  _target_: torch.optim.lr_scheduler.MultiStepLR
+  _partial_: true
+  milestones:
+  - 250000
+  - 300000
+  gamma: 0.5
+netG_A:
+  _target_: src.models.components.network_registformer_196ed3d.define_G
+  netG_type: registformer
+  feat_dim: 14
+  ref_ch: 1
+  src_ch: 1
+  out_ch: 1
+  nhead: 2
+  mlp_ratio: 2
+  pos_en_flag: false
+  k_size: 28
+  attn_type: softmax
+  daca_loc: null
+  flow_type: voxelmorph_lightning
+  dam_type: proposed_synthesis
+  fuse_type: null
+  flow_model_path: /SSD5_8TB/Daniel/RegistFormer_develop/logs/VoxelMorph2D_IXI_RigidT2Moving_SynthT2Fixed_L1/from_synthesis_2026-10-22_17-03-28/checkpoints/epoch067-ssim0.8116-psnr23.9261-lpips0.1006-sharp77.22.ckpt
+  flow_ft: false
+  flow_size:
+  - 256
+  - 256
+  dam_ft: false
+  dam_path: /SSD5_8TB/Daniel/RegistFormer_develop/data/IXI/ProposedSynthesis196ed3d_Rigid3mm_20261022_170328/provenance/best_synthesis.ckpt
+  dam_feat: 64
+  main_ft: true
+  init_type: normal
+  init_gain: 0.02
+  is_moved_feat: false
+netD_A:
+  _target_: src.models.components.networks_define.define_D
+  netD: basic
+  input_nc: 1
+  ndf: 64
+  init_type: normal
+netF_A:
+  _target_: src.models.components.networks_define.define_F
+  netF_type: mlp_sample
+  use_mlp: true
+  init_type: xavier
+  init_gain: 0.02
+  nc: 256
+  input_nc: 512
+params:
+  lambda_ctx: 1
+  lambda_gan: 0.1
+  lambda_mind: 0
+  lambda_nce: 0.1
+  lambda_l1: 0
+  lambda_gan_3d: 0
+  lambda_mind_3d: 0
+  lambda_mutual_information: 0
+  lambda_gc_lagrange: 0
+  reverse: ${data.reverse}
+  use_split_inference: ${data.use_split_inference}
+  flip_equivariance: false
+  batch_size: ${data.batch_size}
+  nce_on_vgg: true
+  eval_on_align: ${data.eval_on_align}
+  use_sliding_inference: ${data.use_sliding_inference}
+  use_multiple_outputs: ${data.use_multiple_outputs}
+  use_misalign_simul: ${data.use_misalign_simul}
+  is_3d: ${data.is_3d}
+  use_autoencoder: false
+  use_resnet: false
+  crop_size: ${data.crop_size}
+  is_registration: false
+  skip_stage1_infer: false
+  norm_ZeroToOne: ${data.norm_ZeroToOne}
+  ran_shift: 10
+  flag_occlusionCTX: false
+  flow_model_path: ${model.netG_A.flow_model_path}
+  use_triple_outputs: false
+  use_25d_style: false

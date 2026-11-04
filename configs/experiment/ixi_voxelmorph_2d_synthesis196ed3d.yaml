@@ -1,0 +1,62 @@
+# @package _global_
+
+defaults:
+  - override /data: IXI_Align.yaml
+  - override /model: voxelmorph_original.yaml
+
+tags: IXI_VoxelMorph2D_RigidT2Moving_SynthT2Fixed_L1
+seed: 42
+train: true
+test: true
+ckpt_path: null
+
+data:
+  name: IXI_RigidT2Moving_SynthT2Fixed
+  # Registration model_step expects (evaluation, moving, fixed).
+  # Aligned T2 is evaluation only; it is not an input or training loss target.
+  data_group_1: T2
+  data_group_2: T2_moved_3mm_RigidReg
+  data_group_3: synth_T2
+  data_group_4: null
+  data_group_5: null
+  data_group_6: null
+  data_group_7: null
+  train_file: IXI_Stage1ForVoxelmorph.h5
+  val_file: IXI_Stage1ForVoxelmorph.h5
+  test_file: IXI_Stage1ForVoxelmorph.h5
+  batch_size: 16
+  is_3d: false
+  reverse: false
+  eval_on_align: true
+  use_misalign_simul: false
+  use_multiple_outputs: false
+  use_triple_outputs: false
+  use_25d_style: false
+  ref_stack_size: 1
+  slice_axis: 2
+  crop_size: null
+  use_sliding_inference: false
+  apply_linear_registration: false
+  apply_non_linear_registration: false
+
+model:
+  name: VoxelMorph2D_RigidT2Moving_SynthT2Fixed_L1
+  netR_A:
+    inshape: [256, 256]
+  params:
+    lambda_l1: 1
+    lambda_l2: 0
+    lambda_grad: 0
+    lambda_mask_l2: 0
+    lambda_smooth: 0.5
+    lambda_lcc: 0
+    lcc_win: 9
+    flag_train_fixed_moving: false
+
+trainer:
+  accelerator: gpu
+  devices: [0]  # pipeline restricts visibility to physical GPU 4
+  strategy: auto
+  precision: 32
+  max_epochs: 100
+  log_every_n_steps: 10
