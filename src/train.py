@@ -30,7 +30,7 @@ torch.set_float32_matmul_precision("high")
 
 from lightning import Callback, LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.loggers import Logger
-from pytorch_lightning.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import ModelCheckpoint
 from omegaconf import DictConfig
 
 pyrootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
@@ -126,7 +126,7 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     if cfg.get("test"):
         log.info("Starting testing!")  # TODO: Test 할때 여기 조정하기.
 
-        if cfg.get("ckpt_path") is not None:
+        if cfg.get("ckpt_path") is not None and not cfg.get("train"):
             ckpt_path = cfg.get("ckpt_path")
         else:
             monitor_checkpoint = next((cb for cb in callbacks if isinstance(cb, ModelCheckpoint) and cb.monitor), None)

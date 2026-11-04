@@ -35,6 +35,7 @@ class VoxelmorphOriginalModule(BaseModule_Registration):
         self.params = params
         self.scheduler = scheduler
 
+        self.criterionL1 = torch.nn.L1Loss()
         self.criterionL2 = torch.nn.MSELoss()
         self.criterionGrad = GradLoss(penalty='l2', loss_mult=2) # Regularize warped image
         self.criterionMaskL2 = MaskMSELoss()
@@ -61,22 +62,28 @@ class VoxelmorphOriginalModule(BaseModule_Registration):
     def backward_R(self, fixed_img, warped_img, deform_field): 
         loss_R = 0.0
 
-        if self.criterionL2:
+        lambda_l1 = getattr(self.params, 'lambda_l1', 0)
+        if lambda_l1 != 0:
+            loss_l1 = self.criterionL1(fixed_img, warped_img) * lambda_l1
+            self.log("L1_Loss", loss_l1.detach(), prog_bar=True)
+            loss_R += loss_l1
+
+        if self.criterionL2 and self.params.lambda_l2 != 0:
             loss_l2 = self.criterionL2(fixed_img, warped_img) * self.params.lambda_l2        
             self.log("L2_Loss", loss_l2.detach(), prog_bar=True)
             loss_R += loss_l2
         
-        if self.criterionGrad:
+        if self.criterionGrad and self.params.lambda_grad != 0:
             loss_grad = self.criterionGrad(warped_img) * self.params.lambda_grad
             self.log("Grad_Loss", loss_grad.detach(), prog_bar=True)
             loss_R += loss_grad 
 
-        if self.criterionMaskL2:
+        if self.criterionMaskL2 and self.params.lambda_mask_l2 != 0:
             loss_mask_l2 = self.criterionMaskL2(fixed_img, warped_img) * self.params.lambda_mask_l2
             self.log("Mask_L2_Loss", loss_mask_l2.detach(), prog_bar=True)
             loss_R += loss_mask_l2
         
-        if self.criterionSmooth:
+        if self.criterionSmooth and self.params.lambda_smooth != 0:
             loss_smooth = self.criterionSmooth(deform_field) * self.params.lambda_smooth
             self.log("Smooth_Loss", loss_smooth.detach(), prog_bar=True)
             loss_R += loss_smooth

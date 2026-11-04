@@ -213,7 +213,10 @@ class BaseModule_Registration(LightningModule):  # single direction
                 self.test_psnr_B.update(evaluation_img, warped_img)
                 self.psnr_values_B.append(self.test_psnr_B.compute().item())
                 self.test_psnr_B.reset()
-                self.test_lpips_B.update(gray2rgb(evaluation_img), gray2rgb(warped_img))
+                self.test_lpips_B.update(
+                    gray2rgb(evaluation_img.clamp(-1, 1)),
+                    gray2rgb(warped_img.clamp(-1, 1)),
+                )
                 evaluation_img = torch.clamp(evaluation_img, -1, 1)
                 warped_img = torch.clamp(warped_img, -1, 1)
                 self.lpips_values_B.append(self.test_lpips_B.compute().item())

@@ -34,6 +34,7 @@ netR_A:
   # init_gain: 0.02
 
 params: # Other params
+  lambda_l1: 0
   lambda_l2: 1
   lambda_grad: 0.01
   lambda_mask_l2: 0

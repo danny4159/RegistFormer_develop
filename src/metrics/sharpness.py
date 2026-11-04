@@ -14,8 +14,8 @@ class SharpnessMetric(Metric):
         # self.score_list = []
 
     def update(self, imgs: torch.Tensor):
-        # Ensure input is a 4D CUDA tensor [batch, channel, height, width]
-        assert imgs.ndim == 4 and imgs.is_cuda, "Input must be a 4D CUDA tensor"
+        # OpenCV below computes on CPU; accept either CPU or CUDA tensors.
+        assert imgs.ndim == 4, "Input must be a 4D tensor"
 
         # Convert images to grayscale by averaging across the color channels
         if imgs.size(1) == 3:
